@@ -31,31 +31,37 @@ import (
 //
 // Split from AdminRoutes so the host-lifecycle surface stays readable, but they
 // mount on the same listener and use the same scoped tokens.
-func (s *Server) ResourceRoutes(mux *http.ServeMux) {
-	mux.Handle("POST /v1/networks", s.admin("networks:write", s.handleCreateNetwork))
-	mux.Handle("GET /v1/networks", s.admin("networks:read", s.handleListNetworks))
+func (s *Server) ResourceRoutes(mux *http.ServeMux) { register(mux, s.resourceRoutes()) }
 
-	mux.Handle("POST /v1/roles", s.admin("roles:write", s.handleCreateRole))
-	mux.Handle("GET /v1/roles", s.admin("roles:read", s.handleListRoles))
-	mux.Handle("GET /v1/roles/{id}", s.admin("roles:read", s.handleGetRole))
-	mux.Handle("PATCH /v1/roles/{id}", s.admin("roles:write", s.handleUpdateRole))
-	mux.Handle("DELETE /v1/roles/{id}", s.admin("roles:write", s.handleDeleteRole))
+func (s *Server) resourceRoutes() []route {
+	a := func(pattern, scope string, h http.HandlerFunc) route {
+		return route{pattern: pattern, surface: surfaceAdmin, scope: scope, h: s.admin(scope, h)}
+	}
+	return []route{
+		a("POST /v1/networks", "networks:write", s.handleCreateNetwork),
+		a("GET /v1/networks", "networks:read", s.handleListNetworks),
 
-	mux.Handle("POST /v1/cas", s.admin("cas:write", s.handleCreateCA))
-	mux.Handle("GET /v1/cas", s.admin("cas:read", s.handleListCAs))
-	mux.Handle("POST /v1/cas/{id}/activate", s.admin("cas:write", s.handleActivateCA))
-	mux.Handle("POST /v1/cas/{id}/retire", s.admin("cas:write", s.handleRetireCA))
+		a("POST /v1/roles", "roles:write", s.handleCreateRole),
+		a("GET /v1/roles", "roles:read", s.handleListRoles),
+		a("GET /v1/roles/{id}", "roles:read", s.handleGetRole),
+		a("PATCH /v1/roles/{id}", "roles:write", s.handleUpdateRole),
+		a("DELETE /v1/roles/{id}", "roles:write", s.handleDeleteRole),
 
-	mux.Handle("POST /v1/tokens", s.admin("tokens:write", s.handleCreateToken))
-	mux.Handle("GET /v1/tokens", s.admin("tokens:read", s.handleListTokens))
-	mux.Handle("DELETE /v1/tokens/{id}", s.admin("tokens:write", s.handleRevokeToken))
+		a("POST /v1/cas", "cas:write", s.handleCreateCA),
+		a("GET /v1/cas", "cas:read", s.handleListCAs),
+		a("POST /v1/cas/{id}/activate", "cas:write", s.handleActivateCA),
+		a("POST /v1/cas/{id}/retire", "cas:write", s.handleRetireCA),
 
-	mux.Handle("GET /v1/audit-logs", s.admin("audit:read", s.handleListAudit))
+		a("POST /v1/tokens", "tokens:write", s.handleCreateToken),
+		a("GET /v1/tokens", "tokens:read", s.handleListTokens),
+		a("DELETE /v1/tokens/{id}", "tokens:write", s.handleRevokeToken),
 
-	// No scope. Describing the caller to itself reveals nothing the caller does
-	// not already hold, and gating it would make the one request a credential
-	// with unknown scopes can usefully make the one it might be refused.
-	mux.Handle("GET /v1/whoami", s.admin("", s.handleWhoAmI))
+		a("GET /v1/audit-logs", "audit:read", s.handleListAudit),
+
+		// No scope, and the only route allowed one. routes.go documents why,
+		// and routes_test.go refuses any other scopeless admin route.
+		a("GET /v1/whoami", "", s.handleWhoAmI),
+	}
 }
 
 // handleWhoAmI reports which credential is being used, and never its value.
@@ -283,36 +289,6 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, roleResponse(role))
 }
 
-// roleUpdateResponse is the edited role plus what the edit is going to cost.
-//
-// The extra fields exist because a role edit has two wildly different prices
-// depending on which field was touched, and a response that looked identical
-// either way would let an operator believe a policy change had landed when it
-// had not. See handleUpdateRole.
-type roleUpdateResponse struct {
-	wire.RoleResponse
-
-	// Changed is false when the request restated what was already stored. The
-	// role is returned unmodified and no epoch was bumped.
-	Changed bool `json:"changed"`
-
-	// GroupsChanged marks the edit that outlives this request.
-	GroupsChanged bool `json:"groups_changed,omitempty"`
-
-	// HostsAwaitingCertificate is how many hosts are still presenting a
-	// certificate carrying the old groups.
-	HostsAwaitingCertificate int `json:"hosts_awaiting_certificate,omitempty"`
-
-	// CertificatesConvergeBy is when the last of them will have renewed.
-	// Computed from the live certificate rows and the agent's renewal policy,
-	// which is deterministic per host, so it is a deadline rather than a guess.
-	CertificatesConvergeBy string `json:"certificates_converge_by,omitempty"`
-
-	// Detail says in words what the two numbers above mean, for the operator
-	// reading a terminal rather than parsing JSON.
-	Detail string `json:"detail,omitempty"`
-}
-
 // handleUpdateRole edits a role in place.
 //
 // Sibling of handleCreateRole, and runs the same two checks for the same
@@ -448,7 +424,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := roleUpdateResponse{
+	resp := wire.RoleUpdateResponse{
 		RoleResponse: roleResponse(&change.After),
 		Changed:      change.Changed,
 	}
@@ -566,17 +542,20 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrRoleInUse) {
-			names := make([]string, 0, len(carriers))
+			hosts := make([]wire.RoleHost, 0, len(carriers))
 			for _, h := range carriers {
-				names = append(names, h.Name)
+				hosts = append(hosts, wire.RoleHost{ID: h.ID.String(), Name: h.Name})
 			}
 			// 409, not 400: the request is well-formed, the system is not in a
 			// state that permits it. The carriers are in the body because
-			// "still in use" without naming who is not actionable.
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error": "role is still assigned to hosts; reassign them first. " +
+			// "still in use" without naming who is not actionable — which is
+			// also why this is a declared type rather than an inline map. It is
+			// the useful half of the answer, and a client cannot decode a shape
+			// nothing declares.
+			writeJSON(w, http.StatusConflict, wire.RoleInUseError{
+				Error: "role is still assigned to hosts; reassign them first. " +
 					"Deleting it would change the firewall on every one of them at once",
-				"hosts": names,
+				Hosts: hosts,
 			})
 			return
 		}
@@ -813,10 +792,10 @@ func (s *Server) handleActivateCA(w http.ResponseWriter, r *http.Request) {
 			// 409, not 400: the request is well-formed, the system is not ready.
 			// The lagging hosts are in the body because "not converged" without
 			// naming who is not actionable.
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error": "hosts have not yet applied this CA; promoting now would cut them off. " +
+			writeJSON(w, http.StatusConflict, wire.LaggingHostsError{
+				Error: "hosts have not yet applied this CA; promoting now would cut them off. " +
 					"Retry once they converge, or resend with acknowledge_cutoff to proceed anyway",
-				"lagging": lagging,
+				Lagging: lagging,
 			})
 			return
 		}

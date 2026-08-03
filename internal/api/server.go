@@ -116,40 +116,62 @@ func (s *Server) Handler() http.Handler {
 	return Observe(s.log, mux)
 }
 
-func (s *Server) EnrollRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /enroll/v1/enroll", s.limitEnroll(s.handleEnroll))
+func (s *Server) EnrollRoutes(mux *http.ServeMux) { register(mux, s.enrollRoutes()) }
+func (s *Server) AgentRoutes(mux *http.ServeMux)  { register(mux, s.agentRoutes()) }
+func (s *Server) AdminRoutes(mux *http.ServeMux)  { register(mux, s.adminRoutes()) }
 
-	// Recovery lives on the public surface for the same reason enrollment does:
-	// a host whose certificate expired cannot reach the overlay, which is the
-	// only place the agent API listens.
-	mux.HandleFunc("GET /enroll/v1/recover/challenge", s.limitEnroll(s.handleRecoveryChallenge))
-	mux.HandleFunc("POST /enroll/v1/recover", s.limitEnroll(s.handleRecover))
+func (s *Server) enrollRoutes() []route {
+	e := func(pattern string, h http.HandlerFunc) route {
+		// Every enroll route is rate limited. It is the only public,
+		// unauthenticated, cryptographically expensive surface, so the limit is
+		// applied here rather than per-route: a new route added without it
+		// would be the gap, and this shape makes forgetting impossible.
+		return route{pattern: pattern, surface: surfaceEnroll, h: s.limitEnroll(h)}
+	}
+	return []route{
+		e("POST /enroll/v1/enroll", s.handleEnroll),
+		// Recovery lives on the public surface for the same reason enrollment
+		// does: a host whose certificate expired cannot reach the overlay,
+		// which is the only place the agent API listens.
+		e("GET /enroll/v1/recover/challenge", s.handleRecoveryChallenge),
+		e("POST /enroll/v1/recover", s.handleRecover),
+	}
 }
 
-func (s *Server) AgentRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /agent/v1/state", s.handleAgentState)
-	mux.HandleFunc("GET /agent/v1/watch", s.handleAgentWatch)
-	mux.HandleFunc("POST /agent/v1/report", s.handleAgentReport)
-	mux.HandleFunc("POST /agent/v1/renew", s.handleAgentRenew)
+func (s *Server) agentRoutes() []route {
+	a := func(pattern string, h http.HandlerFunc) route {
+		return route{pattern: pattern, surface: surfaceAgent, h: h}
+	}
+	return []route{
+		a("GET /agent/v1/state", s.handleAgentState),
+		a("GET /agent/v1/watch", s.handleAgentWatch),
+		a("POST /agent/v1/report", s.handleAgentReport),
+		a("POST /agent/v1/renew", s.handleAgentRenew),
+	}
 }
 
-func (s *Server) AdminRoutes(mux *http.ServeMux) {
-	mux.Handle("POST /v1/hosts", s.admin("hosts:create", s.handleCreateHost))
-	mux.Handle("GET /v1/hosts", s.admin("hosts:read", s.handleListHosts))
-	mux.Handle("GET /v1/hosts/{id}", s.admin("hosts:read", s.handleGetHost))
-	// hosts:read, not a scope of its own: the response carries no PEM and no key
-	// material, only what a host's own listing already implies about it.
-	mux.Handle("GET /v1/hosts/{id}/certificates", s.admin("hosts:read", s.handleHostCertificates))
-	mux.Handle("PATCH /v1/hosts/{id}", s.admin("hosts:write", s.handleUpdateHost))
-	// Deletion revokes, so it takes hosts:block rather than hosts:write. A token
-	// trusted to edit a host but not to cut one off must not reach the stronger
-	// outcome through a different verb.
-	mux.Handle("DELETE /v1/hosts/{id}", s.admin("hosts:block", s.handleDeleteHost))
-	mux.Handle("POST /v1/hosts/{id}/enrollment-code", s.admin("hosts:enroll", s.handleCreateEnrollCode))
-	mux.Handle("POST /v1/hosts/{id}/block", s.admin("hosts:block", s.handleBlockHost))
-	mux.Handle("POST /v1/hosts/{id}/unblock", s.admin("hosts:block", s.handleUnblockHost))
-	mux.Handle("GET /v1/networks/{id}/convergence", s.admin("networks:read", s.handleConvergence))
-	s.ResourceRoutes(mux)
+func (s *Server) adminRoutes() []route {
+	a := func(pattern, scope string, h http.HandlerFunc) route {
+		return route{pattern: pattern, surface: surfaceAdmin, scope: scope, h: s.admin(scope, h)}
+	}
+	out := []route{
+		a("POST /v1/hosts", "hosts:create", s.handleCreateHost),
+		a("GET /v1/hosts", "hosts:read", s.handleListHosts),
+		a("GET /v1/hosts/{id}", "hosts:read", s.handleGetHost),
+		// hosts:read, not a scope of its own: the response carries no PEM and
+		// no key material, only what a host's own listing already implies.
+		a("GET /v1/hosts/{id}/certificates", "hosts:read", s.handleHostCertificates),
+		a("PATCH /v1/hosts/{id}", "hosts:write", s.handleUpdateHost),
+		// Deletion revokes, so it takes hosts:block rather than hosts:write. A
+		// token trusted to edit a host but not to cut one off must not reach
+		// the stronger outcome through a different verb.
+		a("DELETE /v1/hosts/{id}", "hosts:block", s.handleDeleteHost),
+		a("POST /v1/hosts/{id}/enrollment-code", "hosts:enroll", s.handleCreateEnrollCode),
+		a("POST /v1/hosts/{id}/block", "hosts:block", s.handleBlockHost),
+		a("POST /v1/hosts/{id}/unblock", "hosts:block", s.handleUnblockHost),
+		a("GET /v1/networks/{id}/convergence", "networks:read", s.handleConvergence),
+	}
+	return append(out, s.resourceRoutes()...)
 }
 
 //------------------------------------------------------------------------------

@@ -9,6 +9,16 @@ help:
 build: ## Build all packages
 	go build ./...
 
+# The admin CLI, built on its own because it is the one binary that ships to
+# somewhere other than the control plane host. It links neither internal/mesh
+# nor the database driver, which is what keeps `go install ./cmd/orbit` from
+# pulling in nebula and gvisor.
+.PHONY: orbit
+orbit: ## Build the admin CLI into ./bin/orbit
+	@mkdir -p bin
+	go build -o bin/orbit ./cmd/orbit
+	@echo "bin/orbit — set ORBIT_URL and ORBIT_TOKEN, then run: bin/orbit whoami"
+
 .PHONY: test
 test: ## Run all tests (store tests skip if Postgres is unreachable)
 	go test ./... -count=1

@@ -1,0 +1,83 @@
+package api
+
+import "net/http"
+
+// The route table.
+//
+// Registration used to be thirty-three mux.Handle calls spread across two
+// files, which works and is perfectly readable — but it leaves one class of
+// mistake completely unguarded. Orbit runs three surfaces with three different
+// authentication models on three separately-bound listeners, and with a plain
+// ServeMux a route registered against the wrong mux silently inherits the wrong
+// middleware. An admin route mounted on the agent listener is authenticated by
+// source address; an agent route mounted on the public one is not authenticated
+// at all. Nothing about either mistake fails to compile, and nothing about
+// either looks wrong in a diff.
+//
+// Making the routes data means a test can read them. That is the whole purpose:
+// see routes_test.go, which asserts every property this comment claims.
+//
+// e2e/overlay_test.go already checks surface isolation by issuing live HTTP
+// requests against a running server, and it should stay — it proves the
+// listeners really are separate, which a table cannot. This proves the
+// registration is right without needing a server, a database, or a nebula node,
+// so it fails in milliseconds during development rather than at the end of a
+// 25-second e2e run.
+
+// surface is which listener a route belongs on. The three have different threat
+// models (see the package doc) and must never be mixed.
+type surface string
+
+const (
+	surfaceEnroll surface = "enroll" // public, unauthenticated but credential-gated
+	surfaceAgent  surface = "agent"  // overlay only, identity from source address
+	surfaceAdmin  surface = "admin"  // scoped bearer tokens
+)
+
+// route is one endpoint.
+type route struct {
+	// pattern is the ServeMux pattern, method included: "GET /v1/hosts/{id}".
+	pattern string
+	surface surface
+
+	// scope is the token scope an admin route requires. Empty means
+	// authenticated-only, which is a deliberate choice on exactly one route and
+	// a bug anywhere else — routes_test.go enforces that.
+	//
+	// Meaningless on the enroll and agent surfaces, which do not use tokens.
+	scope string
+
+	h http.Handler
+}
+
+// knownScopes is every scope the API recognises.
+//
+// Listed rather than inferred so a typo is a test failure. "hosts:raed" would
+// otherwise register cleanly, be granted to nobody, and turn its route into one
+// that no token can reach — a 403 with no explanation and nothing to grep for.
+var knownScopes = map[string]bool{
+	"hosts:create": true, "hosts:read": true, "hosts:write": true,
+	"hosts:block": true, "hosts:enroll": true,
+	"networks:read": true, "networks:write": true,
+	"roles:read": true, "roles:write": true,
+	"cas:read": true, "cas:write": true,
+	"tokens:read": true, "tokens:write": true,
+	"audit:read": true,
+}
+
+// scopelessAdminRoutes are the admin routes that require authentication but no
+// scope. Each needs a reason, and there is currently exactly one.
+//
+// /v1/whoami describes the caller to itself, which reveals nothing the caller
+// does not already hold. Gating it would make the one request a credential with
+// unknown scopes can usefully make the one it might be refused — and the
+// break-glass check in docs/deployment.md 5 depends on exactly that.
+var scopelessAdminRoutes = map[string]string{
+	"GET /v1/whoami": "describes the caller to itself; reveals nothing it does not hold",
+}
+
+func register(mux *http.ServeMux, routes []route) {
+	for _, r := range routes {
+		mux.Handle(r.pattern, r.h)
+	}
+}

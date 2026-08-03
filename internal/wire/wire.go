@@ -404,6 +404,66 @@ type UpdateRoleRequest struct {
 	Firewall *json.RawMessage `json:"firewall,omitempty"`
 }
 
+// RoleUpdateResponse is the body of PATCH /v1/roles/{id}.
+//
+// It lives here rather than beside its handler because the CLI decodes it, and
+// a response type known to only one side is the drift wire exists to prevent: a
+// field renamed in the handler would be a silent client regression rather than
+// a build failure.
+//
+// The status code carries information this body does not repeat. 200 means the
+// change is fully in force; 202 means the configuration half is live and the
+// certificate half is not, because groups are inside the signed certificate and
+// every carrying host presents the old set until it reissues.
+type RoleUpdateResponse struct {
+	RoleResponse
+
+	// Changed is false when the request restated what was already stored. The
+	// role is returned unmodified and no epoch was bumped, so no agent is woken.
+	Changed bool `json:"changed"`
+
+	// GroupsChanged marks the edit that outlives this request.
+	GroupsChanged bool `json:"groups_changed,omitempty"`
+
+	// HostsAwaitingCertificate is how many hosts still present a certificate
+	// carrying the old groups.
+	HostsAwaitingCertificate int `json:"hosts_awaiting_certificate,omitempty"`
+
+	// CertificatesConvergeBy is when the last of them will have renewed.
+	// Computed from live certificate rows and the agent's renewal policy, which
+	// is deterministic per host — a deadline, not an estimate.
+	CertificatesConvergeBy string `json:"certificates_converge_by,omitempty"`
+
+	// Detail says in words what those two numbers mean, for whoever is reading
+	// a terminal rather than parsing JSON.
+	Detail string `json:"detail,omitempty"`
+}
+
+// LaggingHostsError is the 409 body from POST /v1/cas/{id}/activate.
+//
+// Typed for the same reason as RoleUpdateResponse, and more urgently: the
+// remedy lives in the non-error field. A client that decodes only Error tells
+// an operator "some hosts have not converged" without saying which — which is
+// the entire question.
+type LaggingHostsError struct {
+	Error   string        `json:"error"`
+	Lagging []LaggingHost `json:"lagging,omitempty"`
+}
+
+// RoleInUseError is the 409 body from DELETE /v1/roles/{id}. Same shape, same
+// reasoning: ON DELETE RESTRICT refuses the delete, and the useful part of the
+// answer is the list of hosts that are blocking it.
+type RoleInUseError struct {
+	Error string     `json:"error"`
+	Hosts []RoleHost `json:"hosts,omitempty"`
+}
+
+// RoleHost identifies a host that carries a role.
+type RoleHost struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type RoleResponse struct {
 	ID        string          `json:"id"`
 	NetworkID string          `json:"network_id"`

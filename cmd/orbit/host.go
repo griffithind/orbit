@@ -1,0 +1,752 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/griffithind/orbit/internal/adminclient"
+	"github.com/griffithind/orbit/internal/wire"
+)
+
+const hostVerbs = "ls, show, create, set, code, block, unblock, rm"
+
+func hostCmd(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return subUsage("host",
+			"ls        list the fleet, filtered and paginated",
+			"show      one host, its certificate, and whether it has converged",
+			"create    add a host record",
+			"set       change a host's role, tags, or lighthouse/relay flags",
+			"code      mint a single-use enrollment code",
+			"block     suspend a host (reversible)",
+			"unblock   restore a blocked host",
+			"rm        decommission a host: revoke its certificates and remove it")
+	}
+	switch args[0] {
+	case "ls":
+		return hostLs(ctx, args[1:])
+	case "show":
+		return hostShow(ctx, args[1:])
+	case "create":
+		return hostCreate(ctx, args[1:])
+	case "set":
+		return hostSet(ctx, args[1:])
+	case "code":
+		return hostCode(ctx, args[1:])
+	case "block":
+		return hostBlock(ctx, args[1:], false)
+	case "unblock":
+		return hostBlock(ctx, args[1:], true)
+	case "rm":
+		return hostRm(ctx, args[1:])
+	default:
+		return unknownSub("host", args[0], hostVerbs)
+	}
+}
+
+//------------------------------------------------------------------------------
+// ls
+//------------------------------------------------------------------------------
+
+func hostLs(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host ls", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	var (
+		state  = fs.String("state", "", "created, enrolled, active, or suspended")
+		tag    = fs.String("tag", "", "only hosts carrying this tag")
+		role   = fs.String("role", "", "only hosts carrying this role (name or uuid)")
+		name   = fs.String("name", "", "only hosts whose name contains this substring")
+		behind = fs.Bool("behind", false, "only hosts that have not applied the current epochs")
+		limit  = fs.Int("limit", 0, "page size; the server's default when unset")
+		cursor = fs.String("cursor", "", "next_cursor from a previous page")
+		count  = fs.Bool("count", false, "also ask for the total matching the filter")
+		all    = fs.Bool("all", false, "follow cursors and print every page")
+	)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	// -all and -json are mutually exclusive, and refusing is better than
+	// choosing. -json emits the API response verbatim so that it is
+	// interchangeable with curl; concatenating several envelopes would produce a
+	// stream no curl invocation can produce and no jq filter expects. The
+	// envelope's next_cursor is the supported way to page in a script, which is
+	// why it is in the response rather than in a header.
+	if *all && o.json {
+		return usageErrorf("-all cannot be combined with -json: -json emits one API " +
+			"response verbatim, and several concatenated envelopes are not a response.\n\n" +
+			"Page with -cursor, feeding back .next_cursor from each page.")
+	}
+
+	network, err := o.resolveNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	networkID, err := uuid.Parse(network.ID)
+	if err != nil {
+		return err
+	}
+
+	f := adminclient.HostFilter{
+		NetworkID:    networkID,
+		State:        *state,
+		Tag:          *tag,
+		NameContains: *name,
+		Behind:       *behind,
+		Limit:        *limit,
+		Cursor:       *cursor,
+		Count:        *count,
+	}
+	// The server refuses a role name — "role_id must be a uuid, not a role name"
+	// — because anything else would match no host and read as a role nobody
+	// carries. Resolving it here is the whole reason an operator would rather
+	// type this than curl.
+	if *role != "" {
+		id, err := o.client.ResolveRole(ctx, networkID, *role)
+		if err != nil {
+			return err
+		}
+		f.RoleID = &id
+	}
+
+	res, err := o.client.ListHosts(ctx, f)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	page := res.Value
+	hosts := page.Hosts
+	// -all follows the cursor the server issued rather than guessing at offsets.
+	// The cursor is opaque and is passed back unmodified, which is the only
+	// contract the endpoint offers and the only one that survives a concurrent
+	// insert.
+	for *all && page.NextCursor != "" {
+		f.Cursor = page.NextCursor
+		next, err := o.client.ListHosts(ctx, f)
+		if err != nil {
+			return err
+		}
+		page = next.Value
+		hosts = append(hosts, page.Hosts...)
+	}
+
+	renderHostTable(o.r, network, hosts)
+
+	if page.NextCursor != "" {
+		// stderr, always — even when stdout is a pipe. A truncated listing that
+		// says nothing is the failure wire.HostListResponse exists to prevent,
+		// and suppressing the notice for pipelines would reintroduce it exactly
+		// where nobody is watching.
+		fmt.Fprintf(errOut, "\nmore hosts match; next page:\n  orbit host ls -cursor %s\n", page.NextCursor)
+	}
+	return nil
+}
+
+func renderHostTable(r renderer, network *wire.NetworkResponse, hosts []wire.HostResponse) {
+	t := newTable(r,
+		column{name: "NAME", elastic: true},
+		column{name: "STATE"},
+		column{name: "ADDRESS"},
+		column{name: "ROLE", optional: true},
+		column{name: "CONFIG", right: true},
+		column{name: "LAST SEEN"},
+		column{name: "AGENT", optional: true},
+	)
+
+	behind := 0
+	for _, h := range hosts {
+		cfg := strconv.FormatInt(h.AppliedConfigEpoch, 10)
+		if h.AppliedConfigEpoch < network.ConfigEpoch || h.AppliedBlocklistEpoch < network.BlocklistEpoch {
+			behind++
+			cfg = fmt.Sprintf("%d<%d", h.AppliedConfigEpoch, network.ConfigEpoch)
+		}
+		role := h.RoleName
+		if role == "" {
+			role = "-"
+		}
+		agent := h.AgentVersion
+		if agent == "" {
+			agent = "-"
+		}
+		t.add(h.Name, h.State, strings.Join(h.OverlayAddrs, ","), role, cfg, ago(h.LastSeenAt), agent)
+	}
+
+	if t.empty() {
+		fmt.Fprintln(errOut, "no hosts match")
+		return
+	}
+	t.render(out)
+	t.footer(out, "\n%d host(s), %d behind — network %s at config epoch %d",
+		len(hosts), behind, network.Name, network.ConfigEpoch)
+}
+
+//------------------------------------------------------------------------------
+// show
+//------------------------------------------------------------------------------
+
+// hostShow is the command the CLI exists to earn.
+//
+// Host, current certificate, and convergence on one screen, because "why is this
+// host not renewing" is answered by all three at once and by no one of them
+// alone. The three sources are GET /v1/hosts/{id} (which carries its active
+// certificates), the network's current epochs, and — with -history — the
+// certificate list. Behind curl that is three requests, three JSON blobs, and
+// arithmetic on RFC3339 strings.
+func hostShow(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host show", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	history := fs.Int("history", 0, "also list the N most recent certificates")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: orbit host show <name|uuid>")
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	network, err := o.resolveNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	networkID, err := uuid.Parse(network.ID)
+	if err != nil {
+		return err
+	}
+	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	res, err := o.client.GetHost(ctx, hostID)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		// The host response verbatim, not a document this command assembled from
+		// three. `orbit host show -json` and `curl /v1/hosts/{id}` have to be the
+		// same bytes; the layout below is the value this command adds, and it is
+		// a human's, not a script's.
+		return emitJSON(res.Raw)
+	}
+	h := res.Value
+
+	field := func(k, v string) {
+		if v != "" {
+			fmt.Fprintf(out, "%-12s %s\n", k, v)
+		}
+	}
+
+	fmt.Fprintln(out, o.r.bold(h.Name))
+	field("id", h.ID)
+	field("network", fmt.Sprintf("%s (%s)", network.Name, strings.Join(network.CIDRs, ", ")))
+	field("state", h.State)
+	field("address", strings.Join(h.OverlayAddrs, ", "))
+	if h.RoleName != "" {
+		field("role", fmt.Sprintf("%s (%s)", h.RoleName, h.RoleID))
+	}
+	if len(h.Tags) > 0 {
+		field("tags", strings.Join(h.Tags, ", "))
+	}
+	var flags []string
+	if h.IsLighthouse {
+		flags = append(flags, "lighthouse")
+	}
+	if h.IsRelay {
+		flags = append(flags, "relay")
+	}
+	if len(flags) > 0 {
+		field("roles", strings.Join(flags, ", "))
+	}
+	if len(h.StaticAddrs) > 0 {
+		field("static", strings.Join(h.StaticAddrs, ", "))
+	}
+	// The two versions an operator asks for first when a host has stopped
+	// renewing: an agent too old to know an endpoint, or a nebula that rejects
+	// the certificate version the network moved to.
+	if h.AgentVersion != "" || h.NebulaVersion != "" {
+		field("versions", fmt.Sprintf("agent %s, nebula %s",
+			orDash(h.AgentVersion), orDash(h.NebulaVersion)))
+	}
+	field("created", fmt.Sprintf("%s (%s)", h.CreatedAt.Format(time.RFC3339), ago(&h.CreatedAt)))
+	field("last seen", ago(h.LastSeenAt))
+
+	renderCertificates(o.r, h)
+	renderHostConvergence(o.r, network, h)
+
+	if *history > 0 {
+		hist, err := o.client.HostCertificates(ctx, hostID, adminclient.CertFilter{Limit: *history})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "\n%s\n", o.r.bold("certificate history"))
+		t := newTable(o.r,
+			column{name: "FINGERPRINT", elastic: true},
+			column{name: "STATE"},
+			column{name: "CA"},
+			column{name: "ISSUED"},
+			column{name: "EXPIRES"},
+		)
+		for _, c := range hist.Value.Certificates {
+			t.add(shortFingerprint(c.Fingerprint), c.State, c.CAName,
+				ago(&c.IssuedAt), until(c.NotAfter))
+		}
+		if t.empty() {
+			fmt.Fprintln(out, "  none")
+		} else {
+			t.render(out)
+		}
+	}
+	return nil
+}
+
+func renderCertificates(r renderer, h wire.HostResponse) {
+	fmt.Fprintf(out, "\n%s\n", r.bold("certificate"))
+	if len(h.ActiveCertificates) == 0 {
+		// Two very different causes, and the state field distinguishes them, so
+		// say which one this is rather than leaving a blank section.
+		switch h.State {
+		case "created":
+			fmt.Fprintln(out, "  none — this host has not enrolled yet; mint a code with `orbit host code`")
+		case "suspended":
+			fmt.Fprintln(out, "  none — this host is blocked and its certificates were revoked")
+		default:
+			fmt.Fprintln(out, "  none — no active certificate; the host may need `orbit-agent recover`")
+		}
+		return
+	}
+
+	now := time.Now()
+	for _, c := range h.ActiveCertificates {
+		fmt.Fprintf(out, "  %-13s %s\n", "fingerprint", c.Fingerprint)
+		// The CA id in full, not shortened. It is a uuid, and half a uuid is not
+		// a handle anything accepts — unlike a fingerprint prefix, which
+		// `orbit ca activate` does take.
+		fmt.Fprintf(out, "  %-13s %s (%s)\n", "issued by", c.CAName, c.CAID)
+		fmt.Fprintf(out, "  %-13s %d\n", "version", c.CertVersion)
+		fmt.Fprintf(out, "  %-13s %s (%s)\n", "issued", c.IssuedAt.Format(time.RFC3339), ago(&c.IssuedAt))
+
+		// RenewAt is the midpoint of the lifetime — when the agent should have
+		// renewed. Past it and still holding this certificate means renewal is
+		// already failing, and that is the whole warning. Saying it in words is
+		// the difference between this command and two timestamps.
+		renew := fmt.Sprintf("  %-13s %s (%s)", "renew at", c.RenewAt.Format(time.RFC3339), until(c.RenewAt))
+		if c.RenewAt.Before(now) {
+			renew += "   OVERDUE — this host should already have renewed"
+		}
+		fmt.Fprintln(out, renew)
+
+		expires := fmt.Sprintf("  %-13s %s (%s)", "expires", c.NotAfter.Format(time.RFC3339), until(c.NotAfter))
+		if c.NotAfter.Before(now) {
+			expires += "   EXPIRED — this host is off the mesh until it recovers"
+		}
+		fmt.Fprintln(out, expires)
+	}
+}
+
+func renderHostConvergence(r renderer, network *wire.NetworkResponse, h wire.HostResponse) {
+	fmt.Fprintf(out, "\n%s\n", r.bold("convergence"))
+	line := func(label string, applied, current int64) {
+		status := "up to date"
+		if applied < current {
+			status = fmt.Sprintf("BEHIND by %d", current-applied)
+		}
+		fmt.Fprintf(out, "  %-13s applied %-8d network %-8d %s\n", label, applied, current, status)
+	}
+	line("config", h.AppliedConfigEpoch, network.ConfigEpoch)
+	line("blocklist", h.AppliedBlocklistEpoch, network.BlocklistEpoch)
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// shortFingerprint keeps a fingerprint recognisable without spending a whole
+// column on it. 16 hex characters is 64 bits, which is not a collision anyone
+// reaches by accident within one network.
+func shortFingerprint(s string) string {
+	if len(s) > 16 {
+		return s[:16]
+	}
+	return s
+}
+
+//------------------------------------------------------------------------------
+// create / set
+//------------------------------------------------------------------------------
+
+func hostCreate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host create", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	var (
+		name       = fs.String("name", "", "host name, unique within the network (required)")
+		addr       = fs.String("addr", "", "overlay address, inside the network's cidr (required)")
+		role       = fs.String("role", "", "role name or uuid")
+		tags       = fs.String("tags", "", "comma separated tags")
+		lighthouse = fs.Bool("lighthouse", false, "act as a lighthouse; requires -static-addrs")
+		relay      = fs.Bool("relay", false, "act as a relay")
+		static     = fs.String("static-addrs", "", "comma separated public host:port entries")
+	)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *name == "" || *addr == "" {
+		return usageErrorf("-name and -addr are required")
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	network, err := o.resolveNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	networkID, err := uuid.Parse(network.ID)
+	if err != nil {
+		return err
+	}
+
+	req := wire.CreateHostRequest{
+		NetworkID:    network.ID,
+		Name:         *name,
+		OverlayAddr:  *addr,
+		Tags:         splitCSV(*tags),
+		IsLighthouse: *lighthouse,
+		IsRelay:      *relay,
+		StaticAddrs:  splitCSV(*static),
+	}
+	if *role != "" {
+		id, err := o.client.ResolveRole(ctx, networkID, *role)
+		if err != nil {
+			return err
+		}
+		req.RoleID = id.String()
+	}
+
+	o.announce(fmt.Sprintf("Creating host %q in network %s", *name, network.Name))
+
+	res, err := o.client.CreateHost(ctx, req)
+	if err != nil {
+		if api, ok := isConflict(err); ok {
+			return fail(exitConflict,
+				"a host named %q already exists in network %s (%s)\n\n"+
+					"Names are unique per network. Inspect it with `orbit host show %s`, "+
+					"or decommission it with `orbit host rm %s` if it is stale.",
+				*name, network.Name, api.Message, *name, *name)
+		}
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	fmt.Fprintf(out, "created %s (%s)\n", res.Value.Name, res.Value.ID)
+	fmt.Fprintf(errOut, "\nNext: mint an enrollment code for it.\n\n  orbit host code %s\n", res.Value.Name)
+	return nil
+}
+
+func hostSet(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host set", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	var (
+		role       = fs.String("role", "", "role name or uuid")
+		tags       = fs.String("tags", "", "comma separated tags, replacing the current set")
+		lighthouse = fs.Bool("lighthouse", false, "act as a lighthouse; requires static addresses")
+		relay      = fs.Bool("relay", false, "act as a relay")
+		static     = fs.String("static-addrs", "", "comma separated public host:port entries")
+	)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: orbit host set <name|uuid> [flags]")
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	// Only fields the operator actually named are sent. wire.UpdateHostRequest
+	// uses pointers precisely so "not supplied" differs from "set to false", and
+	// a CLI that sent every flag's zero value would turn `orbit host set -tags x`
+	// into an accidental un-lighthousing. fs.Visit reports what was on the
+	// command line, which is the only honest source for that.
+	supplied := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
+	if len(supplied) == 0 || onlyGlobals(supplied) {
+		return usageErrorf("nothing to change; set -role, -tags, -lighthouse, -relay, or -static-addrs")
+	}
+
+	network, err := o.resolveNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	networkID, err := uuid.Parse(network.ID)
+	if err != nil {
+		return err
+	}
+	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	var req wire.UpdateHostRequest
+	if supplied["role"] {
+		id, err := o.client.ResolveRole(ctx, networkID, *role)
+		if err != nil {
+			return err
+		}
+		s := id.String()
+		req.RoleID = &s
+	}
+	if supplied["tags"] {
+		t := csvList(*tags)
+		req.Tags = &t
+	}
+	if supplied["lighthouse"] {
+		req.IsLighthouse = lighthouse
+	}
+	if supplied["relay"] {
+		req.IsRelay = relay
+	}
+	if supplied["static-addrs"] {
+		s := csvList(*static)
+		req.StaticAddrs = &s
+	}
+
+	o.announce(fmt.Sprintf("Updating host %q in network %s", fs.Arg(0), network.Name))
+
+	res, err := o.client.UpdateHost(ctx, hostID, req)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+	fmt.Fprintf(out, "updated %s (%s)\n", res.Value.Name, res.Value.ID)
+	return nil
+}
+
+// onlyGlobals reports whether the supplied flags are all connection settings, so
+// `orbit host set -network prod web-01` is refused rather than sent as an empty
+// PATCH the server would answer 400 to.
+func onlyGlobals(supplied map[string]bool) bool {
+	globals := map[string]bool{
+		"url": true, "token-file": true, "network": true,
+		"profile": true, "json": true, "y": true,
+	}
+	for k := range supplied {
+		if !globals[k] {
+			return false
+		}
+	}
+	return true
+}
+
+//------------------------------------------------------------------------------
+// code
+//------------------------------------------------------------------------------
+
+// hostCode mints an enrollment credential.
+//
+// The plaintext goes alone on stdout and every word of prose to stderr — the
+// property `orbitd token create` established and a test there asserts. It is what
+// makes `orbit host code web-01 | op create item` work without the code passing
+// through a shell history or a scrollback buffer.
+func hostCode(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host code", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: orbit host code <name|uuid>")
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	networkID, err := o.networkID(ctx)
+	if err != nil {
+		return err
+	}
+	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	o.announce(fmt.Sprintf("Minting an enrollment code for %q", fs.Arg(0)))
+
+	res, err := o.client.EnrollmentCode(ctx, hostID)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	c := res.Value
+	fmt.Fprintf(errOut, `expires %s (%s)
+enroll  %s
+
+Single use, and shown once. On the host:
+
+  orbit-agent enroll -url %s -code "$ORBIT_ENROLL_CODE"
+
+`, c.ExpiresAt.Format(time.RFC3339), until(c.ExpiresAt), c.EnrollURL, c.EnrollURL)
+
+	fmt.Fprintln(out, c.Code)
+	return nil
+}
+
+//------------------------------------------------------------------------------
+// block / unblock / rm
+//------------------------------------------------------------------------------
+
+func hostBlock(ctx context.Context, args []string, unblock bool) error {
+	verb := "block"
+	if unblock {
+		verb = "unblock"
+	}
+	fs := flag.NewFlagSet("host "+verb, flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: orbit host %s <name|uuid>", verb)
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	networkID, err := o.networkID(ctx)
+	if err != nil {
+		return err
+	}
+	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	// Announced, but not prompted. Blocking is reversible with `orbit host
+	// unblock`, and a prompt on a reversible action trains people to type y
+	// without reading — which is what would make the prompt on `host rm`
+	// worthless.
+	o.announce(fmt.Sprintf("About to %s host %q", verb, fs.Arg(0)))
+
+	var res adminclient.Result[wire.BlockResponse]
+	if unblock {
+		res, err = o.client.UnblockHost(ctx, hostID)
+	} else {
+		res, err = o.client.BlockHost(ctx, hostID)
+	}
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	fmt.Fprintf(out, "%sed %s at blocklist epoch %d\n", verb, fs.Arg(0), res.Value.BlocklistEpoch)
+	if !unblock {
+		fmt.Fprintf(errOut,
+			"\nThe host stays cut off only once the fleet applies that epoch. Watch it:\n\n  orbit converge -wait 5m\n")
+	}
+	return nil
+}
+
+func hostRm(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host rm", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	reason := fs.String("reason", "", "recorded in the audit log")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: orbit host rm <name|uuid>")
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	network, err := o.resolveNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	networkID, err := uuid.Parse(network.ID)
+	if err != nil {
+		return err
+	}
+	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	o.announce(fmt.Sprintf("About to DECOMMISSION host %q in network %s", fs.Arg(0), network.Name))
+	if err := o.confirm(fmt.Sprintf(
+		"This revokes %s's certificates and removes the record, releasing its name and address. It cannot be undone. Continue?",
+		fs.Arg(0))); err != nil {
+		return err
+	}
+
+	res, err := o.client.DeleteHost(ctx, hostID, *reason)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+	fmt.Fprintf(out, "removed %s at blocklist epoch %d\n", fs.Arg(0), res.Value.BlocklistEpoch)
+	fmt.Fprintf(errOut,
+		"\nIts certificates are revoked. They stop being accepted once the fleet applies\nthat epoch:\n\n  orbit converge -wait 5m\n")
+	return nil
+}
+
+// splitCSV matches orbitd's helper of the same name: trimmed, empties dropped.
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// csvList is splitCSV for a value that will be sent through a *[]string field,
+// and it never returns nil.
+//
+// A nil slice behind a non-nil pointer marshals to JSON null, and encoding/json
+// decodes null into a *[]string by leaving the pointer alone — so `-tags ""`
+// would arrive as "not supplied" and clearing a host's tags, or a role's groups,
+// would silently do nothing. An empty slice marshals to [] and means what the
+// operator typed.
+func csvList(s string) []string {
+	if v := splitCSV(s); v != nil {
+		return v
+	}
+	return []string{}
+}
