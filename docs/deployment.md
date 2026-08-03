@@ -38,6 +38,43 @@ stranger can reach is exposed by it beyond enrollment.
 
 ---
 
+## 1a. Ports
+
+| Port | Proto | Open to | Why |
+|---|---|---|---|
+| **4242** | udp | the internet | Nebula. The one hard requirement — hosts cannot find each other without it |
+| **8080** | tcp | the internet | Enrollment and admin. Put TLS in front and use 443 once you have a name |
+| 22 | tcp | your addresses | ssh |
+| 8443 | — | **nothing** | The agent API listens on `orbitd`'s in-process userspace stack. The kernel never sees it, so there is nothing to open and no way to expose it by accident |
+| 9464 | tcp | loopback | Metrics. The output is fleet inventory |
+| 8081 | tcp | loopback | The console. Reach it over `ssh -L` |
+| 5432 | tcp | local | Postgres |
+
+```bash
+firewall-cmd --permanent --add-port=4242/udp
+firewall-cmd --permanent --add-port=8080/tcp
+firewall-cmd --reload
+firewall-cmd --list-services   # confirm ssh survived before you drop the session
+```
+
+Minimal images often ship without firewalld — `dnf -y install firewalld &&
+systemctl enable --now firewalld` first, or use your provider's network firewall,
+which has the advantage of filtering before packets reach a service you forgot
+was listening.
+
+Verify from somewhere else, and check the negative case too:
+
+```bash
+nc -zv  <host> 8080
+nc -zuv <host> 4242
+nc -zv  <host> 5432   # must FAIL
+```
+
+Postgres defaults to `listen_addresses = 'localhost'`, so the last one should
+refuse regardless of the firewall. If it connects, fix that before anything else.
+
+---
+
 ## 2. Postgres
 
 Two roles. The application must not be the one that owns the tables.
@@ -50,6 +87,38 @@ CREATE DATABASE orbit;
 ```bash
 orbitd migrate -dsn "postgres://postgres@localhost/orbit"
 psql -c "ALTER ROLE orbit_app LOGIN PASSWORD '…'"
+```
+
+**On RHEL-family systems** (AlmaLinux, Rocky, RHEL) two defaults will stop you
+here, and both look like something else:
+
+`pg_hba.conf` ships `ident` for TCP connections from localhost, and there is no
+identd running — so the app role's password is rejected no matter how correct it
+is, with `Ident authentication failed`. Switch the two loopback lines:
+
+```bash
+PGHBA=/var/lib/pgsql/data/pg_hba.conf
+sed -i -E '/^host[[:space:]]+all[[:space:]]+all[[:space:]]+(127\.0\.0\.1\/32|::1\/128)[[:space:]]+/ s/ident$/scram-sha-256/' "$PGHBA"
+systemctl reload postgresql
+```
+
+Set the password *after* that, because how it is stored depends on
+`password_encryption` at the time and has to match the method `pg_hba` now
+demands.
+
+And `sudo` resets `PATH` to `secure_path`, which does **not** include
+`/usr/local/bin`. `sudo -u postgres orbitd migrate` fails with
+`orbitd: command not found`; use the full path:
+
+```bash
+sudo -u postgres /usr/local/bin/orbitd migrate -dsn "postgres:///orbit?host=/var/run/postgresql"
+```
+
+Verify before going further — this exercises the role, the password, the `pg_hba`
+method, and your DSN in one shot:
+
+```bash
+psql "$ORBIT_DSN" -c '\dt orbit.*' | head
 ```
 
 `orbit_app` holds no `CREATE` and cannot `UPDATE` or `DELETE` the audit log. Run
@@ -82,6 +151,25 @@ because an unencrypted key is a failure nothing else surfaces. Everything works.
 
 For an existing plaintext key: `orbitd ca encrypt -key /var/lib/orbit/ca.key`.
 
+**Run `bootstrap` as root, not as the service account.** The passphrase file is
+`0400 root` inside a `0700 root` directory, so a `sudo -u orbit` bootstrap fails
+with `permission denied` before it does anything. Root can read it, and the
+service account never needs to — at runtime systemd decrypts the credential into
+`$CREDENTIALS_DIRECTORY` owned by the service. Hand the key over afterwards:
+
+```bash
+chown orbit:orbit /var/lib/orbit/ca.key
+chmod 0600 /var/lib/orbit/ca.key
+```
+
+`0600` is required rather than tidy: a key with any group or other bit set is
+refused at load, so a `0644` key fails at startup instead of quietly working.
+
+**No TPM?** Cloud VMs frequently have none — Linode does not expose one. Use
+`--with-key=host`. That still keeps the passphrase out of `ps` and out of
+anything that logs the environment, but it will not protect a stolen disk image,
+which is the threat `host+tpm2` exists for. Know which one you have.
+
 Permissions are enforced, not suggested: a key with any group or other bit set
 is refused at load.
 
@@ -110,10 +198,14 @@ orbitd bootstrap -dsn "$ORBIT_DSN" \
 orbitd serve -mesh "$ORBIT_NETWORK=10.42.0.1" \
     -lighthouse 203.0.113.10:4242
 
-# 3. Mint the break-glass token now, while everything works. See section 5.
+# 3. Hand the key to the account that will load it, then drop the plaintext.
+chown orbit:orbit /var/lib/orbit/ca.key && chmod 0600 /var/lib/orbit/ca.key
+shred -u /etc/orbit/ca-pass.plain
+
+# 4. Mint the break-glass token now, while everything works. See section 5.
 orbitd token create -name break-glass -scopes '*'
 
-# 4. Every host from here is the same two commands.
+# 5. Every host from here is the same two commands.
 orbit host create -name web-01 -addr 10.42.0.7 -role web && orbit host code web-01
 orbit agent enroll -url https://orbit.example.com -code orb_1_…
 ```
@@ -124,6 +216,13 @@ truth, exactly as it is for every other host. That is why there is no
 `-lighthouse=true`: a public address cannot be discovered from behind NAT, so
 the operator states it once, and a lighthouse nobody can reach is worse than
 none because every host keeps dialling it.
+
+A control plane that is its own lighthouse needs a **fixed** UDP port —
+`-nebula-port`, which defaults to 4242 and is what the `static_addrs` on its host
+record advertise. Nebula refuses `am_lighthouse` with no port rather than
+starting into a state where every host is told to reach it somewhere it is not
+listening, and Orbit checks the same thing first so the error names the flag and
+the host record rather than a nebula config field.
 
 Roles thereafter change through the API and take effect without a restart:
 
@@ -508,9 +607,22 @@ Measured, in `e2e/scale_test.go`:
   `-max-watchers` (5000/network default). Over the cap, agents fall back to
   polling rather than being refused.
 
-A 1 vCPU / 1 GB VM comfortably runs the control plane, Postgres, and a
-lighthouse for a few hundred hosts. The lighthouse's bandwidth is what to watch
-if hosts cannot punch and fall back to relaying through it.
+**Baseline memory is the number that matters, and the scale test does not
+measure it.** Those figures are MARGINAL costs — what one more network or one
+more watcher adds. The floor underneath them is nebula's userspace network
+stack, and on a real deployment `orbitd` peaked at **2 GB** during startup.
+
+So: **2 vCPU / 4 GB is the smallest sensible control plane**, with Postgres
+sharing it. A 1 GB VM will not start. Two vCPUs rather than one because gvisor's
+packet processing, Postgres, and Go's collector contending for a single core
+produce latency spikes that read as "push is down" when nothing is wrong.
+
+Steady-state memory is not yet characterised — the deployment that produced the
+2 GB figure was crash-looping on a bug, so that is a startup peak and may settle.
+Watch it on your own fleet rather than trusting this paragraph.
+
+The lighthouse's bandwidth is what to watch if hosts cannot punch and fall back
+to relaying through it.
 
 ---
 

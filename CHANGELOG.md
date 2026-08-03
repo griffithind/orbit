@@ -49,6 +49,27 @@ bug above was invisible behind this one for an entire afternoon.
 nothing — the process is going away and Postgres reaps the backends when the
 sockets close. Never returning costs the error message.
 
+### Deployment docs, corrected against a real host
+
+The guide had never been followed on a fresh machine. Doing that turned up four
+things it got wrong and one it stated backwards:
+
+- **`sudo` drops `/usr/local/bin`.** RHEL-family `secure_path` excludes it, so
+  every `sudo -u postgres orbitd …` in the guide failed with `command not found`.
+- **`pg_hba.conf` uses `ident` for localhost TCP**, with no identd running, so
+  the app role could not authenticate no matter what its password was.
+- **Minimal images have no `firewall-cmd`**, and the guide had no firewall
+  section at all. There is now a port table, including the one port that needs
+  nothing opened because it lives on the userspace stack.
+- **`bootstrap` cannot run as the service account** — the CA passphrase is
+  `0400 root` in a `0700 root` directory. Run it as root and hand the key over
+  afterwards.
+- **Sizing said a 1 GB VM was comfortable.** It will not start. The numbers in
+  that section are marginal costs per network and per watcher; nothing had ever
+  measured the baseline, which is Nebula's userspace network stack, observed
+  peaking at 2 GB. The section now says 2 vCPU / 4 GB and marks steady-state
+  memory as uncharacterised rather than implying it is known.
+
 ### Guarding the shape of the bug rather than the instance
 
 `mesh.Config` is built from a struct literal in one place and completed in
