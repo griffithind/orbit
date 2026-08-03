@@ -43,6 +43,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -73,6 +74,12 @@ func addDirFlags(fs *flag.FlagSet) *dirFlags {
 	}
 }
 
+// explicit reports whether the caller named a single network, which means "run
+// exactly this one" rather than "run everything joined on this host".
+func (d *dirFlags) explicit() bool {
+	return *d.dir != "" || *d.network != ""
+}
+
 func (d *dirFlags) layout() (agent.Layout, error) {
 	mode, err := agent.ParseConfigMode(*d.mode)
 	if err != nil {
@@ -97,7 +104,7 @@ func (d *dirFlags) layout() (agent.Layout, error) {
 	return agent.LayoutFor(filepath.Clean(*d.dir), mode), nil
 }
 
-const agentVerbs = "install, enroll, run, recover"
+const agentVerbs = "install, uninstall, enroll, run, recover"
 
 func agentCmd(_ context.Context, args []string) error {
 	if len(args) == 0 {
@@ -106,6 +113,8 @@ func agentCmd(_ context.Context, args []string) error {
 	switch args[0] {
 	case "install":
 		return installCmd(args[1:])
+	case "uninstall":
+		return uninstallCmd(args[1:])
 	case "enroll":
 		return enrollCmd(args[1:])
 	case "run":
@@ -122,18 +131,23 @@ func agentCmd(_ context.Context, args []string) error {
 func agentUsage() error {
 	fmt.Fprint(errOut, `orbit agent <command> [flags]
 
-  install  enroll and set this host up as a service, in one step
-  enroll   join a network using an enrollment code
-  run      poll for updates and apply them
-  recover  re-obtain a certificate after this host's expired while offline
+  install    enroll into a network and set this host up as a service
+  uninstall  leave a network and remove its local state
+  enroll     join a network using an enrollment code
+  run        serve every joined network: poll, apply, renew
+  recover    re-obtain a certificate after this host's expired while offline
 
-Every command manages exactly ONE network and needs -dir (or -network, which is
-shorthand for `+agent.DefaultRoot+`/<slug>). A host on two networks runs two
-agents over two directories.
+A host can join SEVERAL networks, including ones run by different control
+planes that have never heard of each other. Each keeps its own directory under
+`+agent.DefaultRoot+`, its own certificate, and its own
+nebula instance — two overlays cannot share a UDP port or a tun device — but
+they are served by one process under one service.
 
-These take no admin token and no -url beyond the control plane's public
-enrollment endpoint. They are what runs ON a managed host; every other orbit
-command is what an operator runs about one.
+So `+"`run`"+` takes no -dir: it runs everything joined under -root. The other
+commands act on one network and take -network (or -dir).
+
+None of these need an admin token. They are what runs ON a managed host; every
+other orbit command is what an operator runs about one.
 
 Run "orbit agent <command> -h" for flags.
 `)
@@ -257,6 +271,7 @@ func runCmd(args []string) error {
 		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
 		reuseKey  = fs.Bool("reuse-key", false, "keep the existing private key across renewals (for hardware-backed keys)")
 		once      = fs.Bool("once", false, "run one iteration and exit")
+		root      = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -265,55 +280,123 @@ func runCmd(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	layout, err := df.layout()
-	if err != nil {
-		return err
-	}
-	st, err := agent.ReadState(layout.Dir)
-	if err != nil {
-		return fmt.Errorf("read agent state (has this host enrolled?): %w", err)
-	}
 	c, err := parseCurve(*curve)
 	if err != nil {
 		return err
 	}
 
-	// Nebula runs HERE. One engine serves as both the reloader and the
-	// supervisor, so the apply sequence, the revert guard, and verification are
-	// unchanged from when it drove a separate process — they were already
-	// written against those two interfaces.
+	// Every joined network, in one process.
 	//
-	// It also removes the failure the old -restart flag existed to warn about:
-	// there is no configuration to forget, an address change is always
-	// applicable, and "is nebula running" always has an exact answer.
-	engine := &agent.Embedded{ConfigArg: layout.NebulaConfigArg(), Log: log}
-	defer func() { _ = engine.Close() }()
+	// A host can belong to several networks, possibly run by different control
+	// planes that have never heard of each other. Each keeps its own directory,
+	// its own certificate, and its own nebula instance — two overlays cannot
+	// share a UDP port or a tun device, so the instances are irreducible — but
+	// they no longer need a process and a unit each.
+	dirs, err := networksToRun(df, *root)
+	if err != nil {
+		return err
+	}
+	if len(dirs) == 0 {
+		return fmt.Errorf("no joined networks under %s: enroll one with `orbit agent install`", *root)
+	}
 
+	var wg sync.WaitGroup
+	started := 0
+	for _, dir := range dirs {
+		nl, err := newNetworkLoop(ctx, dir, c, *verifyURL, *reuseKey, log)
+		if err != nil {
+			// One network failing must not stop the others. A host on three
+			// networks losing all three because one directory is unreadable is
+			// the failure this whole layout exists to prevent.
+			log.Error("skipping network", "dir", dir, "error", err)
+			continue
+		}
+		started++
+
+		wg.Add(1)
+		go func(nl *networkLoop) {
+			defer wg.Done()
+			defer func() { _ = nl.engine.Close() }()
+			nl.run(ctx, *interval, *once)
+		}(nl)
+	}
+	if started == 0 {
+		return fmt.Errorf("none of the %d network(s) under %s could be started", len(dirs), *root)
+	}
+	log.Info("agent running", "networks", started)
+
+	wg.Wait()
+	return nil
+}
+
+// networksToRun resolves which networks this process serves.
+//
+// An explicit -dir or -network means exactly that one, which is what a test, a
+// container, or a host with an unconventional layout needs. Otherwise every
+// subdirectory of the root that holds agent state is a joined network — the
+// directory IS the enrolment record, so discovering them is reading it rather
+// than keeping a second list that can disagree.
+func networksToRun(df *dirFlags, root string) ([]string, error) {
+	if df.explicit() {
+		layout, err := df.layout()
+		if err != nil {
+			return nil, err
+		}
+		return []string{layout.Dir}, nil
+	}
+
+	slugs, err := agent.EnabledInstances(root, "")
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", root, err)
+	}
+	dirs := make([]string, 0, len(slugs))
+	for _, s := range slugs {
+		dirs = append(dirs, filepath.Join(root, s))
+	}
+	return dirs, nil
+}
+
+// networkLoop is one network's worth of agent: its own nebula, its own poll
+// loop, its own control plane.
+type networkLoop struct {
+	loop   *agent.Loop
+	engine *agent.Embedded
+	log    *slog.Logger
+}
+
+func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL string, reuseKey bool, log *slog.Logger) (*networkLoop, error) {
+	layout := agent.DefaultLayout(dir)
+	st, err := agent.ReadState(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read agent state (has this host enrolled?): %w", err)
+	}
+	nlog := log.With("network", layout.Network)
+
+	engine := &agent.Embedded{ConfigArg: layout.NebulaConfigArg(), Log: nlog}
 	applier := &agent.Applier{
 		Layout:   layout,
 		Reloader: engine,
 		// The linked copy IS the copy that will run it, so validating in
-		// process is exact rather than a guess about the host's binary version.
+		// process is exact rather than a guess about a host binary's version.
 		DisableValidation: true,
-		Log:               log,
+		Log:               nlog,
 	}
 	applier.Supervisor = engine
 
-	if err := engine.Start(ctx); err != nil {
-		// Not fatal. The agent's job from here is to fetch a generation that
-		// works and apply it, and refusing to run because the CURRENT
-		// configuration is bad is how a host stays broken: the fix is on the
-		// control plane, and reaching it is what this loop does.
-		log.Error("nebula did not start on the existing configuration; "+
-			"continuing so a new generation can replace it", "error", err)
-	}
-	if *verifyURL != "" {
-		applier.Verifier = agent.NewReachabilityVerifier(*verifyURL)
+	if verifyURL != "" {
+		applier.Verifier = agent.NewReachabilityVerifier(verifyURL)
 	} else {
-		// Worth saying out loud: without verification the rollback path never
-		// runs, so a generation that breaks connectivity stays installed.
-		log.Warn("post-apply verification disabled: set -verify-url to an overlay " +
+		nlog.Warn("post-apply verification disabled: set -verify-url to an overlay " +
 			"address so a broken generation is rolled back automatically")
+	}
+
+	if err := engine.Start(ctx); err != nil {
+		// Not fatal. The agent's job is to fetch a generation that works and
+		// apply it, and refusing to run because the CURRENT configuration is
+		// bad is how a host stays broken: the fix is on the control plane, and
+		// reaching it is what the loop does.
+		nlog.Error("nebula did not start on the existing configuration; "+
+			"continuing so a new generation can replace it", "error", err)
 	}
 
 	loop := &agent.Loop{
@@ -322,49 +405,50 @@ func runCmd(args []string) error {
 		Policy:   agent.DefaultRenewalPolicy(),
 		Layout:   layout,
 		Curve:    c,
-		ReuseKey: *reuseKey,
+		ReuseKey: reuseKey,
 		State:    st,
-		Log:      log,
+		Log:      nlog,
 	}
 
 	if nb, na, err := loop.CurrentWindow(); err == nil {
-		log.Info("agent started",
+		nlog.Info("network joined",
 			"host", st.HostID,
-			"network", layout.Network,
 			"layout", layout.Describe(),
 			"controlPlane", st.ControlURL(),
 			"replicas", len(st.AgentURLs),
 			"notAfter", na,
-			"renewAt", loop.Policy.RenewAt(nb, na, st.HostID),
-			"reload", applier.Reloader.Describe(),
-			"restart", describeSupervisor(applier.Supervisor))
+			"renewAt", loop.Policy.RenewAt(nb, na, st.HostID))
 	}
 
-	// A host on several networks renders listen.port and tun.dev per network,
-	// and no control plane can see what another one chose. Say so once at
-	// startup rather than leaving it as an intermittent bind failure inside
-	// nebula's logs.
-	agent.WarnInstanceCollisions(layout, log)
+	// Two networks render listen.port and tun.dev independently, and no control
+	// plane can see what another one chose. In one process that collision is a
+	// bind failure inside one engine while the others carry on, so say it once
+	// at startup rather than leaving it in nebula's logs.
+	agent.WarnInstanceCollisions(layout, nlog)
 
-	run := func() {
-		if err := loop.Tick(ctx); err != nil {
-			log.Warn("tick failed, keeping current configuration", "error", err)
+	return &networkLoop{loop: loop, engine: engine, log: nlog}, nil
+}
+
+func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool) {
+	tick := func() {
+		if err := n.loop.Tick(ctx); err != nil {
+			n.log.Warn("tick failed, keeping current configuration", "error", err)
 		}
 	}
 
-	run()
-	if *once {
-		return nil
+	tick()
+	if once {
+		return
 	}
 
-	ticker := time.NewTicker(*interval)
-	defer ticker.Stop()
+	t := time.NewTicker(interval)
+	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			run()
+			return
+		case <-t.C:
+			tick()
 		}
 	}
 }
@@ -518,8 +602,7 @@ func installCmd(args []string) error {
 		return fmt.Errorf("resolve this binary's path: %w", err)
 	}
 
-	slug := filepath.Base(layout.Dir)
-	plan, err := agent.PlanService(slug, layout.Dir, binary, *verifyURL)
+	plan, err := agent.PlanService(agent.DefaultRoot, binary, *verifyURL)
 	if err != nil {
 		return err
 	}
@@ -563,4 +646,105 @@ func installCmd(args []string) error {
   %s
 `, plan.Name, strings.Join(plan.Status, " "))
 	return nil
+}
+
+// uninstallCmd takes this host off the mesh and leaves nothing behind.
+//
+// It is the inverse of install, and it exists for the same reason: the manual
+// version is stop, disable, remove a unit, reload, delete a directory — and the
+// consequence of getting it half right is a host that still holds a valid
+// certificate and is no longer being told about revocations.
+func uninstallCmd(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	var (
+		keepDir = fs.Bool("keep-dir", false, "leave the per-network directory, including the certificate and key")
+		yes     = fs.Bool("y", false, "do not ask")
+	)
+	df := addDirFlags(fs)
+	_ = fs.Parse(args)
+
+	layout, err := df.layout()
+	if err != nil {
+		return err
+	}
+	slug := filepath.Base(layout.Dir)
+
+	binary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve this binary's path: %w", err)
+	}
+	plan, err := agent.PlanService(agent.DefaultRoot, binary, "")
+	if err != nil {
+		return err
+	}
+
+	// Other networks on this host share the template unit, so say so before
+	// touching it rather than after.
+	others, err := agent.EnabledInstances(agent.DefaultRoot, slug)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(errOut, "About to remove %s from this host:\n\n  service   %s\n  directory %s\n",
+		slug, plan.Name, layout.Dir)
+	if *keepDir {
+		fmt.Fprintln(errOut, "  (keeping the directory: -keep-dir)")
+	}
+	if len(others) > 0 {
+		fmt.Fprintf(errOut, "\n  %s also uses the shared unit file, which will be left in place.\n",
+			strings.Join(others, ", "))
+	}
+	fmt.Fprintln(errOut)
+
+	if !*yes {
+		// Irreversible: the private key is generated on this host and exists
+		// nowhere else, so removing the directory means re-enrolling rather
+		// than restarting.
+		if err := confirmUninstall(slug, *keepDir); err != nil {
+			return err
+		}
+	}
+
+	if err := plan.Disable(); err != nil {
+		return err
+	}
+	fmt.Fprintf(errOut, "stopped %s\n", plan.Name)
+
+	removed, err := plan.RemoveUnit(len(others) > 0)
+	if err != nil {
+		return err
+	}
+	if removed {
+		fmt.Fprintf(errOut, "removed %s\n", plan.Path)
+	} else {
+		fmt.Fprintf(errOut, "left %s in place\n", plan.Path)
+	}
+
+	if !*keepDir {
+		if err := os.RemoveAll(layout.Dir); err != nil {
+			return fmt.Errorf("remove %s: %w", layout.Dir, err)
+		}
+		fmt.Fprintf(errOut, "removed %s\n", layout.Dir)
+	}
+
+	fmt.Fprintf(errOut, `
+This host is off the mesh locally. Its RECORD on the control plane is untouched,
+and its certificate stays valid until it expires — a host that is merely gone is
+not a host that has been revoked. To close that:
+
+  orbit host block %s
+`, slug)
+	return nil
+}
+
+func confirmUninstall(slug string, keepDir bool) error {
+	what := "the private key, certificate, and enrollment state"
+	if keepDir {
+		what = "the service"
+	}
+	var o options
+	o.yes = false
+	return o.confirm(fmt.Sprintf(
+		"Remove %s for %q? The key was generated on this host and exists nowhere "+
+			"else, so this host re-enrols rather than restarts.", what, slug))
 }
