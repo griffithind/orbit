@@ -54,6 +54,8 @@ func main() {
 		err = bootstrap(os.Args[2:])
 	case "ca":
 		err = caCmd(os.Args[2:])
+	case "token":
+		err = tokenCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -100,6 +102,8 @@ func usage() {
 
   serve      run the control plane
   bootstrap  create the first network, CA, role, and admin token
+  token      manage API tokens offline (break-glass; see docs/deployment.md)
+  ca         encrypt a CA signing key at rest
 
 Run "orbitd <command> -h" for flags.
 `)

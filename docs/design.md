@@ -473,7 +473,8 @@ three dependencies, not one:
 - **Recurring** — Keycloak's certificate expires every `cert_ttl`. If renewal
   fails and OIDC is the only admin path, fixing Keycloak requires the API that
   Keycloak gates. This one does not resolve; it needs a break-glass token stored
-  outside the mesh and actually tested.
+  outside the mesh and actually tested — `orbitd token create`, and the
+  procedure in deployment.md 5.
 - **Name and trust** — in-mesh FreeIPA means DNS resolution also crosses the
   overlay, and Keycloak's TLS certificate chains to FreeIPA's CA, which nebula's
   CA knows nothing about. Two PKIs in one deployment that never interact and

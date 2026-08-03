@@ -301,6 +301,13 @@ hosts cannot reach the stronger outcome through a different verb.
 could not answer the question an incident actually asks: was it used, and was it
 used after we revoked it.
 
+**Losing every admin token is recoverable.** `POST /v1/tokens` requires a token,
+so there is no API path back in — `orbitd token create` authenticates with the
+database instead, and prints the plaintext on stdout alone so it pipes into a
+secret store without touching shell history. Mint one at bring-up and store it
+off the machine; the procedure is in
+[docs/deployment.md](docs/deployment.md) §5.
+
 ### Failure containment
 
 **The agent reverts a generation that breaks it.** A config can be structurally

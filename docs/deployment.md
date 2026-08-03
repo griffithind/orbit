@@ -110,7 +110,10 @@ orbitd bootstrap -dsn "$ORBIT_DSN" \
 orbitd serve -mesh "$ORBIT_NETWORK=10.42.0.1" \
     -lighthouse 203.0.113.10:4242
 
-# 3. Every host from here is the same two commands.
+# 3. Mint the break-glass token now, while everything works. See section 5.
+orbitd token create -name break-glass -scopes '*'
+
+# 4. Every host from here is the same two commands.
 curl -H "Authorization: Bearer $ORBIT_TOKEN" -XPOST localhost:8080/v1/hosts -d '…'
 orbit-agent enroll -url https://orbit.example.com -code orb_1_…
 ```
@@ -175,7 +178,89 @@ needs a lighthouse, which has to be enrolled by a running `orbitd`.
 
 ---
 
-## 5. Certificate lifetime is your recovery budget
+## 5. The break-glass token
+
+`POST /v1/tokens` requires a token. So the one failure it cannot help with is
+losing every admin credential — a token revoked in error, an expiry nobody
+tracked, or an identity provider that gates the API and is itself unreachable
+(design.md 4.5 has the in-mesh Keycloak version of that). There is no API path
+back in, by construction.
+
+`orbitd token create` is the way back. It authenticates with the database, not
+with the API:
+
+```bash
+orbitd token create -name break-glass -scopes '*' | \
+    op item create --category=password --title='Orbit break-glass' password=-
+```
+
+The plaintext is the only thing on stdout — everything else goes to stderr — so
+it pipes straight into a secret store without ever appearing in shell history or
+in a file.
+
+**This grants nothing the DSN did not already carry.** `orbit_app` holds INSERT
+on `orbit.api_token` because `POST /v1/tokens` needs it, so anyone who can run
+this could already have written the same row by hand with a SHA-256 they
+computed themselves. The command makes the supported path convenient rather than
+opening a new one — and unlike the hand-written row, it leaves an audit entry.
+
+### The procedure
+
+**1. Mint one at bring-up**, immediately after `orbitd bootstrap`, and store the
+plaintext **outside the mesh and off this machine** — a password manager, not
+`/etc/orbit`, not a file on the VM whose failure you are planning for.
+
+**2. Give it `*` and no expiry.** Both are deliberate. A break-glass credential
+that quietly expired is not one, and a narrower scope is a bet about which
+failure you will have.
+
+**3. Rotate the day-to-day tokens, not this one.** Ordinary work should use
+scoped tokens minted through the API; this exists to get you back to the point
+where you can do that.
+
+**4. Test it on a schedule** — quarterly is enough. An untested recovery path is
+a belief, not a capability:
+
+```bash
+curl -H "Authorization: Bearer $BREAK_GLASS" localhost:8080/v1/networks
+```
+
+**5. Rotate it after any real use**, because a credential that has been read
+out of a vault under pressure has been seen by people and possibly pasted into
+places:
+
+```bash
+orbitd token create -name break-glass-2 -scopes '*'      # new one first
+curl -H "Authorization: Bearer $NEW" -XDELETE localhost:8080/v1/tokens/$OLD_ID
+```
+
+Minting the replacement before revoking the old one is the order that cannot
+lock you out halfway.
+
+### Watching for misuse
+
+A `*` token that never expires is a standing risk, and the answer is that it is
+observable rather than hidden. Every use updates `last_used_at`, and creation is
+audited even from the command line:
+
+```bash
+curl -H "Authorization: Bearer $ORBIT_TOKEN" localhost:8080/v1/tokens
+curl -H "Authorization: Bearer $ORBIT_TOKEN" \
+     "localhost:8080/v1/audit-logs?action=token.created"
+```
+
+```
+system  iraklisk  token.created  {"via":"orbitd token create","name":"break-glass"}
+```
+
+An offline-created token is attributed to `system`, not to a user: there is no
+authenticated actor on a command line, and the OS username in `actor_display` is
+a hint about a shell session rather than proof of anything. `last_used_at`
+moving on a break-glass token nobody reports using is worth an immediate look.
+
+---
+
+## 6. Certificate lifetime is your recovery budget
 
 The single most important number, and it is a trade-off with no free side.
 
@@ -203,7 +288,7 @@ the control plane gets revocations in about five seconds.
 
 ---
 
-## 6. Backups
+## 7. Backups
 
 Three things, with very different consequences.
 
@@ -237,7 +322,7 @@ deployment defensible, and `cert_ttl` is exactly how much of it you get.
 
 ---
 
-## 7. Watching it
+## 8. Watching it
 
 Three things carry the load: metrics, the convergence endpoint, and a short list
 of log lines.
@@ -313,7 +398,7 @@ The maintenance sweep logs a summary every 15 minutes when it does anything.
 
 ---
 
-## 8. Sizing
+## 9. Sizing
 
 Measured, in `e2e/scale_test.go`:
 
@@ -331,7 +416,7 @@ if hosts cannot punch and fall back to relaying through it.
 
 ---
 
-## 9. Upgrades
+## 10. Upgrades
 
 ```bash
 systemctl stop orbit-control
@@ -351,7 +436,7 @@ the stock binary rather than embedding it.
 
 ---
 
-## 10. Second replica, when you want one
+## 11. Second replica, when you want one
 
 ```bash
 orbitd serve -mesh "$ORBIT_NETWORK=10.42.0.3" ...   # a different overlay address
