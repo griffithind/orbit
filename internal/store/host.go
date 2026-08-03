@@ -274,10 +274,20 @@ func (t *Tx) InsertCertificate(ctx context.Context, c *Certificate) error {
 	// The WHERE clause keeps this narrow. If the fingerprint somehow belongs to
 	// a different host, no row is returned and the caller sees a conflict, which
 	// is the correct outcome for what would be a genuine collision.
+	// network_id is selected from the host rather than accepted as a parameter.
+	//
+	// The column exists to carry certificate's composite references to host and
+	// ca (see 0001_schema.sql), and a caller-supplied value would be one more
+	// place the two could disagree — the exact failure the composite keys are
+	// there to prevent. Deriving it in the same statement means the row cannot
+	// be written with a network that is not the host's, no matter what any
+	// caller does. A host id that resolves to nothing selects no row and the
+	// insert affects nothing, which surfaces as the ErrNotFound below.
 	err := t.tx.QueryRow(ctx, `
-		INSERT INTO orbit.certificate (host_id, ca_id, fingerprint, pem,
+		INSERT INTO orbit.certificate (network_id, host_id, ca_id, fingerprint, pem,
 		                               cert_version, not_before, not_after, state)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		SELECT h.network_id, $1, $2, $3, $4, $5, $6, $7, $8
+		  FROM orbit.host h WHERE h.id = $1
 		ON CONFLICT (fingerprint) DO UPDATE
 		   SET state = EXCLUDED.state
 		 WHERE orbit.certificate.host_id = EXCLUDED.host_id

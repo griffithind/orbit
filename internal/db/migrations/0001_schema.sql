@@ -11,6 +11,30 @@
 -- Invariants that protect correctness live in the database, not in Go. A
 -- control plane that mints identities cannot rely on application-layer checks
 -- that a concurrent request can race.
+--
+-- THE COMPOSITE-KEY CONVENTION, which follows from that:
+--
+-- Every per-network table carries UNIQUE (network_id, id), and every reference
+-- between two per-network rows is a COMPOSITE foreign key through it. A child
+-- therefore cannot point at a parent in a different network — the database
+-- refuses, rather than Go remembering to check.
+--
+-- The unique key is redundant against the primary key on its own. It exists
+-- solely to be the target of those composite references, and it is cheap.
+--
+-- Getting this wrong is not theoretical. An earlier version of this schema gave
+-- host_address two independent references — network_id to network, host_id to
+-- host — with nothing tying them together. store.ResolveAgentHost, which is the
+-- agent API's entire identity function, filters on host_address.network_id and
+-- joins on host_id without ever checking host.network_id. One mismatched row
+-- would therefore have let an agent connecting on network A's listener
+-- authenticate as a host in network B. Nothing in the application ever wrote
+-- such a row, which is exactly the problem: the guarantee rested on every
+-- present and future caller passing both values from the same struct.
+--
+-- So: if a table has a network_id sitting next to a reference to another
+-- per-network row, that network_id is spent on a composite key. A redundant
+-- column that is not doing that job is a liability, not a denormalization.
 
 CREATE SCHEMA IF NOT EXISTS orbit;
 
@@ -69,6 +93,8 @@ CREATE TABLE orbit.ca (
     created_at  timestamptz NOT NULL DEFAULT now(),
 
     UNIQUE (network_id, fingerprint),
+    -- Composite-reference target: see the convention above.
+    UNIQUE (network_id, id),
     CHECK (not_after > not_before)
 );
 -- Issuance must be unambiguous: exactly one CA can be signing at a time.
@@ -89,14 +115,15 @@ CREATE TABLE orbit.role (
     firewall_rules jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
 
-    UNIQUE (network_id, name)
+    UNIQUE (network_id, name),
+    UNIQUE (network_id, id)
 );
 
 CREATE TABLE orbit.host (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     network_id uuid NOT NULL REFERENCES orbit.network (id) ON DELETE CASCADE,
     name       text NOT NULL,
-    role_id    uuid REFERENCES orbit.role (id) ON DELETE SET NULL,
+    role_id    uuid,
     tags       text[] NOT NULL DEFAULT '{}',
     is_lighthouse bool NOT NULL DEFAULT false,
     is_relay      bool NOT NULL DEFAULT false,
@@ -114,28 +141,66 @@ CREATE TABLE orbit.host (
     agent_version  text,
     created_at     timestamptz NOT NULL DEFAULT now(),
 
-    UNIQUE (network_id, name)
+    UNIQUE (network_id, name),
+    UNIQUE (network_id, id),
+
+    -- A host carries its own network's role or none. Without the network_id
+    -- column in this reference, a host in network A could be assigned network
+    -- B's role, and renderFor would write B's firewall rules into A's host
+    -- config verbatim. Group constraints usually fail closed at issuance
+    -- because the CA rejects unknown groups — but the firewall rules render
+    -- regardless, and if two CAs share group names nothing fails at all.
+    --
+    -- MATCH SIMPLE (the default) is what makes "a host may have no role" still
+    -- work: network_id is NOT NULL, so role_id is the only nullable column in
+    -- the key, and a NULL there skips the constraint entirely. MATCH FULL would
+    -- reject every unassigned host.
+    --
+    -- RESTRICT, not SET NULL. Unassigning on delete would silently change the
+    -- firewall on every host that carried the role — renderFor falls back to
+    -- DefaultFirewall(), which is closed inbound, so it fails safe rather than
+    -- open, but it is still a fleet-wide posture change triggered by one delete
+    -- with nothing to review. Re-role the hosts first.
+    FOREIGN KEY (network_id, role_id)
+        REFERENCES orbit.role (network_id, id) ON DELETE RESTRICT
 );
 CREATE INDEX host_network_state_idx ON orbit.host (network_id, state);
 CREATE INDEX host_convergence_idx
     ON orbit.host (network_id, applied_blocklist_epoch, applied_config_epoch);
+-- Supports the RESTRICT check above, and answers "which hosts carry this role",
+-- which the API needs before a role can be edited or removed.
+CREATE INDEX host_role_idx ON orbit.host (network_id, role_id);
 
 -- Overlay addresses live in their own table so uniqueness within a network is
 -- enforced by the database, and so the agent API's "resolve host by source
 -- overlay address" is a primary key hit.
 CREATE TABLE orbit.host_address (
-    network_id uuid NOT NULL REFERENCES orbit.network (id) ON DELETE CASCADE,
-    host_id    uuid NOT NULL REFERENCES orbit.host (id) ON DELETE CASCADE,
+    network_id uuid NOT NULL,
+    host_id    uuid NOT NULL,
     addr       inet NOT NULL,
 
-    PRIMARY KEY (network_id, addr)
+    PRIMARY KEY (network_id, addr),
+    -- Composite, and load-bearing for authentication: see the note in the
+    -- header. network_id reaches orbit.network transitively through host.
+    FOREIGN KEY (network_id, host_id)
+        REFERENCES orbit.host (network_id, id) ON DELETE CASCADE
 );
 CREATE INDEX host_address_host_idx ON orbit.host_address (host_id);
 
 CREATE TABLE orbit.certificate (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    host_id     uuid NOT NULL REFERENCES orbit.host (id) ON DELETE CASCADE,
-    ca_id       uuid NOT NULL REFERENCES orbit.ca (id),
+    -- Denormalized from the host, and never supplied by a caller:
+    -- InsertCertificate derives it from the host row in the same statement, so
+    -- the two cannot disagree. It exists to carry the composite references
+    -- below — this was the only per-network entity without one, which is
+    -- precisely why it was the one that could not be constrained.
+    network_id  uuid NOT NULL,
+    host_id     uuid NOT NULL,
+    ca_id       uuid NOT NULL,
+    -- Deployment-wide unique, and deliberately the one exception to "nothing
+    -- crosses between networks". A fingerprint is a hash of the certificate: a
+    -- collision across networks would be a hash collision, and the blocklist
+    -- distributes fingerprints, so global uniqueness is the honest constraint.
     fingerprint text NOT NULL UNIQUE,
     pem         text NOT NULL,
     cert_version smallint NOT NULL CHECK (cert_version IN (1, 2)),
@@ -145,7 +210,16 @@ CREATE TABLE orbit.certificate (
                 CHECK (state IN ('pending', 'active', 'superseded', 'revoked')),
     issued_at   timestamptz NOT NULL DEFAULT now(),
 
-    CHECK (not_after > not_before)
+    CHECK (not_after > not_before),
+    FOREIGN KEY (network_id, host_id)
+        REFERENCES orbit.host (network_id, id) ON DELETE CASCADE,
+    -- No delete action: a CA with certificates on record must not be removable,
+    -- and nothing deletes CAs — they are retired, which is a state change. The
+    -- composite form additionally means a certificate cannot be attributed to
+    -- another network's CA, which would make "is anything still using this CA?"
+    -- answer wrongly during a retirement.
+    FOREIGN KEY (network_id, ca_id)
+        REFERENCES orbit.ca (network_id, id)
 );
 -- Scoped by cert_version, not just host: nebula holds a v1 and a v2 certificate
 -- simultaneously during a version migration, and both are legitimately active.
@@ -153,14 +227,17 @@ CREATE UNIQUE INDEX certificate_one_active_per_host_version
     ON orbit.certificate (host_id, cert_version) WHERE state = 'active';
 CREATE INDEX certificate_renewal_idx
     ON orbit.certificate (not_after) WHERE state = 'active';
+CREATE INDEX certificate_ca_idx ON orbit.certificate (ca_id) WHERE state = 'active';
 
 CREATE TABLE orbit.enrollment_credential (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    network_id uuid NOT NULL REFERENCES orbit.network (id) ON DELETE CASCADE,
-    -- NULL for cloud_iid, where the host record is created on redemption
-    -- because autoscaled instances do not exist when the rule is written.
-    host_id    uuid REFERENCES orbit.host (id) ON DELETE CASCADE,
-    method     text NOT NULL CHECK (method IN ('code', 'cloud_iid', 'attestation')),
+    network_id uuid NOT NULL,
+    host_id    uuid NOT NULL,
+    -- One method. Cloud instance identity and TPM attestation were once listed
+    -- here with no handler that could produce either, which made this CHECK a
+    -- claim the schema could not honour. Adding one back is an ALTER and a
+    -- handler — the same work it always was. See docs/enrollment.md 4-5.
+    method     text NOT NULL CHECK (method IN ('code')),
     -- HMAC-SHA256(pepper, code). Keyed rather than plain so a database leak
     -- alone yields no usable codes, and deterministic so redemption is a single
     -- indexed lookup. See internal/enroll/credential.go for why a slow KDF is
@@ -170,27 +247,20 @@ CREATE TABLE orbit.enrollment_credential (
     used_at    timestamptz,
     used_from  inet,
     created_by text,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+
+    FOREIGN KEY (network_id, host_id)
+        REFERENCES orbit.host (network_id, id) ON DELETE CASCADE
 );
 CREATE INDEX enrollment_credential_expiry_idx
     ON orbit.enrollment_credential (expires_at) WHERE used_at IS NULL;
 
--- Enforces single-use for cloud instance identity documents. Uniqueness must be
--- a constraint rather than an application check: an attacker replaying an IID
--- races the check, but cannot race a unique index.
-CREATE TABLE orbit.enrolled_instance (
-    provider    text NOT NULL,
-    instance_id text NOT NULL,
-    network_id  uuid NOT NULL REFERENCES orbit.network (id) ON DELETE CASCADE,
-    host_id     uuid NOT NULL REFERENCES orbit.host (id) ON DELETE CASCADE,
-    enrolled_at timestamptz NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (provider, instance_id)
-);
-
 CREATE TABLE orbit.blocklist_entry (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     network_id  uuid NOT NULL REFERENCES orbit.network (id) ON DELETE CASCADE,
+    -- Not a reference to orbit.certificate, on purpose. Deleting a host cascades
+    -- its certificates away, and the entries revoking them must outlive that or
+    -- a decommission would quietly un-revoke the machine it decommissioned.
     fingerprint text NOT NULL,
     reason      text,
     epoch       bigint NOT NULL,
@@ -212,13 +282,22 @@ CREATE INDEX blocklist_entry_live_idx ON orbit.blocklist_entry (network_id, not_
 -- pruned by the maintenance sweep, so a replica that dies stops being
 -- advertised without anyone deregistering it.
 CREATE TABLE orbit.control_plane (
-    network_id uuid NOT NULL REFERENCES orbit.network (id) ON DELETE CASCADE,
-    host_id    uuid NOT NULL REFERENCES orbit.host (id) ON DELETE CASCADE,
+    network_id uuid NOT NULL,
+    host_id    uuid NOT NULL,
     addr       inet NOT NULL,
     agent_port int  NOT NULL CHECK (agent_port > 0 AND agent_port < 65536),
     last_seen_at timestamptz NOT NULL DEFAULT now(),
 
-    PRIMARY KEY (network_id, addr)
+    PRIMARY KEY (network_id, addr),
+    -- Composite for the usual reason, and this one is easier to get wrong than
+    -- most: RegisterControlPlane takes networkID and hostID as two separate
+    -- parameters rather than deriving both from one struct, so a caller can
+    -- mismatch them without doing anything that looks wrong. The result would
+    -- be an advertised control-plane endpoint in one network pointing at a host
+    -- living in another — and since two networks may share a prefix, that
+    -- address may well resolve to a real but unrelated machine.
+    FOREIGN KEY (network_id, host_id)
+        REFERENCES orbit.host (network_id, id) ON DELETE CASCADE
 );
 CREATE INDEX control_plane_liveness_idx ON orbit.control_plane (network_id, last_seen_at DESC);
 
@@ -226,6 +305,13 @@ CREATE TABLE orbit.audit_log (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     actor_type  text NOT NULL CHECK (actor_type IN ('user', 'token', 'agent', 'system')),
     actor_id    text,
+    -- The actor's name as it was at the time — a token name, a host name, or an
+    -- email once an OIDC subject can authenticate. Captured rather than joined,
+    -- and never backfilled: tokens are revoked and hosts are hard-deleted, so
+    -- attribution that depends on a join degrades over exactly the period an
+    -- audit cares about. Renaming a token must not rewrite history, which is
+    -- the same reason this table has no UPDATE grant.
+    actor_display text,
     action      text NOT NULL,
     target_type text,
     target_id   text,
