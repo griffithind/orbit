@@ -1,0 +1,165 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>{{ .Host.Name }} {{ template "badge" .Host.Badge }}</h1>
+<p class="subtitle">
+  <a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a> ·
+  {{- range .Host.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
+</p>
+
+{{/*
+  THE DIAGNOSIS COMES FIRST, above the facts it was derived from.
+
+  This page exists to answer "why is this host not renewing", and the answer is
+  a sentence, not a table an operator has to read three fields out of and
+  compare against a rule they remember. The facts stay below because they are
+  what someone checks once the sentence has pointed them somewhere.
+*/}}
+<section class="card wide findings">
+  <h2>Diagnosis</h2>
+  {{- range .Findings }}
+  <div class="finding {{ .Badge.Tone }}">
+    <p class="finding-head">{{ template "badge" .Badge }} <strong>{{ .Summary }}</strong></p>
+    <p class="note">{{ .Detail }}</p>
+  </div>
+  {{- end }}
+</section>
+
+<div class="cards">
+
+  <section class="card">
+    <h2>Reachability</h2>
+    <dl class="pairs">
+      <dt>Last seen</dt>
+      <dd>{{ agoPtr .Host.LastSeenAt }}{{ if .Host.LastSeenAt }}<span class="note">{{ stampPtr .Host.LastSeenAt }}</span>{{ end }}</dd>
+      <dt>Config epoch</dt><dd>{{ template "badge" .Host.ConfigBadge }}</dd>
+      <dt>Blocklist epoch</dt><dd>{{ template "badge" .Host.BlockBadge }}</dd>
+      {{- if .Host.RestartPending }}
+      {{/*
+        Not a reload. Nebula refuses a certificate reload whose networks
+        changed, so this host keeps running its old certificate until the
+        process restarts — and no amount of waiting changes that, which is what
+        makes it different from every other thing a host is behind on.
+      */}}
+      <dt>Restart</dt>
+      <dd><span class="badge warn"><span class="glyph" aria-hidden="true">▲</span>required for generation {{ .Host.RestartRequiredEpoch }}</span></dd>
+      {{- end }}
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2>Identity</h2>
+    <dl class="pairs">
+      <dt>Role</dt>
+      <dd>{{ if .Host.RoleName }}{{ .Host.RoleName }}{{ else }}<span class="note">none</span>{{ end }}</dd>
+      <dt>Tags</dt>
+      <dd>{{ if .Host.Tags }}{{ join .Host.Tags ", " }}{{ else }}<span class="note">none</span>{{ end }}</dd>
+      <dt>Topology</dt>
+      <dd>
+        {{- if .Host.IsLighthouse }}<span class="tag">lighthouse</span>{{ end }}
+        {{- if .Host.IsRelay }}<span class="tag">relay</span>{{ end }}
+        {{- if and (not .Host.IsLighthouse) (not .Host.IsRelay) }}<span class="note">ordinary host</span>{{ end }}
+      </dd>
+      {{- if .Host.StaticAddrs }}
+      <dt>Public addresses</dt>
+      <dd>{{- range .Host.StaticAddrs }}<code>{{ . }}</code> {{ end }}</dd>
+      {{- end }}
+      <dt>Created</dt><dd>{{ ago .Host.CreatedAt }}<span class="note">{{ stamp .Host.CreatedAt }}</span></dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2>Software</h2>
+    <dl class="pairs">
+      <dt>nebula</dt>
+      <dd>{{ if .Host.NebulaVersion }}<code>{{ .Host.NebulaVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
+      <dt>agent</dt>
+      <dd>{{ if .Host.AgentVersion }}<code>{{ .Host.AgentVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
+      <dt>Config layout</dt><dd><code>{{ .Host.ConfigMode }}</code></dd>
+      <dt>Interface</dt>
+      <dd>{{ if .Host.TunDev }}<code>{{ .Host.TunDev }}</code> · {{ end }}UDP {{ .Host.ListenPortLabel }}</dd>
+    </dl>
+  </section>
+
+  <section class="card actions">
+    <h2>Actions</h2>
+    {{- if hasScope $.Scopes "hosts:block" }}
+      {{- if eq .Host.State "suspended" }}
+      {{/*
+        Unblock is a real form POST, so it works with scripts disabled. The
+        confirmation app.js adds on top is a guard against a misclick, not a
+        requirement for the action to fire.
+      */}}
+      <form method="post" action="/ui/hosts/{{ .Host.ID }}/unblock">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <button type="submit" class="button"
+                data-confirm="Unblock {{ .Host.Name }}? It will need to re-enroll or recover before it holds a valid certificate again.">Unblock this host</button>
+      </form>
+      {{- else }}
+      {{/*
+        A link to a confirmation PAGE, not a dialog. A dialog can only ask "are
+        you sure"; the page says what blocking THIS host costs — that it is the
+        only lighthouse, that it relays for other machines — which is the part
+        that changes the decision.
+      */}}
+      <p><a class="button danger" href="/ui/hosts/{{ .Host.ID }}/block">Block this host…</a></p>
+      {{- end }}
+    {{- end }}
+
+    {{- if hasScope $.Scopes "hosts:enroll" }}
+    <form method="post" action="/ui/hosts/{{ .Host.ID }}/enrollment-code">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <button type="submit" class="button">Issue an enrollment code</button>
+    </form>
+    <p class="hint">Shown once, on the next page, and never again.</p>
+    {{- end }}
+  </section>
+
+</div>
+
+<section class="card wide">
+  <h2>Certificates</h2>
+  {{/*
+    The history, not just the current one. "Has this host been renewing" is
+    answered by the CADENCE — a column of issue times a day apart that stops
+    three days ago says more than any single row does.
+  */}}
+  {{- if .Certificates }}
+  <div class="scroll">
+  <table class="grid stackable">
+    <thead>
+      <tr>
+        <th scope="col">State</th><th scope="col">Fingerprint</th><th scope="col">Issued by</th>
+        <th scope="col">Issued</th><th scope="col">Renew at</th><th scope="col">Expires</th>
+      </tr>
+    </thead>
+    <tbody>
+    {{- range .Certificates }}
+      <tr>
+        <td data-label="State">{{ template "badge" .Badge }}</td>
+        <td data-label="Fingerprint"><code title="{{ .Fingerprint }}">{{ .Short }}</code></td>
+        <td data-label="Issued by">{{ .CAName }}
+          {{- if and $.Data.ActiveCAID (ne .CAID $.Data.ActiveCAID) }}<span class="note">not the current signer</span>{{ end }}</td>
+        <td data-label="Issued">{{ ago .IssuedAt }}<span class="note">{{ stamp .IssuedAt }}</span></td>
+        {{/*
+          Renew-at with an OVERDUE marker when it is in the past. That marker,
+          plus last-seen, plus the issuing CA, is the whole diagnosis — it is
+          why this column exists at all.
+        */}}
+        <td data-label="Renew at">
+          {{- if .Overdue }}<span class="badge bad"><span class="glyph" aria-hidden="true">!</span>OVERDUE</span> {{ end -}}
+          {{ ago .RenewAt }}<span class="note">{{ stamp .RenewAt }}</span></td>
+        <td data-label="Expires">{{ ago .NotAfter }}<span class="note">{{ stamp .NotAfter }}</span></td>
+      </tr>
+    {{- end }}
+    </tbody>
+  </table>
+  </div>
+  {{- if .More }}
+  <p class="note">Older certificates exist; this is the most recent page of the history.</p>
+  {{- end }}
+  {{- else }}
+  <p class="note">This host has never been issued a certificate.</p>
+  {{- end }}
+</section>
+{{- end }}
+{{- end -}}

@@ -71,6 +71,11 @@ type Stats struct {
 	// ExpiredActiveCAs is how many networks are nominally signing with a CA
 	// that has outlived itself. Reported, never acted on; see Sweep.
 	ExpiredActiveCAs int
+
+	// SessionsPruned is expired browser sessions removed. Hygiene only — an
+	// expired session is already refused at resolve time, so this reclaims rows
+	// rather than closing a hole.
+	SessionsPruned int64
 }
 
 type Runner struct {
@@ -258,13 +263,33 @@ func (r *Runner) Sweep(ctx context.Context) (Stats, error) {
 		r.log.Error("credential pruning failed", "error", err)
 	}
 
+	// Expired browser sessions. Deployment-wide for the same reason, and in its
+	// own transaction so a failure here cannot roll back the credential prune —
+	// they are unrelated hygiene and neither is worth losing to the other.
+	//
+	// Nothing depends on this running: ResolveSession re-checks expiry on every
+	// request, so an unpruned row is refused exactly as a pruned one would be.
+	// The 12h ceiling on a session guarantees every row eventually qualifies.
+	if err := r.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		n, err := tx.PruneUISessions(ctx, now)
+		if err != nil {
+			return err
+		}
+		stats.SessionsPruned += n
+		return nil
+	}); err != nil {
+		r.log.Error("session pruning failed", "error", err)
+	}
+
 	if stats.BlocklistPruned > 0 || stats.CredentialsPruned > 0 ||
+		stats.SessionsPruned > 0 ||
 		stats.CertificatesOverdue > 0 || stats.ReplicasPruned > 0 ||
 		stats.CAsRetired > 0 || stats.ExpiredActiveCAs > 0 {
 		r.log.Info("maintenance sweep complete",
 			"networks", stats.Networks,
 			"blocklistPruned", stats.BlocklistPruned,
 			"credentialsPruned", stats.CredentialsPruned,
+			"sessionsPruned", stats.SessionsPruned,
 			"certificatesOverdue", stats.CertificatesOverdue,
 			"replicasPruned", stats.ReplicasPruned,
 			"casRetired", stats.CAsRetired,

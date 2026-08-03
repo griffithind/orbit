@@ -1,0 +1,35 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>Convergence</h1>
+<p class="subtitle"><a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a></p>
+
+<div class="cards">
+  <section class="card">
+    <h2>Config</h2>
+    <p class="big">{{ .Convergence.ConfigApplied }} / {{ .Convergence.HostsTotal }}</p>
+    <p>{{ template "badge" .Convergence.ConfigBadge }}</p>
+    <p class="note">epoch {{ .Convergence.ConfigEpoch }} · {{ pct .Convergence.ConfigApplied .Convergence.HostsTotal }}</p>
+  </section>
+
+  <section class="card">
+    <h2>Blocklist</h2>
+    <p class="big">{{ .Convergence.BlockApplied }} / {{ .Convergence.HostsTotal }}</p>
+    <p>{{ template "badge" .Convergence.BlockBadge }}</p>
+    <p class="note">epoch {{ .Convergence.BlocklistEpoch }} · {{ pct .Convergence.BlockApplied .Convergence.HostsTotal }}</p>
+  </section>
+</div>
+
+<section class="card wide">
+  {{ template "lagging" .Convergence }}
+  {{- if .Convergence.Lagging }}
+  {{/*
+    The consequence, stated rather than left to be inferred from two numbers.
+    This is the check that gates CA rotation, and the failure mode of skipping
+    it is partitioning hosts off the mesh.
+  */}}
+  <p class="banner warn"><span class="glyph" aria-hidden="true">▲</span>
+    Rotating a CA past these hosts will cut them off.</p>
+  {{- end }}
+</section>
+{{- end }}
+{{- end -}}

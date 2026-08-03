@@ -1,0 +1,106 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>{{ .Network.Name }}</h1>
+<p class="subtitle"><code>{{ .Network.Slug }}</code> · {{ join .Network.CIDRs ", " }}</p>
+
+<div class="cards">
+
+  <section class="card">
+    <h2>Convergence</h2>
+    <dl class="pairs">
+      <dt>Config</dt>
+      <dd>{{ template "badge" .Convergence.ConfigBadge }}
+        <span class="note">epoch {{ .Convergence.ConfigEpoch }} · {{ pct .Convergence.ConfigApplied .Convergence.HostsTotal }}</span></dd>
+      <dt>Blocklist</dt>
+      <dd>{{ template "badge" .Convergence.BlockBadge }}
+        <span class="note">epoch {{ .Convergence.BlocklistEpoch }} · {{ pct .Convergence.BlockApplied .Convergence.HostsTotal }}</span></dd>
+    </dl>
+    <p><a href="/ui/networks/{{ .Network.ID }}/convergence">Watch convergence</a></p>
+  </section>
+
+  <section class="card">
+    <h2>Push</h2>
+    <p>{{ template "badge" .Push.Badge }}</p>
+    {{- if .Push.Configured }}
+    <p class="note">{{ .Push.Watchers }} agent(s) parked on this replica waiting for a change.</p>
+    {{- end }}
+    <p class="note">{{ .Push.Detail }}</p>
+  </section>
+
+  <section class="card">
+    <h2>Replicas</h2>
+    {{- if .Replicas }}
+    <ul class="plain">
+      {{- range .Replicas }}
+      <li><a href="/ui/hosts/{{ .HostID }}"><code>{{ .Addr }}:{{ .AgentPort }}</code></a>
+        <span class="note">heartbeat {{ ago .LastSeenAt }}</span></li>
+      {{- end }}
+    </ul>
+    {{- else }}
+    {{/*
+      Measured, not configured: a replica appears here by heartbeating and
+      disappears by going quiet. None means no control plane has announced
+      itself on this network's overlay — so nothing is serving the agent API,
+      and no host can poll, renew, or receive a revocation.
+    */}}
+    <p class="banner bad" role="alert"><span class="glyph" aria-hidden="true">✕</span>
+      No replica is serving the agent API on this network.</p>
+    {{- end }}
+  </section>
+
+  <section class="card">
+    <h2>Certificate authorities</h2>
+    <ul class="plain">
+      {{- range .CAs }}
+      <li>{{ template "badge" .Badge }} <strong>{{ .Name }}</strong>
+        <span class="note"><code>{{ .Short }}</code> · {{ .ActiveCertificates }} live certificate(s) · expires {{ ago .NotAfter }}</span></li>
+      {{- end }}
+    </ul>
+    {{- if .RotationInProgress }}
+    <p class="banner warn"><span class="glyph" aria-hidden="true">▲</span>
+      A rotation is in progress. More than one CA is still distributed.</p>
+    {{- end }}
+    <p><a href="/ui/networks/{{ .Network.ID }}/rotation">Rotation</a></p>
+  </section>
+
+</div>
+
+<section class="card wide">
+  <h2>Renewal is overdue</h2>
+  {{/*
+    Past the midpoint of its lifetime, not "expiring soon". The agent renews at
+    the midpoint precisely so the remaining half is recovery time, so anything
+    on this list is a renewal that has already failed — hours or days before a
+    naive expiry countdown would say anything at all.
+  */}}
+  {{- if .Expiring }}
+  <div class="scroll">
+  <table class="grid stackable">
+    <thead>
+      <tr><th scope="col">Host</th><th scope="col">State</th><th scope="col">Renewal due</th><th scope="col">Expires</th><th scope="col">Last seen</th></tr>
+    </thead>
+    <tbody>
+    {{- range .Expiring }}
+      <tr>
+        <td data-label="Host"><a href="/ui/hosts/{{ .HostID }}">{{ .HostName }}</a>
+          <span class="note"><code>{{ .Short }}</code></span></td>
+        <td data-label="State">{{ template "badge" .Badge }}</td>
+        <td data-label="Renewal due">{{ ago .RenewAt }}<span class="note">{{ stamp .RenewAt }}</span></td>
+        <td data-label="Expires">{{ ago .NotAfter }}<span class="note">{{ stamp .NotAfter }}</span></td>
+        <td data-label="Last seen">{{ agoPtr .LastSeenAt }}</td>
+      </tr>
+    {{- end }}
+    </tbody>
+  </table>
+  </div>
+  {{- else }}
+  <p class="note"><span class="glyph" aria-hidden="true">✓</span> Every active certificate is inside its renewal window.</p>
+  {{- end }}
+</section>
+
+<section class="card wide">
+  <h2>Behind</h2>
+  {{ template "lagging" .Convergence }}
+</section>
+{{- end }}
+{{- end -}}

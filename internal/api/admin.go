@@ -30,51 +30,163 @@ func identityFrom(ctx context.Context) *store.Identity {
 	return id
 }
 
-// admin wraps a handler with bearer-token authentication and a scope check.
+// IdentityFrom returns the authenticated caller, or nil outside an
+// authenticated handler. Exported for internal/web, whose handlers run behind
+// the same middleware and read the identity the same way.
+func IdentityFrom(ctx context.Context) *store.Identity { return identityFrom(ctx) }
+
+// credential is one way of turning a request into a store.Identity.
+//
+// This is the seam. Authentication and the scope check were always separate
+// steps; splitting the credential out makes the FIRST step pluggable too,
+// without anything below it changing — a handler, a scope check, and an audit
+// entry are written against an Identity and cannot tell which of these produced
+// it. The admin() comment used to say a second credential type "would" fit
+// here. This is that second credential type, and it did.
+//
+// Each carries its own refusal messages because /v1's are load-bearing: they
+// are what an operator's tooling reads, and this refactor must not change them
+// by a byte.
+type credential struct {
+	// missing is the 401 body for a request carrying nothing of this kind.
+	missing string
+	// invalid is the 401 body for one carrying something that does not resolve.
+	// Unknown, revoked, and expired all land here, undistinguished, for the
+	// same reason enrollment does not distinguish them: a legible failure is a
+	// probing oracle.
+	invalid string
+	// logAs names this credential in the log line the 500 path writes.
+	logAs string
+	// resolve returns errNoCredential when the request carries nothing of this
+	// kind, store.ErrNotFound when it carries one that does not resolve.
+	resolve func(*http.Request) (*store.Identity, error)
+}
+
+// errNoCredential means the request carried nothing of the kind the
+// authenticator reads. Distinct from a credential that failed to resolve, so
+// "you sent no cookie" and "your session has ended" stay tellable apart by the
+// person in front of the browser. Neither reveals whether any particular
+// credential exists, which is the property that matters to a prober.
+var errNoCredential = errors.New("no credential")
+
+// ErrBearerOnUISurface refuses an Authorization header on the browser surface.
+//
+// THE HARD RULE, in its second direction. The browser surface is not an API:
+// every /v1 route was written assuming bearer authentication, which is
+// CSRF-immune, and the browser surface exists precisely because a cookie is
+// not. Accepting a bearer token here would create a second, unaudited way to
+// reach UI handlers and would invite a client to be written against it — at
+// which point "the UI surface is cookie-only" stops being true and the
+// isolation stops being checkable.
+//
+// Exported so internal/web can tell this apart from an ordinary sign-in
+// failure; it is a caller mistake, not a credential problem.
+var ErrBearerOnUISurface = errors.New(
+	"the browser surface does not accept an Authorization header; use /v1 with a bearer token")
+
+// authenticate wraps a handler with a credential and a scope check.
 //
 // Authentication establishes identity; the scope check is separate and explicit
 // per route, so adding a route without deciding its scope is a compile-time
 // omission rather than an accidentally-public endpoint.
 //
-// Only API tokens authenticate here today. A second credential type — an OIDC
-// bearer JWT — would branch on the token's prefix (store.APITokenPrefix) and
-// produce the same store.Identity, leaving every handler, scope check, and
-// audit entry below untouched. That is why nothing downstream of this function
-// knows what a token is.
-func (s *Server) admin(scope string, h http.HandlerFunc) http.Handler {
+// Nothing below this function knows what a token is, and now nothing below it
+// knows what a session is either.
+func (s *Server) authenticate(c credential, scope string, h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := bearerToken(r)
-		if !ok {
-			writeErr(w, http.StatusUnauthorized, "missing bearer token")
+		id, err := c.resolve(r)
+		switch {
+		case errors.Is(err, errNoCredential):
+			writeErr(w, http.StatusUnauthorized, c.missing)
 			return
-		}
-
-		id, err := s.store.AuthenticateToken(r.Context(), hashToken(token))
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				// Unknown, revoked, and expired all produce
-				// the same response for the same reason as enrollment: a
-				// distinguishable failure is a probing oracle.
-				writeErr(w, http.StatusUnauthorized, "invalid token")
-				return
-			}
-			s.log.Error("token authentication failed", "error", err)
+		case errors.Is(err, ErrBearerOnUISurface):
+			writeErr(w, http.StatusUnauthorized, err.Error())
+			return
+		case errors.Is(err, store.ErrNotFound):
+			writeErr(w, http.StatusUnauthorized, c.invalid)
+			return
+		case err != nil:
+			s.log.Error(c.logAs, "error", err)
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 
-		// An empty scope means authentication only. Used by /v1/whoami, which
-		// must answer for any valid credential — including one whose scopes the
-		// caller is trying to discover.
-		if scope != "" && !id.HasScope(scope) {
-			writeErr(w, http.StatusForbidden, "token lacks required scope: "+scope)
+		if !RequireScope(w, id, scope) {
 			return
 		}
 
+		// The token's last_used_at is recorded for a session too. A session IS
+		// use of the token it references, and "was this credential used after
+		// we revoked it" is the question an incident asks — it would be
+		// answered wrongly if a token with a live browser attached to it looked
+		// untouched.
 		s.store.TouchToken(r.Context(), id.TokenID)
 		h(w, r.WithContext(context.WithValue(r.Context(), identityKey{}, id)))
 	})
 }
+
+// RequireScope enforces a route's scope, writing the 403 if it fails and
+// reporting whether the caller may proceed.
+//
+// An empty scope means authentication only. Used by /v1/whoami, which must
+// answer for any valid credential — including one whose scopes the caller is
+// trying to discover.
+//
+// Exported so the browser surface refuses with the identical response rather
+// than a second dialect of the same refusal. The message says "token" for a
+// session too, and correctly: a session's scopes ARE the token's, narrowed, and
+// there is no separate grant to point an operator at.
+func RequireScope(w http.ResponseWriter, id *store.Identity, scope string) bool {
+	if scope == "" || id.HasScope(scope) {
+		return true
+	}
+	writeErr(w, http.StatusForbidden, "token lacks required scope: "+scope)
+	return false
+}
+
+// bearerCredential is /v1: scoped API tokens in an Authorization header, and
+// nothing else. It does not look at cookies and must never learn how.
+func (s *Server) bearerCredential() credential {
+	return credential{
+		missing: "missing bearer token",
+		invalid: "invalid token",
+		logAs:   "token authentication failed",
+		resolve: func(r *http.Request) (*store.Identity, error) {
+			token, ok := bearerToken(r)
+			if !ok {
+				return nil, errNoCredential
+			}
+			return s.store.AuthenticateToken(r.Context(), hashToken(token))
+		},
+	}
+}
+
+// admin wraps a handler for the /v1 surface.
+//
+// Bearer tokens, and only bearer tokens. THE HARD RULE lives in this one line:
+// /v1 is built from bearerCredential, which reads the Authorization header and
+// has no path to a cookie, so no /v1 route can be reached by a cross-site
+// request no matter what a browser attaches to it. Every route here was written
+// on that assumption — DELETE /v1/hosts/{id} takes its reason from a query
+// parameter — so honouring a cookie on this surface would make all of them
+// CSRF-able at once. e2e/session_isolation_test.go asserts both directions.
+func (s *Server) admin(scope string, h http.HandlerFunc) http.Handler {
+	return s.authenticate(s.bearerCredential(), scope, h)
+}
+
+// SessionCookieName is the browser session cookie.
+//
+// The __Host- prefix is a browser-enforced invariant, and it is the closest
+// thing a cookie has to a database constraint: a browser refuses to store a
+// __Host- cookie unless it is Secure, has Path=/, and carries NO Domain
+// attribute. That last one is what matters. Without it, a compromised or merely
+// sloppy sibling host — anything under the registrable domain — can set a
+// cookie the console will then present as its own, and session fixation stops
+// being a theoretical entry in a checklist.
+//
+// It also means the cookie cannot be scoped to a subdomain even deliberately,
+// which is a constraint worth accepting rather than working around.
+const SessionCookieName = "__Host-orbit_session"
 
 // checkHint turns a CHECK-constraint refusal into something an operator can act
 // on.

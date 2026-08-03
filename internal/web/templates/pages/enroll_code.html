@@ -1,0 +1,33 @@
+{{- define "content" -}}
+{{- with .Data }}
+<section class="card wide">
+  <h1>Enrollment code for {{ .Host.Name }}</h1>
+  <p class="subtitle">
+    <a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a> ·
+    {{- range .Host.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
+  </p>
+
+  {{/*
+    This is the only place the plaintext will ever exist: the control plane
+    stores a peppered hash of it and cannot recover the original. The whole
+    surface sets Cache-Control: no-store so that a back button cannot re-render
+    a second copy of a credential that is meant to have exactly one.
+  */}}
+  <p class="banner warn"><span class="glyph" aria-hidden="true">▲</span>
+    Shown once. It is stored as a hash and cannot be shown again — if you lose it,
+    issue another.</p>
+
+  <pre class="secret">{{ .Code }}</pre>
+
+  <dl class="pairs">
+    <dt>Expires</dt><dd>{{ ago .ExpiresAt }}<span class="note">{{ stamp .ExpiresAt }}</span></dd>
+    <dt>Enroll URL</dt><dd><code>{{ .EnrollURL }}</code></dd>
+  </dl>
+
+  <h2>On the new machine</h2>
+  <pre class="prose">{{ .Command }}</pre>
+
+  <p><a class="button" href="/ui/hosts/{{ .Host.ID }}">Done — open {{ .Host.Name }}</a></p>
+</section>
+{{- end }}
+{{- end -}}

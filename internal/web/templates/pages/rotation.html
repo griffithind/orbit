@@ -1,0 +1,95 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>CA rotation</h1>
+<p class="subtitle"><a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a></p>
+
+{{/*
+  Every step's state is read off the database on each load — the CA rows, their
+  states, and how many live certificates each has signed. Nothing here remembers
+  where anyone was. A rotation runs for hours or days, across closed tabs,
+  different people, and restarted replicas, and acting on a remembered step is
+  how a CA gets retired while its certificates are still in use.
+*/}}
+<ol class="steps">
+  {{- range .Steps }}
+  <li class="step {{ .State }}">
+    <h2><span class="step-n">{{ .N }}</span> {{ .Title }}
+      <span class="badge {{ if eq .State "done" }}ok{{ else if eq .State "current" }}warn{{ else }}muted{{ end }}">
+        <span class="glyph" aria-hidden="true">{{ if eq .State "done" }}✓{{ else if eq .State "current" }}▲{{ else }}·{{ end }}</span>{{ .State }}</span>
+    </h2>
+    <p class="note">{{ .Detail }}</p>
+    {{- if .Command }}
+    <pre class="prose">{{ .Command }}</pre>
+    {{- end }}
+  </li>
+  {{- end }}
+</ol>
+
+<section class="card wide">
+  <h2>Certificate authorities</h2>
+  <div class="scroll">
+  <table class="grid stackable">
+    <thead>
+      <tr><th scope="col">State</th><th scope="col">Name</th><th scope="col">Fingerprint</th>
+        <th scope="col">Live certificates</th><th scope="col">Expires</th><th scope="col">Signer</th>
+        <th scope="col">Action</th></tr>
+    </thead>
+    <tbody>
+    {{- range .CAs }}
+      <tr>
+        <td data-label="State">{{ template "badge" .Badge }}</td>
+        <td data-label="Name">{{ .Name }}</td>
+        <td data-label="Fingerprint"><code title="{{ .Fingerprint }}">{{ .Short }}</code></td>
+        <td data-label="Live certificates"><span class="num">{{ .ActiveCertificates }}</span></td>
+        <td data-label="Expires">{{ ago .NotAfter }}<span class="note">{{ stamp .NotAfter }}</span></td>
+        {{/*
+          A locator, never key material — internal/ca is explicit that a
+          signer_ref holds none. It is here because "which key signs this" is
+          the question a rotation is about.
+        */}}
+        <td data-label="Signer"><code>{{ .SignerRef }}</code></td>
+        <td data-label="Action">
+          {{- if and (eq .State "pending") (hasScope $.Scopes "cas:write") }}
+          <form method="post" action="/ui/cas/{{ .ID }}/activate">
+            <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+            {{- if not $.Data.Converged }}
+            <label class="check">
+              <input type="checkbox" name="acknowledge_cutoff" value="1">
+              Promote anyway, cutting off {{ $.Data.CutOff }} host(s)
+            </label>
+            {{- end }}
+            <button type="submit" class="button primary"
+                    data-confirm="Promote {{ .Name }} to signer? Hosts move onto it as they renew.">Promote to signer</button>
+          </form>
+          {{- else if and .CanRetire (hasScope $.Scopes "cas:write") }}
+          <form method="post" action="/ui/cas/{{ .ID }}/retire">
+            <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+            <button type="submit" class="button danger"
+                    data-confirm="Retire {{ .Name }}? It is dropped from every host's trust bundle.">Retire</button>
+          </form>
+          {{- else if eq .State "retiring" }}
+          <span class="note">{{ .ActiveCertificates }} certificate(s) still to renew</span>
+          {{- else }}
+          <span class="note">—</span>
+          {{- end }}
+        </td>
+      </tr>
+    {{- end }}
+    </tbody>
+  </table>
+  </div>
+
+  {{- if not .Converged }}
+  <p class="banner warn"><span class="glyph" aria-hidden="true">▲</span>
+    {{ .CutOff }} host(s) have not applied the current generation. Promoting a CA
+    past them cuts them off: they do not trust it, and their next certificate
+    would be signed by it.</p>
+  {{- end }}
+</section>
+
+<section class="card wide">
+  <h2>Convergence</h2>
+  {{ template "lagging" .Convergence }}
+</section>
+{{- end }}
+{{- end -}}

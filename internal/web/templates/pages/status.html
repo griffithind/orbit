@@ -1,0 +1,16 @@
+{{- define "content" -}}
+{{- with .Data }}
+<section class="card wide">
+  <h1>{{ .Title }}</h1>
+  <p class="status-code">HTTP {{ .Status }}</p>
+  {{/*
+    <pre>, because these details are written as paragraphs with blank lines and
+    sometimes carry a command to run. It is also the safe container: whatever
+    ends up in Detail is escaped by html/template and cannot become markup.
+  */}}
+  <pre class="prose">{{ .Detail }}</pre>
+  <p class="note">{{ stamp .At }}</p>
+  <p><a class="button" href="/ui/">Back to the overview</a></p>
+</section>
+{{- end }}
+{{- end -}}

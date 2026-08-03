@@ -1,0 +1,516 @@
+/*
+ * Orbit operator UI.
+ *
+ * No framework, no build step, no webfonts. Everything themable is a custom
+ * property in the one :root block below, and dark mode redefines those
+ * properties and nothing else — there is no toggle, because a preference the
+ * operating system already knows is not a preference this UI should ask about
+ * and then have to store somewhere.
+ *
+ * Two layout rules carry most of the responsiveness and neither needs a media
+ * query: card grids use repeat(auto-fit, minmax(18rem, 1fr)), and long content
+ * scrolls inside .scroll rather than widening the page. There is exactly ONE
+ * media query, and it is for tables — see the bottom of this file, where the
+ * reason it has to exist is written down.
+ */
+
+:root {
+  /* system-ui, so there is nothing to download: the UI renders instantly, works
+     offline, and looks native on the phone it is being read on at 3am. */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #eef0f4;
+  --ink: #14171c;
+  --ink-dim: #5b6472;
+  --line: #d5dae2;
+
+  --ok: #1a6b3c;
+  --ok-bg: #e6f4ec;
+  --warn: #8a5a00;
+  --warn-bg: #fdf1dc;
+  --bad: #a01b2b;
+  --bad-bg: #fbe9eb;
+  --muted: #5b6472;
+  --muted-bg: #eef0f4;
+
+  --accent: #1f4fd8;
+
+  --radius: 0.5rem;
+  --gap: 1rem;
+
+  /* The minimum tap target. 2.75rem is 44px at the default root size, which is
+     the smallest thing a thumb hits reliably — and this UI's most important
+     control blocks a machine, so a mis-tap is expensive in both directions. */
+  --tap: 2.75rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1116;
+    --surface: #161b22;
+    --surface-2: #1e242d;
+    --ink: #e6e9ef;
+    --ink-dim: #9aa4b2;
+    --line: #2b323c;
+
+    --ok: #56d364;
+    --ok-bg: #10281a;
+    --warn: #e3b341;
+    --warn-bg: #2b2210;
+    --bad: #ff7b72;
+    --bad-bg: #33161a;
+    --muted: #9aa4b2;
+    --muted-bg: #1e242d;
+
+    --accent: #79a5ff;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+}
+
+code, pre { font-family: var(--mono); font-size: 0.875em; }
+
+a { color: var(--accent); }
+a:hover { text-decoration: none; }
+
+/* Keyboard focus stays visible everywhere. An operator working fast on a laptop
+   trackpad-free is a real case, and :focus-visible costs nothing otherwise. */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.skip {
+  position: absolute;
+  left: -100vw;
+}
+.skip:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+  z-index: 10;
+  background: var(--surface);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius);
+}
+
+/* ---------------------------------------------------------------- topbar -- */
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.networks, .who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+.who { margin-left: auto; }
+
+.networks a, .who a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0 0.5rem;
+  border-radius: var(--radius);
+  text-decoration: none;
+}
+.networks a.here {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.actor {
+  color: var(--ink-dim);
+  font-size: 0.875rem;
+}
+
+.inline { display: inline; margin: 0; }
+
+.linkish {
+  min-height: var(--tap);
+  padding: 0 0.5rem;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* ----------------------------------------------------------------- layout -- */
+
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+h1 { font-size: 1.5rem; margin: 0.5rem 0 0.25rem; }
+h2 { font-size: 1.125rem; margin: 0 0 0.5rem; }
+
+.subtitle {
+  margin: 0 0 1rem;
+  color: var(--ink-dim);
+}
+
+/* The whole responsive story for cards, in one line and with no media query. */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+.card.wide { margin-bottom: var(--gap); }
+.card.narrow { max-width: 28rem; margin: 2rem auto; }
+
+.big { font-size: 2rem; font-weight: 700; margin: 0.25rem 0; }
+.num { font-variant-numeric: tabular-nums; }
+
+.note {
+  display: block;
+  color: var(--ink-dim);
+  font-size: 0.875rem;
+  margin: 0.125rem 0;
+}
+.hint {
+  color: var(--ink-dim);
+  font-size: 0.875rem;
+  margin: 0.25rem 0 1rem;
+}
+
+.pairs { margin: 0; }
+.pairs dt {
+  color: var(--ink-dim);
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 0.75rem;
+}
+.pairs dd { margin: 0.125rem 0 0; }
+
+.plain { list-style: none; margin: 0; padding: 0; }
+.plain li { padding: 0.375rem 0; border-bottom: 1px solid var(--line); }
+.plain li:last-child { border-bottom: 0; }
+
+.prose, .meta, .secret {
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0.5rem 0;
+}
+.secret {
+  font-size: 1.25rem;
+  letter-spacing: 0.05em;
+  user-select: all;
+  border: 2px dashed var(--warn);
+}
+.meta { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+
+.tag {
+  display: inline-block;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 0.0625rem 0.375rem;
+  font-size: 0.8125rem;
+  margin-right: 0.25rem;
+}
+
+/* ----------------------------------------------------------------- status -- */
+
+/*
+ * A badge is a glyph AND a word AND a colour. The glyph is what survives a
+ * greyscale screenshot in a ticket; the word is what survives everything,
+ * including a reader who does not see red and green as different colours.
+ * Colour is the third signal and never the only one.
+ */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.badge .glyph { font-weight: 700; }
+
+.badge.ok    { color: var(--ok);    background: var(--ok-bg); }
+.badge.warn  { color: var(--warn);  background: var(--warn-bg); }
+.badge.bad   { color: var(--bad);   background: var(--bad-bg); }
+.badge.muted { color: var(--muted); background: var(--muted-bg); }
+
+.banner {
+  margin: 0 auto 1rem;
+  max-width: 72rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.banner.ok   { background: var(--ok-bg);   border-color: var(--ok);   color: var(--ok); }
+.banner.warn { background: var(--warn-bg); border-color: var(--warn); color: var(--warn); }
+.banner.bad  { background: var(--bad-bg);  border-color: var(--bad);  color: var(--bad); }
+.banner .glyph { font-weight: 700; margin-right: 0.25rem; }
+
+/* --------------------------------------------------------------- findings -- */
+
+.finding {
+  border-left: 4px solid var(--line);
+  padding: 0.5rem 0 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.finding.ok    { border-left-color: var(--ok); }
+.finding.warn  { border-left-color: var(--warn); }
+.finding.bad   { border-left-color: var(--bad); }
+.finding.muted { border-left-color: var(--muted); }
+.finding-head { margin: 0 0 0.25rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
+
+/* ------------------------------------------------------------------ forms -- */
+
+form { margin: 0 0 1rem; }
+
+label {
+  display: block;
+  margin-top: 0.75rem;
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--tap);
+  font-weight: 400;
+}
+label.check input { width: 1.125rem; height: 1.125rem; }
+
+input[type="text"], input[type="search"], input[type="password"], input:not([type]), select {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0.5rem 0.625rem;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.button, button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--tap);
+  padding: 0 1rem;
+  margin: 0.5rem 0.5rem 0 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-decoration: none;
+  cursor: pointer;
+}
+.button.primary, button.primary {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* Destructive controls are outlined rather than filled, and they say what they
+   do in words. A big red button is easy to hit by accident; a bordered one that
+   reads "Block web-03" is not. */
+.button.danger, button.danger {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border-color: var(--bad);
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0 var(--gap);
+  align-items: end;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.5rem 1rem 1rem;
+}
+
+/* One grid item per control, so a label always sits above its own input rather
+   than beside the previous one's. */
+.filters .field { display: flex; flex-direction: column; justify-content: flex-end; }
+.filters .field.actions { flex-direction: row; align-items: flex-end; gap: 0.5rem; }
+
+.danger-zone { border-color: var(--bad); }
+.consequences { padding-left: 1.25rem; }
+.consequences li { margin: 0.5rem 0; }
+.consequences .glyph { color: var(--warn); font-weight: 700; }
+
+/* ------------------------------------------------------------------ steps -- */
+
+.steps { list-style: none; margin: 0 0 var(--gap); padding: 0; }
+.step {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.5rem;
+}
+.step.done { border-left-color: var(--ok); }
+.step.current { border-left-color: var(--warn); }
+.step h2 { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.step-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem; height: 1.5rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 0.875rem;
+}
+
+/* ----------------------------------------------------------------- tables -- */
+
+/*
+ * .scroll is the first half of the answer: a wide table scrolls inside its own
+ * box rather than making the whole document scroll sideways, which is what
+ * makes a page unusable on a phone.
+ */
+.scroll { overflow-x: auto; }
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+.grid caption {
+  text-align: left;
+  color: var(--ink-dim);
+  padding-bottom: 0.5rem;
+}
+.grid th, .grid td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.grid th {
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+}
+.grid tbody tr:last-child td { border-bottom: 0; }
+.grid a { display: inline-block; min-height: 1.5rem; }
+
+.pager { display: flex; gap: 0.5rem; }
+
+.foot {
+  max-width: 72rem;
+  margin: 2rem auto 3rem;
+  padding: 0 1rem;
+  color: var(--ink-dim);
+  font-size: 0.8125rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.status-code { color: var(--ink-dim); font-family: var(--mono); }
+
+/*
+ * THE ONE MEDIA QUERY.
+ *
+ * Cards and filters are responsive without one; tables are not, and no amount
+ * of flexbox makes six columns of a host listing legible at 320px. Below 40rem
+ * each row becomes its own stacked card and every cell grows a label from its
+ * data-label attribute — which is why every <td> in this UI carries one. The
+ * header row is hidden rather than removed so screen readers on wide viewports
+ * still get it.
+ *
+ * The alternative was a second markup path for narrow screens, which is two
+ * things to keep in step and one of them silently wrong.
+ */
+@media (max-width: 40rem) {
+  .stackable thead {
+    position: absolute;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .stackable tr {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin-bottom: 0.5rem;
+    padding: 0.25rem 0.5rem;
+  }
+  .stackable td {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    gap: 0.5rem;
+    padding: 0.375rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .stackable tr td:last-child { border-bottom: 0; }
+  .stackable td::before {
+    content: attr(data-label);
+    color: var(--ink-dim);
+    font-size: 0.8125rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .topbar { padding: 0.5rem; }
+  .who { width: 100%; margin-left: 0; }
+}
+
+/* An operator who has asked for less motion gets none. There is very little
+   here to begin with, which is the point. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* The staleness marker app.js sets when a live page stops updating. It is a
+   class rather than an inline style because the CSP forbids inline styles —
+   which is exactly the constraint that keeps injected markup inert. */
+.stale { color: var(--warn); font-weight: 600; }

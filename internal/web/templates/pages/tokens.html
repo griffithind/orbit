@@ -1,0 +1,44 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>API tokens</h1>
+{{/*
+  Listing only. Creating a token here would mean rendering a long-lived
+  credential into a page; this UI does that exactly once, for an enrollment
+  code, which is single-use and expires in minutes. An API token is neither.
+*/}}
+<p class="subtitle">Read-only. Create and revoke tokens with <code>orbit token</code>.</p>
+
+{{- if .Tokens }}
+<div class="scroll">
+<table class="grid stackable">
+  <thead>
+    {{/*
+      last_used_at is the second column, before scopes, because it is the
+      question this page exists for: after a leak, what matters is whether the
+      token was used and when — not what it was allowed to do.
+    */}}
+    <tr><th scope="col">Name</th><th scope="col">Last used</th><th scope="col">State</th>
+      <th scope="col">Scopes</th><th scope="col">Created</th><th scope="col">Expires</th></tr>
+  </thead>
+  <tbody>
+  {{- range .Tokens }}
+    <tr>
+      <td data-label="Name">{{ .Name }}<span class="note"><code>{{ .ID }}</code></span></td>
+      <td data-label="Last used">{{ agoPtr .LastUsedAt }}<span class="note">{{ stampPtr .LastUsedAt }}</span></td>
+      <td data-label="State">{{ template "badge" .Badge }}
+        {{- if .UsedAfterRevocation }}
+        <span class="note">Used after it was revoked at {{ stampPtr .RevokedAt }}.</span>
+        {{- end }}</td>
+      <td data-label="Scopes"><code>{{ join .Scopes " " }}</code></td>
+      <td data-label="Created">{{ ago .CreatedAt }}</td>
+      <td data-label="Expires">{{ if .ExpiresAt }}{{ agoPtr .ExpiresAt }}{{ else }}<span class="note">never</span>{{ end }}</td>
+    </tr>
+  {{- end }}
+  </tbody>
+</table>
+</div>
+{{- else }}
+<p class="note">No tokens exist. That should be impossible — you are signed in with one.</p>
+{{- end }}
+{{- end }}
+{{- end -}}

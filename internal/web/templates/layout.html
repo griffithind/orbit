@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Title }} — Orbit</title>
+<link rel="stylesheet" href="{{ .Assets.CSS }}">
+<link rel="icon" href="{{ .Assets.Favicon }}">
+{{- if .LiveNetwork }}
+{{/*
+  The JavaScript-off fallback for the live screens. app.js refreshes these in
+  place; without it the page would sit there looking authoritative while the
+  fleet moved underneath it, which during an incident is the one thing a live
+  view must never do.
+*/}}
+<noscript><meta http-equiv="refresh" content="15"></noscript>
+{{- end }}
+</head>
+<body{{ if .LiveNetwork }} data-live-network="{{ .LiveNetwork }}"{{ end }}>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="/ui/">Orbit</a>
+
+  {{- if .Networks }}
+  <nav class="networks" aria-label="Networks">
+    {{- range .Networks }}
+    <a href="/ui/networks/{{ .ID }}"{{ if eq .ID $.CurrentNetwork }} class="here" aria-current="page"{{ end }}>{{ .Name }}</a>
+    {{- end }}
+    {{/*
+      Past navNetworkLimit the picker stops being a picker. Listing a few hundred
+      networks across the top of every page pushes the content off the screen and
+      makes the header the largest thing in the product, so beyond the cap it
+      names only where you are and links to the full list.
+    */}}
+    {{- if gt .NetworkCount (len .Networks) }}
+    <a href="/ui/networks">all {{ .NetworkCount }} networks</a>
+    {{- end }}
+  </nav>
+  {{- end }}
+
+  {{- if .Actor }}
+  <div class="who">
+    {{- if .CurrentNetwork }}
+    <a href="/ui/networks/{{ .CurrentNetwork }}/hosts">Hosts</a>
+    <a href="/ui/networks/{{ .CurrentNetwork }}/rotation">Rotation</a>
+    {{- end }}
+    <a href="/ui/audit">Audit</a>
+    <a href="/ui/tokens">Tokens</a>
+    <span class="actor" title="Signed in">{{ .Actor }}</span>
+    {{- if .ReadOnly }}
+    {{/*
+      Said out loud, because the alternative is an operator looking for a Block
+      button that the scope check has removed and concluding the UI is broken.
+    */}}
+    <span class="badge muted"><span class="glyph" aria-hidden="true">·</span>read-only</span>
+    {{- end }}
+    <form method="post" action="/ui/logout" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+      <button type="submit" class="linkish">Sign out</button>
+    </form>
+  </div>
+  {{- end }}
+</header>
+
+{{- if .Problem }}
+<p class="banner bad" role="alert"><span class="glyph" aria-hidden="true">✕</span> {{ .Problem }}</p>
+{{- end }}
+{{- if .Notice }}
+<p class="banner ok" role="status"><span class="glyph" aria-hidden="true">✓</span> {{ .Notice }}</p>
+{{- end }}
+
+<main id="main">
+{{ template "content" . }}
+</main>
+
+<footer class="foot">
+  <span>Orbit {{ .Version }}</span>
+  {{- if .LiveNetwork }}
+  <span class="live" data-live-status>This page updates itself. Without JavaScript it reloads every 15 seconds.</span>
+  {{- end }}
+</footer>
+
+<script src="{{ .Assets.JS }}" defer></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{{/*
+  A status, rendered three ways at once: a glyph, a word, and a colour.
+
+  Never colour alone. This is read on a phone in daylight, in greyscale when a
+  screenshot lands in a ticket, and by people who do not see red and green as
+  different — and "status is green" being wrong is not a cosmetic failure, it is
+  an operator who believes the fleet converged.
+
+  The glyph is aria-hidden because the word beside it already says the same
+  thing; a screen reader announcing "check mark converged" reads worse than
+  "converged".
+*/}}
+{{- define "badge" -}}
+<span class="badge {{ .Tone }}"><span class="glyph" aria-hidden="true">{{ .Glyph }}</span>{{ .Word }}</span>
+{{- end -}}

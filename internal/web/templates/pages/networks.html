@@ -1,0 +1,22 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>Networks</h1>
+{{- if .Networks }}
+<div class="cards">
+  {{- range .Networks }}
+  <section class="card">
+    <h2><a href="/ui/networks/{{ .ID }}">{{ .Name }}</a></h2>
+    <dl class="pairs">
+      <dt>Slug</dt><dd><code>{{ .Slug }}</code></dd>
+      <dt>Prefixes</dt><dd>{{ join .CIDRs ", " }}</dd>
+      <dt>Epochs</dt><dd>config {{ .ConfigEpoch }} · blocklist {{ .BlocklistEpoch }}</dd>
+      <dt>Firewall</dt><dd><code>{{ .FirewallSource }}</code></dd>
+    </dl>
+  </section>
+  {{- end }}
+</div>
+{{- else }}
+<p class="note">No networks exist yet. Create the first one with <code>orbitd bootstrap</code>.</p>
+{{- end }}
+{{- end }}
+{{- end -}}

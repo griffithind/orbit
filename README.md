@@ -16,7 +16,7 @@ which certificate. Orbit is the missing half, self-hosted.
 >
 > **Outstanding:** SSO/OIDC (needs an IdP choice), and the two enrollment
 > methods in [docs/enrollment.md](docs/enrollment.md) §4–5, which are designed
-> and not built. There is no admin CLI — every example here is `curl`.
+> and not built.
 
 ---
 
@@ -395,6 +395,35 @@ rotating a CA past these hosts will cut them off
 
 JSON remains the default; `format=text` (or `Accept: text/plain`) is for the
 terminal, where this number is actually read.
+
+### A console, when a terminal is the wrong place
+
+`orbitd -ui-addr 8081` serves an operator console: convergence, hosts, the
+rotation gates, the audit log, and the two controls an incident actually needs —
+block a host, cut an enrollment code.
+
+```bash
+ssh -N -L 8081:127.0.0.1:8081 orbit-control     # http://127.0.0.1:8081/ui/
+```
+
+A bare port binds **loopback**, and binding it anywhere else without an `https://`
+external URL is refused at startup rather than warned about. The listener carries
+every host name and a control that removes a machine from the mesh, on the box
+holding the root CA key.
+
+Sign in with an ordinary Orbit API token — there is no second user database, no
+second set of scopes, and no second thing to revoke. A session *references* its
+token, so `DELETE /v1/tokens/{id}` closes every browser it opened on the next
+request. Sessions default to **read-only**; a cookie jar holding a credential
+that can mint certificate authorities is worth opting into rather than out of.
+
+The cookie is `__Host-` prefixed and never accepted by `/v1` — a test mounts both
+surfaces on one mux and asserts the isolation in both directions, because the
+interesting failure is not the one you remember to write a handler for.
+
+Server-rendered, no build step, no bundler, no JavaScript required: every screen
+works with JS off, because the state where you need this most is the state where
+things are already not working. Live updates arrive over SSE when they can.
 
 ### CA rotation
 

@@ -1,0 +1,77 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>Audit</h1>
+<p class="subtitle">Append-only. This process holds no UPDATE or DELETE grant on the log — corrections are new entries.</p>
+
+<form method="get" class="filters">
+  <div class="field">
+    <label for="action">Action</label>
+    <select id="action" name="action">
+      <option value="">any</option>
+      {{- range .Actions }}
+      <option value="{{ . }}"{{ if eq . $.Data.Filter.Action }} selected{{ end }}>{{ . }}</option>
+      {{- end }}
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="target">Target id</label>
+    <input id="target" name="target" type="search" value="{{ .Filter.TargetID }}"
+           placeholder="host uuid" spellcheck="false">
+  </div>
+
+  <div class="field">
+    <label for="hours">Since</label>
+    <select id="hours" name="hours">
+      <option value="">any time</option>
+      <option value="1"{{ if eq .Filter.SinceHours 1 }} selected{{ end }}>the last hour</option>
+      <option value="24"{{ if eq .Filter.SinceHours 24 }} selected{{ end }}>the last day</option>
+      <option value="168"{{ if eq .Filter.SinceHours 168 }} selected{{ end }}>the last week</option>
+    </select>
+  </div>
+
+  <div class="field actions">
+    <button type="submit" class="button">Filter</button>
+    <a class="button" href="/ui/audit">Clear</a>
+  </div>
+</form>
+
+{{- if .Records }}
+<div class="scroll">
+<table class="grid stackable">
+  <thead>
+    <tr><th scope="col">When</th><th scope="col">Action</th><th scope="col">Actor</th>
+      <th scope="col">Target</th><th scope="col">From</th><th scope="col">Detail</th></tr>
+  </thead>
+  <tbody>
+  {{- range .Records }}
+    <tr>
+      <td data-label="When">{{ ago .At }}<span class="note">{{ stamp .At }}</span></td>
+      <td data-label="Action"><code>{{ .Action }}</code></td>
+      <td data-label="Actor">{{ if .ActorDisplay }}{{ .ActorDisplay }}{{ else }}<span class="note">{{ .ActorType }}</span>{{ end }}
+        <span class="note">{{ .ActorType }}</span></td>
+      <td data-label="Target">
+        {{- if .HostLink }}<a href="{{ .HostLink }}">{{ .TargetID }}</a>
+        {{- else if .TargetID }}<code>{{ .TargetID }}</code>
+        {{- else }}<span class="note">—</span>{{ end }}
+        {{- if .TargetType }}<span class="note">{{ .TargetType }}</span>{{ end }}</td>
+      <td data-label="From">{{ if .SourceIP }}<code>{{ .SourceIP }}</code>{{ else }}<span class="note">—</span>{{ end }}</td>
+      {{/*
+        jsonb, rendered as text. Some of it originated in a request — a host
+        name in a deletion entry, a CIDR in a prefix entry — so it goes through
+        the escaper like everything else and is never template.HTML.
+      */}}
+      <td data-label="Detail"><pre class="meta">{{ .Meta }}</pre></td>
+    </tr>
+  {{- end }}
+  </tbody>
+</table>
+</div>
+{{- if .AtLimit }}
+<p class="note">Showing the most recent {{ .Limit }} entries. Narrow the filter to see further back.</p>
+{{- end }}
+{{- else }}
+<p class="note">No entries match that filter.</p>
+{{- end }}
+{{- end }}
+{{- end -}}

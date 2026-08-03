@@ -1,0 +1,30 @@
+{{- define "content" -}}
+{{- with .Data }}
+<section class="card wide danger-zone">
+  <h1>Block {{ .Host.Name }}?</h1>
+  <p class="subtitle">
+    <a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a> ·
+    {{- range .Host.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
+    · {{ template "badge" .Host.Badge }}
+  </p>
+
+  {{/*
+    What it costs, worst first, for THIS host. The relay line leads because it
+    is the only consequence whose damage lands on machines that have nothing to
+    do with the decision being made.
+  */}}
+  <ul class="consequences">
+    {{- range .Consequences }}
+    <li><span class="glyph" aria-hidden="true">▲</span> {{ . }}</li>
+    {{- end }}
+  </ul>
+
+  <form method="post" action="/ui/hosts/{{ .Host.ID }}/block">
+    <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+    <button type="submit" class="button danger"
+            data-confirm="Block {{ .Host.Name }}? It loses the overlay within one blocklist convergence.">Block {{ .Host.Name }}</button>
+    <a class="button" href="/ui/hosts/{{ .Host.ID }}">Cancel</a>
+  </form>
+</section>
+{{- end }}
+{{- end -}}

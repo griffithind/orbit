@@ -1,0 +1,51 @@
+{{- define "content" -}}
+{{- with .Data }}
+<section class="card narrow">
+  <h1>Sign in</h1>
+
+  {{- if .Problem }}
+  <p class="banner bad" role="alert"><span class="glyph" aria-hidden="true">✕</span> {{ .Problem }}</p>
+  {{- end }}
+  {{- if .Note }}
+  <p class="banner" role="status">{{ .Note }}</p>
+  {{- end }}
+
+  {{/*
+    A real form, posting to a real URL. No fetch, no JSON — sign-in is the last
+    thing that should depend on a script having loaded.
+  */}}
+  <form method="post" action="/ui/login">
+    <input type="hidden" name="next" value="{{ .Next }}">
+
+    <label for="token">API token</label>
+    {{/*
+      type=password so it is not shoulder-surfed and not left on screen in a
+      screen-share, which is how these get read out loud. autocomplete=off
+      because a browser password manager storing an Orbit admin token under the
+      control plane's hostname is a copy of the credential in a place nobody
+      audits.
+    */}}
+    <input id="token" name="token" type="password" required autocomplete="off"
+           spellcheck="false" autocapitalize="off" placeholder="orbat_…">
+    <p class="hint">The same token the CLI and the JSON API take. Signing in
+      creates a session that can be ended without revoking the token itself.</p>
+
+    {{/*
+      Read-only is what you get by default; this is the opt-out. The field is
+      named for the dangerous state rather than the safe one on purpose — an
+      unchecked checkbox submits nothing, so absence has to mean the narrow
+      session, not the wide one.
+    */}}
+    <label class="check">
+      <input type="checkbox" name="full_access" value="1">
+      Allow changes in this session
+    </label>
+    <p class="hint">Leave this off to look without being able to change anything —
+      which is most visits. Ticking it gives the browser session the token's full
+      scopes; it can never give it more than the token already has.</p>
+
+    <button type="submit" class="button primary">Sign in</button>
+  </form>
+</section>
+{{- end }}
+{{- end -}}

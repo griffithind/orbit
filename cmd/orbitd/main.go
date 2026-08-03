@@ -38,6 +38,7 @@ import (
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/sched"
 	"github.com/griffithind/orbit/internal/store"
+	"github.com/griffithind/orbit/internal/web"
 )
 
 func main() {
@@ -153,18 +154,24 @@ func openStore(ctx context.Context, dsn string) (*store.Store, error) {
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
-		dsn         = fs.String("dsn", "", "postgres DSN for the orbit_app role (or ORBIT_DSN)")
-		addr        = fs.String("addr", ":8080", "listen address")
-		enrollURL   = fs.String("enroll-url", "", "public enroll URL handed to agents")
-		agentPort   = fs.Int("agent-port", 8443, "port the agent API listens on, on each overlay")
-		listenPort  = fs.Int("nebula-port", 4242, "nebula UDP port written into rendered configs")
-		trustXFF    = fs.Bool("trust-forwarded-for", false, "read the client address from X-Forwarded-For (only behind a trusted proxy)")
-		maxWatch    = fs.Int("max-watchers", 5000, "cap on concurrent long-poll connections per network")
-		noPush      = fs.Bool("no-push", false, "disable push updates; agents fall back to polling")
-		lighthouse  = fs.String("lighthouse", "", "seed: public host:port entries to advertise as a lighthouse, applied only when this control plane's host record is first created (comma separated)")
-		relay       = fs.Bool("relay", false, "seed: act as a relay, applied only when this control plane's host record is first created")
-		maintEvery  = fs.Duration("maintenance-interval", 15*time.Minute, "how often to prune and report")
-		noMaint     = fs.Bool("no-maintenance", false, "disable periodic maintenance on this instance")
+		dsn        = fs.String("dsn", "", "postgres DSN for the orbit_app role (or ORBIT_DSN)")
+		addr       = fs.String("addr", ":8080", "listen address")
+		enrollURL  = fs.String("enroll-url", "", "public enroll URL handed to agents")
+		agentPort  = fs.Int("agent-port", 8443, "port the agent API listens on, on each overlay")
+		listenPort = fs.Int("nebula-port", 4242, "nebula UDP port written into rendered configs")
+		trustXFF   = fs.Bool("trust-forwarded-for", false, "read the client address from X-Forwarded-For (only behind a trusted proxy)")
+		maxWatch   = fs.Int("max-watchers", 5000, "cap on concurrent long-poll connections per network")
+		noPush     = fs.Bool("no-push", false, "disable push updates; agents fall back to polling")
+		lighthouse = fs.String("lighthouse", "", "seed: public host:port entries to advertise as a lighthouse, applied only when this control plane's host record is first created (comma separated)")
+		relay      = fs.Bool("relay", false, "seed: act as a relay, applied only when this control plane's host record is first created")
+		maintEvery = fs.Duration("maintenance-interval", 15*time.Minute, "how often to prune and report")
+		noMaint    = fs.Bool("no-maintenance", false, "disable periodic maintenance on this instance")
+		uiAddr     = fs.String("ui-addr", "",
+			"web UI listen address; empty disables it. A bare port or \":port\" binds loopback")
+		uiURL = fs.String("ui-url", "",
+			"external URL the UI is reached at; required when -ui-addr is not loopback")
+		uiMaxStreams = fs.Int("ui-max-streams", web.DefaultMaxStreams,
+			"cap on concurrent UI event streams")
 		metricsAddr = fs.String("metrics-addr", "127.0.0.1:9464",
 			"Prometheus exposition address; empty disables it. Bind to localhost or the overlay: the output is fleet inventory")
 		meshes meshSpecs
@@ -182,6 +189,14 @@ func serve(args []string) error {
 	}
 	hasher, err := enroll.NewHasher(pep)
 	if err != nil {
+		return err
+	}
+
+	// Checked before anything is opened or joined. A refusal that arrives after
+	// the store is up and the mesh is joined has already done work, and the
+	// operator has to unpick it to act on the message.
+	*uiAddr = web.NormalizeAddr(*uiAddr)
+	if err := web.CheckExposure(*uiAddr, *uiURL); err != nil {
 		return err
 	}
 
@@ -255,6 +270,45 @@ func serve(args []string) error {
 		log.Info("push updates enabled", "maxWatchersPerNetwork", *maxWatch)
 	} else {
 		log.Warn("push updates disabled; agents will poll, converging an order of magnitude slower")
+	}
+
+	// The web UI, on its own listener. Not the public one — that is where
+	// unenrolled hosts enroll, and this serves a Block button for the whole
+	// fleet. Not the overlay one either: the mesh being broken is precisely when
+	// someone needs this, and a console reachable only over the mesh is
+	// unreachable exactly then.
+	if *uiAddr != "" {
+		ui, uerr := web.New(st, svc, web.StoreSessions(st), web.Config{
+			BaseURL:    *uiURL,
+			Notifier:   notifier,
+			MaxStreams: *uiMaxStreams,
+		}, log.With("component", "ui"))
+		if uerr != nil {
+			return fmt.Errorf("build the web ui: %w", uerr)
+		}
+
+		uiSrv := &http.Server{
+			Addr:              *uiAddr,
+			Handler:           api.Observe(log.With("component", "ui"), ui.Handler()),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			// No WriteTimeout: /ui/events is a long-lived SSE stream, and a
+			// write deadline would sever it on a schedule. Same reasoning as
+			// the overlay listener's long poll.
+			IdleTimeout: 2 * time.Minute,
+		}
+		go func() {
+			<-ctx.Done()
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = uiSrv.Shutdown(shutdown)
+		}()
+		go func() {
+			log.Info("web ui listening", "addr", *uiAddr, "url", *uiURL)
+			if err := uiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("web ui listener stopped", "error", err)
+			}
+		}()
 	}
 
 	// Periodic maintenance: prune the blocklist and spent credentials, and

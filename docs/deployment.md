@@ -418,6 +418,43 @@ blocklist  epoch 18        1204/1204 100.0%
 rotating a CA past these hosts will cut them off
 ```
 
+### The web console
+
+`orbitd -ui-addr 8081` serves an operator console. Off unless you ask for it, and
+a bare port binds **loopback** — the listener carries every host name, every
+overlay address, and a control that cuts a host off the mesh, on the machine
+holding the mesh's root CA key.
+
+```bash
+ssh -N -L 8081:127.0.0.1:8081 orbit-control    # then http://127.0.0.1:8081/ui/
+```
+
+Binding it anywhere else without an `https://` `-ui-url` is **refused at
+startup**, and not only on principle: the session cookie is `__Host-` prefixed
+and therefore `Secure`, so a browser will not store it over plain http on a
+non-loopback origin. The login form would appear to work and silently return you
+to itself.
+
+**Sign in with an ordinary Orbit API token.** There is no second user database.
+Sessions default to **read-only** — the common use is checking convergence from
+a phone, and a cookie jar holding a credential that can create certificate
+authorities is worth avoiding. Untick it to act.
+
+A session *references* its token rather than copying its scopes, so
+`orbit token revoke` closes every browser it opened, on the next request:
+
+```bash
+orbit token revoke $TOKEN_ID     # every console signed in with it is out
+```
+
+Every screen works with JavaScript disabled — forms are real forms, links are
+real links. Live updates are an enhancement, not a requirement.
+
+One behaviour worth knowing: following a link into the console from chat or a
+ticket lands on the login page even with a valid session, because the cookie is
+`SameSite=Lax` and the first navigation is cross-site. A reload signs you
+straight in.
+
 ### Log lines worth an alert
 
 Most of these now have a metric alongside them. Keep both: a counter tells you

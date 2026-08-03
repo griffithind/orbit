@@ -1,6 +1,10 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+	"slices"
+	"strings"
+)
 
 // The route table.
 //
@@ -53,6 +57,30 @@ const (
 	// takes a token, both are absent from nothing, and readiness fails while
 	// liveness passes when Postgres is gone.
 	surfaceHealth surface = "health"
+
+	// surfaceUI is the browser console: session cookies, and never a bearer
+	// token. Its routes are registered by internal/web on its own mux, so none
+	// of them appear in this table — but the surface is named here because this
+	// is where the surface model is written down, and a fifth authentication
+	// model that is documented nowhere is how the fourth one gets mixed into
+	// the third.
+	//
+	// THE RULE THAT MATTERS, and the one this const exists to record:
+	//
+	//	/v1 MUST NEVER ACCEPT THE COOKIE, AND THE UI SURFACE MUST NEVER ACCEPT
+	//	A BEARER TOKEN.
+	//
+	// Every /v1 route was written assuming bearer authentication, which a
+	// browser cannot be made to send cross-site — so none of them carry CSRF
+	// defences, and several would be dangerous without one. DELETE
+	// /v1/hosts/{id} takes its reason from a QUERY PARAMETER: honouring a
+	// cookie there turns a link into a host decommission. The isolation is
+	// structural rather than a check inside a handler — Server.admin is built
+	// from bearerCredential and Server.UI from sessionCredential, and neither
+	// has a path to the other's credential — and e2e/session_isolation_test.go
+	// asserts both directions over live HTTP, as overlay_test.go does for the
+	// agent surface.
+	surfaceUI surface = "ui"
 )
 
 // route is one endpoint.
@@ -99,6 +127,26 @@ var knownScopes = map[string]bool{
 	// splitting the network PATCH in two to make it expressible would put the
 	// only place a network's posture is set in two places.
 	"policy:read": true, "policy:write": true,
+}
+
+// ReadOnlyScopes returns the read half of knownScopes, sorted.
+//
+// This is what a read-only browser session on a "*" token is narrowed to.
+// store.narrowToReadOnly has to carry its own copy of the list — store cannot
+// import api, and expanding "*" is the one case an intersection cannot be
+// written without enumerating the set — so this function exists to make the
+// duplication checkable. internal/store/session_test.go asserts the two agree,
+// which turns "a scope was added in one place and not the other" into a test
+// failure rather than a scope a read-only session silently never gets.
+func ReadOnlyScopes() []string {
+	out := make([]string, 0, len(knownScopes))
+	for s := range knownScopes {
+		if strings.HasSuffix(s, ":read") {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // scopelessAdminRoutes are the admin routes that require authentication but no

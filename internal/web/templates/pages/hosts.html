@@ -1,0 +1,91 @@
+{{- define "content" -}}
+{{- with .Data }}
+<h1>Hosts</h1>
+<p class="subtitle"><a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a>
+  {{- if .Total }} · {{ .Total }} matching{{ end }}</p>
+
+{{/*
+  A GET form. The filter ends up in the URL, so a filtered listing survives a
+  refresh, can be bookmarked, and can be pasted into a chat message — which is
+  what an operator actually does with "here are the twelve that are behind".
+*/}}
+<form method="get" class="filters">
+  {{/*
+    Each control is wrapped so that the LABEL AND ITS INPUT are one grid item.
+    Without the wrapper the auto-fit grid puts them in adjacent columns and the
+    label ends up beside the previous field's box, which reads as the wrong
+    label for the wrong control.
+  */}}
+  <div class="field">
+    <label for="q">Name contains</label>
+    <input id="q" name="q" type="search" value="{{ .Filter.Query }}" placeholder="web-">
+  </div>
+
+  <div class="field">
+    <label for="state">State</label>
+    <select id="state" name="state">
+      <option value="">any</option>
+      {{- range .Filter.States }}
+      <option value="{{ . }}"{{ if eq . $.Data.Filter.State }} selected{{ end }}>{{ . }}</option>
+      {{- end }}
+    </select>
+  </div>
+
+  <div class="field">
+    <label class="check">
+      <input type="checkbox" name="behind" value="1"{{ if .Filter.Behind }} checked{{ end }}>
+      Behind only
+    </label>
+  </div>
+
+  <div class="field actions">
+    <button type="submit" class="button">Filter</button>
+    <a class="button" href="/ui/networks/{{ .Network.ID }}/hosts">Clear</a>
+  </div>
+</form>
+
+{{- if hasScope $.Scopes "hosts:create" }}
+<p><a class="button" href="/ui/networks/{{ .Network.ID }}/hosts/new">Add a host</a></p>
+{{- end }}
+
+{{- if .Hosts }}
+{{/*
+  The table is the hard part on a phone, so it lives in an overflow-x wrapper
+  and each cell carries a data-label. One media query in app.css turns the rows
+  into stacked cards using td::before { content: attr(data-label) }; there is no
+  second markup path and no JavaScript involved.
+*/}}
+<div class="scroll">
+<table class="grid stackable">
+  <thead>
+    <tr>
+      <th scope="col">Host</th><th scope="col">State</th><th scope="col">Address</th>
+      <th scope="col">Role</th><th scope="col">Config</th><th scope="col">Blocklist</th>
+      <th scope="col">Last seen</th>
+    </tr>
+  </thead>
+  <tbody>
+  {{- range .Hosts }}
+    <tr>
+      <td data-label="Host"><a href="/ui/hosts/{{ .ID }}">{{ .Name }}</a></td>
+      <td data-label="State">{{ template "badge" .Badge }}</td>
+      <td data-label="Address">{{ range .OverlayAddrs }}<code>{{ . }}</code> {{ end }}</td>
+      <td data-label="Role">{{ if .RoleName }}{{ .RoleName }}{{ else }}<span class="note">none</span>{{ end }}</td>
+      <td data-label="Config">{{ template "badge" .ConfigBadge }}</td>
+      <td data-label="Blocklist">{{ template "badge" .BlockBadge }}</td>
+      <td data-label="Last seen">{{ agoPtr .LastSeenAt }}</td>
+    </tr>
+  {{- end }}
+  </tbody>
+</table>
+</div>
+
+<p class="pager">
+  {{- if .PrevURL }}<a class="button" href="{{ .PrevURL }}">First page</a>{{ end }}
+  {{- if .NextCursor }}<a class="button" href="{{ .NextCursor }}">Next page</a>{{ end }}
+</p>
+{{- else }}
+<p class="note">No host matches that filter. Clear it before concluding the fleet is empty.</p>
+{{- end }}
+{{- end }}
+{{- end -}}
