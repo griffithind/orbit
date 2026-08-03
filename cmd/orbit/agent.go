@@ -282,7 +282,7 @@ func runCmd(args []string) error {
 	// It also removes the failure the old -restart flag existed to warn about:
 	// there is no configuration to forget, an address change is always
 	// applicable, and "is nebula running" always has an exact answer.
-	engine := &agent.Embedded{ConfigPath: layout.ConfigPath(), Log: log}
+	engine := &agent.Embedded{ConfigArg: layout.NebulaConfigArg(), Log: log}
 	defer func() { _ = engine.Close() }()
 
 	applier := &agent.Applier{
@@ -450,7 +450,7 @@ func recoverCmd(args []string) error {
 	// Recovery re-keys the host, and a recovered certificate can carry a
 	// different overlay address than the expired one — a restart, not a reload.
 	// The engine is both.
-	engine := &agent.Embedded{ConfigPath: layout.ConfigPath(), Log: log}
+	engine := &agent.Embedded{ConfigArg: layout.NebulaConfigArg(), Log: log}
 	defer func() { _ = engine.Close() }()
 
 	applier := &agent.Applier{

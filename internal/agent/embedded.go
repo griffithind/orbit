@@ -30,8 +30,15 @@ import (
 // apply sequence, the revert guard, verification — is unchanged and untested
 // code paths are not introduced alongside the ones that already work.
 type Embedded struct {
-	// ConfigPath is the rendered nebula.yml this engine loads and re-reads.
-	ConfigPath string
+	// ConfigArg is what nebula is pointed at, and it is Layout.NebulaConfigArg
+	// rather than Layout.ConfigPath — a FILE in authoritative mode and a
+	// DIRECTORY in fragment mode.
+	//
+	// The distinction is the whole point of the modes: nebula loads a file
+	// verbatim and merges a directory. Handing it ConfigPath would load the
+	// fragment alone on a fragment-mode host, silently dropping every
+	// operator-authored file the mode exists to include.
+	ConfigArg string
 
 	Log *slog.Logger
 
@@ -82,8 +89,8 @@ func (e *Embedded) startLocked(_ context.Context) error {
 	nlog := log.With("component", "nebula")
 
 	c := config.NewC(nlog)
-	if err := c.Load(e.ConfigPath); err != nil {
-		return fmt.Errorf("load %s: %w", e.ConfigPath, err)
+	if err := c.Load(e.ConfigArg); err != nil {
+		return fmt.Errorf("load %s: %w", e.ConfigArg, err)
 	}
 
 	// A nil device factory means the real tun device, which is the whole
@@ -100,7 +107,7 @@ func (e *Embedded) startLocked(_ context.Context) error {
 
 	e.c, e.ctrl, e.running = c, ctrl, true
 	e.generation++
-	log.Info("nebula started", "generation", e.generation, "config", e.ConfigPath)
+	log.Info("nebula started", "generation", e.generation, "config", e.ConfigArg)
 	return nil
 }
 
