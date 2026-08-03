@@ -123,6 +123,26 @@ func (t *Tx) GetHost(ctx context.Context, id uuid.UUID) (*Host, error) {
 	return h, nil
 }
 
+// GetHostByName resolves one host within a network.
+//
+// Scoped to a network, and it has to be: orbit.host is UNIQUE (network_id, name),
+// so "web-01" is unambiguous inside one network and says nothing across a
+// deployment — a machine on two networks holds two host rows with the same name.
+// That is why this takes a network id rather than looking like GetNetworkBySlug.
+//
+// Unlike a network's slug, a host name is MUTABLE, so this is a convenience for a
+// human at a terminal rather than an addressing key. Automation that has to keep
+// pointing at the same host across a rename holds the uuid.
+func (t *Tx) GetHostByName(ctx context.Context, networkID uuid.UUID, name string) (*Host, error) {
+	h, err := scanHost(t.tx.QueryRow(ctx,
+		`SELECT `+hostCols+` `+hostFrom+` WHERE h.network_id = $1 AND h.name = $2`,
+		networkID, name))
+	if err != nil {
+		return nil, mapErr(err, "get host by name")
+	}
+	return h, nil
+}
+
 // HostCursor is a position in a host listing: the sort key of the last row a
 // caller has already seen.
 //

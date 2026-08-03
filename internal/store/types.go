@@ -84,6 +84,17 @@ type Network struct {
 	// ConfigMode is the layout new hosts of this network inherit.
 	ConfigMode string
 
+	// FirewallSource is where this network's firewall rules come from:
+	// FirewallSourceRole (per-role rules, the default and what every network
+	// created before migration 0009 is) or FirewallSourcePolicy (the compiled
+	// network policy document).
+	//
+	// One or the other, never both. Nebula's firewall is allow-only and rules
+	// across config files concatenate, so rendering two sources could only widen
+	// reachability — and what Orbit reported about a host's policy would be a
+	// lower bound wearing authoritative mode's guarantee. See store/policy.go.
+	FirewallSource string
+
 	// Overrides are nebula settings Orbit does not model, merged into the
 	// rendered configuration beneath any per-host overrides. Stored as jsonb.
 	Overrides []byte

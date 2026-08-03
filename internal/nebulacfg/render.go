@@ -66,6 +66,8 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/griffithind/orbit/internal/policy"
 )
 
 // Render modes. These mirror store.ConfigMode* and the CHECK constraint in
@@ -227,6 +229,18 @@ type Input struct {
 	// Firewall comes from the host's role. Nil yields the conservative default:
 	// all outbound allowed, no inbound.
 	Firewall *Firewall
+
+	// Policy is this host's compiled network policy, and REPLACES Firewall when
+	// set.
+	//
+	// Replaces rather than merges, because two sources of firewall rules means
+	// two answers to "what may reach this host" and the whole point of a
+	// compiled policy is that there is one. A network that adopts a policy stops
+	// using its roles' rules; the roles keep supplying certificate groups.
+	//
+	// Rendered through FirewallFromPolicy, which is where Mode decides what may
+	// honestly be claimed about the outbound direction.
+	Policy *policy.Ruleset
 
 	ListenHost string
 	ListenPort int
@@ -506,6 +520,9 @@ func Render(in Input) ([]byte, error) {
 	fw := in.Firewall
 	if fw == nil {
 		fw = DefaultFirewall()
+	}
+	if in.Policy != nil {
+		fw = FirewallFromPolicy(*in.Policy, in.Mode)
 	}
 
 	shm := staticHostMap{}

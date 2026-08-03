@@ -84,6 +84,21 @@ var knownScopes = map[string]bool{
 	"cas:read": true, "cas:write": true,
 	"tokens:read": true, "tokens:write": true,
 	"audit:read": true,
+
+	// The network policy document gets its own pair rather than reusing
+	// networks:*, for the reason the trust bundle takes cas:read instead of
+	// networks:read: the scope should bound what a token can DO, not which noun
+	// it names. This document IS the firewall for every host in the network, so
+	// a credential trusted to rename a network or add a prefix must not reach it
+	// through the same grant.
+	//
+	// policy:write also gates the firewall_source switch on PATCH
+	// /v1/networks/{ref}, which the route table declares as networks:write.
+	// That route needs BOTH, and the handler checks the second — see
+	// handleUpdateNetwork. The table cannot express a per-field scope, and
+	// splitting the network PATCH in two to make it expressible would put the
+	// only place a network's posture is set in two places.
+	"policy:read": true, "policy:write": true,
 }
 
 // scopelessAdminRoutes are the admin routes that require authentication but no

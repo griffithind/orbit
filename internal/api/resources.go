@@ -54,6 +54,26 @@ func (s *Server) resourceRoutes() []route {
 		// every client that knows a network by the name its operator uses.
 		a("GET /v1/networks/{ref}", "networks:read", s.handleGetNetwork),
 
+		// The network policy document. {ref} is a uuid or a slug, resolved by the
+		// same rule GET /v1/networks/{ref} uses.
+		//
+		// policy:read and policy:write rather than networks:*: this document is
+		// the firewall for every host in the network, and a token trusted to
+		// read network metadata should not reach it — the same reasoning that
+		// puts the trust bundle behind cas:read. routes.go's knownScopes carries
+		// the longer version.
+		a("GET /v1/networks/{ref}/policy", "policy:read", s.handleGetPolicy),
+		// PUT, not PATCH, and it replaces wholesale rather than merging, for the
+		// reason UpdateRoleRequest.Firewall does: merging makes "remove this
+		// entry" inexpressible, and an entry an operator believes they deleted is
+		// the worst possible outcome for a firewall.
+		a("PUT /v1/networks/{ref}/policy", "policy:write", s.handlePutPolicy),
+		// Validate without storing. policy:write rather than policy:read, because
+		// what it accepts is a document the caller is proposing to install — the
+		// scope should match the operation being rehearsed, not the fact that
+		// nothing was written this time.
+		a("POST /v1/networks/{ref}/policy/check", "policy:write", s.handleCheckPolicy),
+
 		a("POST /v1/roles", "roles:write", s.handleCreateRole),
 		a("GET /v1/roles", "roles:read", s.handleListRoles),
 		a("GET /v1/roles/{id}", "roles:read", s.handleGetRole),
@@ -698,6 +718,9 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		FirewallRules: req.Firewall,
 	}
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if err := checkFirewallSource(ctx, tx, networkID, len(req.Firewall) > 0); err != nil {
+			return err
+		}
 		if err := checkGroupsAgainstCA(ctx, tx, networkID, role.Groups); err != nil {
 			return err
 		}
@@ -714,6 +737,14 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ca.ErrGroupNotInCA) {
 			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, errRoleFirewallNotInForce) {
+			// 409, not 400. The request is well-formed and would be accepted on
+			// this same network tomorrow; what refuses it is the network's
+			// current posture, which is the distinction CA activation's 409 draws
+			// too.
+			writeErr(w, http.StatusConflict, err.Error())
 			return
 		}
 		s.notFoundOr(w, err, "network")
@@ -754,6 +785,46 @@ func checkGroupsAgainstCA(ctx context.Context, tx *store.Tx, networkID uuid.UUID
 		}
 	}
 	return nil
+}
+
+// errRoleFirewallNotInForce is returned when a role's firewall rules are written
+// to a network that draws its firewall from the policy document.
+var errRoleFirewallNotInForce = errors.New("this network's firewall comes from its policy document")
+
+// checkFirewallSource refuses per-role firewall rules on a network in policy
+// mode.
+//
+// A REFUSAL RATHER THAN A WARNING, and that is the whole point. In policy mode
+// nothing renders role.firewall_rules, so accepting the write would store rules
+// that take effect nowhere, report 200, advance the epoch, and leave an operator
+// certain they have opened a port. "A rule an operator believes they added that
+// does nothing" is the exact dual of the failure that makes UpdateRoleRequest
+// replace rather than merge, and it deserves the same treatment.
+//
+// Only when firewall rules are actually supplied. Roles are NOT obsolete in
+// policy mode — they still carry `groups`, groups still go into the signed
+// certificate, and the CA still constrains them — so creating or editing a role
+// without touching its firewall stays entirely legal.
+//
+// The rules already stored on a role are left alone, here and everywhere else: a
+// switch is meant to be reversible, and destroying the configuration being
+// switched away from makes it not.
+func checkFirewallSource(ctx context.Context, tx *store.Tx, networkID uuid.UUID, writesFirewall bool) error {
+	if !writesFirewall {
+		return nil
+	}
+	net, err := tx.GetNetwork(ctx, networkID)
+	if err != nil {
+		return err
+	}
+	if net.FirewallSource != store.FirewallSourcePolicy {
+		return nil
+	}
+	return fmt.Errorf("%w: network %s draws its firewall from the policy document, "+
+		"so rules written here would be stored and enforced nowhere. "+
+		"Edit the policy document (PUT /v1/networks/%s/policy), or switch the network back "+
+		"to firewall_source \"role\" first",
+		errRoleFirewallNotInForce, net.Slug, net.Slug)
 }
 
 func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
@@ -851,6 +922,9 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if err := checkFirewallSource(ctx, tx, role.NetworkID, req.Firewall != nil); err != nil {
+			return err
+		}
 		if req.Groups != nil {
 			if err := checkGroupsAgainstCA(ctx, tx, role.NetworkID, *req.Groups); err != nil {
 				return err
@@ -904,6 +978,14 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ca.ErrGroupNotInCA) {
 			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, errRoleFirewallNotInForce) {
+			// 409, not 400. The request is well-formed and would be accepted on
+			// this same network tomorrow; what refuses it is the network's
+			// current posture, which is the distinction CA activation's 409 draws
+			// too.
+			writeErr(w, http.StatusConflict, err.Error())
 			return
 		}
 		s.notFoundOr(w, err, "role")
@@ -1567,8 +1649,9 @@ func networkResponse(n *store.Network) wire.NetworkResponse {
 	out := wire.NetworkResponse{
 		ID: n.ID.String(), Slug: n.Slug, Name: n.Name, CIDRs: cidrs,
 		Curve: n.Curve, CertVersion: int(n.CertVer), CertTTL: n.CertTTL.String(),
-		ConfigMode:  n.ConfigMode,
-		ConfigEpoch: n.ConfigEpoch, BlocklistEpoch: n.BlocklistEpoch,
+		ConfigMode:     n.ConfigMode,
+		FirewallSource: n.FirewallSource,
+		ConfigEpoch:    n.ConfigEpoch, BlocklistEpoch: n.BlocklistEpoch,
 	}
 	if n.ListenPort != nil {
 		out.ListenPort = *n.ListenPort

@@ -719,6 +719,236 @@ type UpdateNetworkRequest struct {
 
 	ListenPort *int    `json:"listen_port,omitempty"`
 	ConfigMode *string `json:"config_mode,omitempty"`
+
+	// FirewallSource switches the network between "role" and "policy".
+	//
+	// It rides on this request rather than on a route of its own because it is a
+	// column on the network and belongs beside config_mode, the other field here
+	// that sets fleet-wide posture. It requires the policy:write scope IN
+	// ADDITION to the networks:write this route declares — a token trusted to
+	// rename a network must not thereby be able to change what firewall every
+	// host in it enforces. The handler checks the second scope; see
+	// resources.go's note on why the route table cannot express it.
+	FirewallSource *string `json:"firewall_source,omitempty"`
+
+	// AcknowledgeFirewallChange proceeds past the disruption gate.
+	//
+	// A typed field rather than a query flag, exactly as ActivateCARequest's
+	// acknowledge_cutoff and AddHostAddressRequest's acknowledge_restart are, and
+	// for the same reasons: this changes the firewall on every host in the
+	// network in one request, it should be impossible to take by accident, and it
+	// is audited as its own action rather than as an ordinary rename with a flag
+	// in metadata.
+	//
+	// Only consulted when FirewallSource is supplied and the network has live
+	// hosts. A switch on a network nobody has enrolled into disrupts nothing, and
+	// demanding a confirmation there would teach operators to pass the flag
+	// reflexively — which is what makes the confirmation on the dangerous case
+	// worthless.
+	AcknowledgeFirewallChange bool `json:"acknowledge_firewall_change,omitempty"`
+}
+
+// --- Admin: the network policy document ---
+//
+// THE REQUEST BODY OF PUT AND POST IS THE DOCUMENT ITSELF, raw, with no
+// envelope. There is deliberately no PutPolicyRequest type here.
+//
+// Two reasons. A policy document is a file an operator keeps in git, so
+// `curl -X PUT --data-binary @policy.json` and `orbit policy apply policy.json`
+// should send the same bytes — an envelope makes the first of those a jq
+// invocation. And the document's Go type already exists and is already shared:
+// policy.Document, in internal/policy, which both the control plane and the CLI
+// parse with policy.Parse. A second declaration of it here would be the drift
+// this package exists to prevent, not a defence against it.
+//
+// The RESPONSES are typed here, because they are Orbit's own and would otherwise
+// be known to one side only.
+
+// PolicyResponse is a network's current policy document.
+type PolicyResponse struct {
+	NetworkID   string `json:"network_id"`
+	NetworkSlug string `json:"network_slug"`
+
+	// Version starts at 1 and counts within this network. Quoted during an
+	// incident, so it is small and means something about this network rather
+	// than about the deployment.
+	Version int64 `json:"version"`
+
+	// Document is the stored document. It is NOT byte-identical to what was
+	// submitted: it is stored as jsonb, so key order and formatting are
+	// normalized away. That normalization is what makes a re-send of an
+	// unchanged policy provably a no-op rather than a fleet-wide re-render.
+	Document json.RawMessage `json:"document"`
+
+	// ConfigEpoch is the epoch this version produced, and the join between a
+	// policy version and what a host reported applying: a host at
+	// applied_config_epoch 41 was enforcing the greatest version at or below 41.
+	ConfigEpoch int64 `json:"config_epoch"`
+
+	Author    string    `json:"author,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// FirewallSource is the network's, repeated here because it is the answer to
+	// the only question worth asking about a stored policy: whether it is the
+	// one hosts are enforcing. A document can exist for a long time before it is
+	// switched on, and a reader who assumes otherwise is reading a draft as if
+	// it were the firewall.
+	FirewallSource string `json:"firewall_source"`
+}
+
+// PolicyUpdateResponse is the body of PUT /v1/networks/{ref}/policy.
+type PolicyUpdateResponse struct {
+	PolicyResponse
+
+	// Changed is false when the submitted document was semantically identical to
+	// the stored one — same rules in a different key order, or reformatted. The
+	// stored document is returned unmodified, no version was written, and no
+	// epoch was bumped, so no agent was woken.
+	Changed bool `json:"changed"`
+
+	// PreviousVersion is 0 when this was the network's first document.
+	PreviousVersion int64 `json:"previous_version,omitempty"`
+
+	// Detail says in words what happens next, for whoever is reading a terminal
+	// rather than parsing JSON — including the case that matters most, which is
+	// a document stored while the network is still drawing its firewall from
+	// roles and therefore not enforcing any of it.
+	Detail string `json:"detail,omitempty"`
+}
+
+// PolicyCheckResponse is the body of POST /v1/networks/{ref}/policy/check.
+//
+// The endpoint validates without storing, and it is worth more than it looks: a
+// policy edit is fleet-wide and an operator cannot see its effect before
+// applying it, so this is where a typo is found instead of at 400 hosts. A
+// refusal is a 400 carrying wire.Error with the fault named; this body is the
+// success case.
+type PolicyCheckResponse struct {
+	// Valid is always true in a 2xx body. Present so a caller that checks a
+	// field rather than a status code cannot read a refusal as a pass — the
+	// failure mode of a check endpoint whose success body is empty.
+	Valid bool `json:"valid"`
+
+	NetworkID   string `json:"network_id"`
+	NetworkSlug string `json:"network_slug"`
+
+	// CurrentVersion is the version stored now, or 0 when the network has none.
+	// It answers "am I about to change anything" before the change is made.
+	CurrentVersion int64 `json:"current_version,omitempty"`
+
+	// WouldChange is false when this document is semantically what is already
+	// stored, so applying it would write nothing and wake no agent.
+	WouldChange bool `json:"would_change"`
+
+	// FirewallSource is the network's current source. A valid document checked
+	// against a network still in "role" mode is a document that would be stored
+	// and enforce nothing, and that is worth saying before the operator concludes
+	// their change is live.
+	FirewallSource string `json:"firewall_source"`
+
+	// Host is the host named by ?host=, when one was named, resolved to what the
+	// compiler will be given for it. Absent when no host was named.
+	Host *PolicyCheckHost `json:"host,omitempty"`
+
+	// Compiled is exactly what this host would render: the real compiler, the
+	// current fleet, and the management floor included. Absent when no host was
+	// named, because there is no such thing as a network-wide rule set — the
+	// entire design compiles selectors to per-host addresses.
+	Compiled *PolicyRuleset `json:"compiled,omitempty"`
+}
+
+// PolicyRuleset is one host's compiled firewall.
+//
+// Declared here rather than reusing policy.Ruleset directly, and that is not
+// duplication for its own sake: this is the JSON shape of an HTTP response, and
+// policy.Ruleset is an internal type whose field names the compiler is free to
+// change. Pinning the wire names here is what stops a rename in the compiler
+// from silently renaming a field every client reads.
+type PolicyRuleset struct {
+	Inbound  []PolicyRule `json:"inbound"`
+	Outbound []PolicyRule `json:"outbound"`
+}
+
+// PolicyRule is one compiled nebula firewall rule.
+//
+// Four fields, matching what the compiler can emit. There is no host, groups, or
+// ca_name: compiling to ADDRESSES is the entire point of the policy document —
+// it is what makes an edit config-only instead of a certificate reissue — and a
+// field that is always empty is one every reader has to check.
+type PolicyRule struct {
+	Proto string `json:"proto"`
+	Port  string `json:"port"`
+	CIDR  string `json:"cidr"`
+
+	// LocalCIDR is present only when the rule names a subnet this host routes
+	// rather than an address it owns. Empty is the ordinary case and is
+	// meaningfully different from absent-because-unset, which is why it is
+	// omitempty rather than always rendered.
+	LocalCIDR string `json:"local_cidr,omitempty"`
+}
+
+// PolicyCheckHost is the host a check was scoped to.
+//
+// It carries the inputs a selector is resolved against — addresses, groups, the
+// role — rather than a rendered rule set, because those are what an operator
+// actually gets wrong: a selector that matches nothing matches nothing because
+// the host's tags or addresses are not what the author assumed.
+type PolicyCheckHost struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	OverlayAddrs []string `json:"overlay_addrs"`
+	Tags         []string `json:"tags,omitempty"`
+	RoleName     string   `json:"role_name,omitempty"`
+	Groups       []string `json:"groups,omitempty"`
+	State        string   `json:"state"`
+}
+
+// FirewallSourceChangeError is the 409 body from switching a network's firewall
+// source without acknowledging it.
+//
+// Typed for the same reason LaggingHostsError is, and the remedy is likewise not
+// in the Error field: what an operator needs to see is how many hosts are about
+// to have their entire rule set replaced, and that is HostsAffected.
+//
+// NOT a convergence gate. CA activation refuses because hosts have not caught up
+// and waiting fixes it; this refuses because the change is large and
+// irreversible-in-the-moment, and waiting changes nothing. Retrying with the
+// acknowledgement is the only way through, which is why the message says so
+// rather than suggesting a retry later.
+type FirewallSourceChangeError struct {
+	Error string `json:"error"`
+
+	// From and To are the current and requested sources, so a client can render
+	// the direction without inferring it.
+	From string `json:"from"`
+	To   string `json:"to"`
+
+	// HostsAffected is how many enrolled or active hosts re-render their firewall
+	// when this proceeds. Hosts that have never enrolled are excluded: they have
+	// no configuration to replace.
+	HostsAffected int `json:"hosts_affected"`
+
+	// Detail spells out the consequence in words, worst first.
+	Detail string `json:"detail,omitempty"`
+}
+
+// NetworkUpdateResponse is the body of PATCH /v1/networks/{ref}.
+//
+// NetworkResponse plus what only an edit knows, in the shape RoleUpdateResponse
+// established. It embeds rather than restates, so a client decoding the network
+// fields keeps working and a field renamed on the server is a build failure
+// here rather than a silent regression.
+type NetworkUpdateResponse struct {
+	NetworkResponse
+
+	// FirewallSourceChanged is false when the network was already drawing from
+	// the requested source. Nothing was written and no epoch was bumped.
+	FirewallSourceChanged bool `json:"firewall_source_changed"`
+
+	// HostsAffected is how many hosts re-render on their next poll.
+	HostsAffected int `json:"hosts_affected,omitempty"`
+
+	Detail string `json:"detail,omitempty"`
 }
 
 type NetworkResponse struct {
@@ -743,6 +973,17 @@ type NetworkResponse struct {
 	// one file into a directory nebula merges, so any policy it reports is a
 	// lower bound.
 	ConfigMode string `json:"config_mode,omitempty"`
+
+	// FirewallSource is where this network's firewall rules come from: "role"
+	// (per-role firewall_rules, the default) or "policy" (the compiled network
+	// policy document).
+	//
+	// Reported rather than left implicit because it changes what every other
+	// firewall-shaped field on this API MEANS. In policy mode a role's
+	// `firewall` still has a value and that value is not being enforced
+	// anywhere, so a client that renders a role without knowing this is showing
+	// an operator rules that do nothing.
+	FirewallSource string `json:"firewall_source,omitempty"`
 
 	ConfigEpoch    int64 `json:"config_epoch"`
 	BlocklistEpoch int64 `json:"blocklist_epoch"`

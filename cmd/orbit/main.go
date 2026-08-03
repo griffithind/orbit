@@ -19,6 +19,7 @@
 //	converge  how much of the fleet has applied the current configuration
 //	network   list networks
 //	role      list, inspect, edit, and delete roles
+//	policy    read, check, and apply the network policy document
 //	ca        list, activate, and retire certificate authorities
 //	token     list, mint, and revoke admin tokens
 //	audit     read the audit trail
@@ -55,6 +56,8 @@ func main() {
 		err = networkCmd(ctx, os.Args[2:])
 	case "role":
 		err = roleCmd(ctx, os.Args[2:])
+	case "policy":
+		err = policyCmd(ctx, os.Args[2:])
 	case "ca":
 		err = caCmd(ctx, os.Args[2:])
 	case "token":
@@ -89,6 +92,7 @@ func usage() {
   converge   how much of the fleet has applied the current configuration
   network    ls
   role       ls, show, edit, rm
+  policy     show, check, apply, use
   ca         ls, activate, retire
   token      ls, create, revoke
   audit      read the audit trail

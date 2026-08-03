@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -108,6 +109,11 @@ func checkHint(err error) string {
 			"hyphens with no leading or trailing whitespace: it is a display label, and " +
 			"one that ends in a space renders identically to one that does not while " +
 			"comparing unequal"
+	case strings.Contains(msg, "network_policy_source_requires_document"):
+		return "a network cannot draw its firewall from a policy document it does not have: " +
+			"nebula's firewall is default-deny, so every host would render an empty rule set " +
+			"and drop all traffic while reporting a successful apply. " +
+			"PUT a policy document first"
 	case strings.Contains(msg, "host_tun_dev"):
 		return "a tun device name must be 15 characters or fewer: Linux copies it into a " +
 			"fixed 16-byte field with no error, so a longer one is silently truncated and " +
@@ -1306,14 +1312,31 @@ func (s *Server) handleRemoveNetworkCIDR(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, networkResponse(out))
 }
 
-// handleUpdateNetwork edits the display name and the per-network instance
-// defaults.
+// handleUpdateNetwork edits the display name, the per-network instance defaults,
+// and which firewall the network draws from.
 //
 // There is no slug here, and that is the feature. The slug is a directory name
 // on every managed host in the network; changing it would not rename anything,
 // it would strand the old directory and make every agent create a second one
 // beside it. The database refuses the change outright, so this endpoint does not
 // have to be the place that remembers.
+//
+// FIREWALL_SOURCE IS THE ODD ONE OUT and carries two things nothing else here
+// does.
+//
+// It needs the policy:write scope on top of the networks:write this route
+// declares. A token minted to rename networks and add prefixes must not be able
+// to replace the firewall on every host in one of them, and that is exactly what
+// this field does. The route table cannot express a per-field scope, so the check
+// is here; routes.go's knownScopes records the arrangement so it is not folklore.
+//
+// And it is gated behind a typed acknowledgement, in the shape ActivateCARequest
+// and AddHostAddressRequest use. The blast radius is the whole network at once,
+// and the failure is quiet in a way neither of those is: if the new source
+// compiles to fewer rules than the old one, every host applies successfully,
+// reports the new epoch, and convergence reads 100% while traffic stops. There is
+// no status code that shows up anywhere for that. Making an operator say so out
+// loud is the only signal available.
 func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
 
@@ -1321,9 +1344,9 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Name == nil && req.ListenPort == nil && req.ConfigMode == nil {
+	if req.Name == nil && req.ListenPort == nil && req.ConfigMode == nil && req.FirewallSource == nil {
 		writeErr(w, http.StatusBadRequest,
-			"no fields supplied; set name, listen_port, or config_mode. "+
+			"no fields supplied; set name, listen_port, config_mode, or firewall_source. "+
 				"The slug is immutable and cannot be edited")
 		return
 	}
@@ -1337,8 +1360,28 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "listen_port must be between 1 and 65535")
 		return
 	}
+	if req.FirewallSource != nil {
+		if *req.FirewallSource != store.FirewallSourceRole && *req.FirewallSource != store.FirewallSourcePolicy {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("firewall_source must be %q or %q",
+				store.FirewallSourceRole, store.FirewallSourcePolicy))
+			return
+		}
+		// The second scope. Named in the message the way the middleware names the
+		// first, so the CLI's APIError.MissingScope parses it and can print the
+		// `orbit token create` that would grant it.
+		if !id.HasScope("policy:write") {
+			writeErr(w, http.StatusForbidden,
+				"changing firewall_source replaces the firewall on every host in the network; "+
+					"token lacks required scope: policy:write")
+			return
+		}
+	}
 
-	var out *store.Network
+	var (
+		out           *store.Network
+		sourceChanged bool
+		affected      int
+	)
 	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		net, err := s.resolveNetwork(ctx, tx, r)
 		if err != nil {
@@ -1359,16 +1402,156 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if req.FirewallSource != nil && *req.FirewallSource != net.FirewallSource {
+			if err := s.gateFirewallSource(ctx, tx, net, *req.FirewallSource, req, &affected); err != nil {
+				return err
+			}
+			if out, sourceChanged, err = tx.SetFirewallSource(ctx, net.ID, *req.FirewallSource); err != nil {
+				return err
+			}
+			// Its own audit action, not metadata on network.renamed. "When did
+			// this network stop enforcing its role rules" is a WHERE clause an
+			// incident review runs, and it is the entry that explains why a rule
+			// still visible on a role stopped having any effect — the same
+			// argument that separates ca.force_activated from ca.activated.
+			e := id.Audit(store.ActionFirewallSourceChanged, "network", net.ID.String())
+			meta, merr := json.Marshal(map[string]any{
+				"slug":           net.Slug,
+				"source_before":  net.FirewallSource,
+				"source_after":   out.FirewallSource,
+				"hosts_affected": affected,
+				"config_epoch":   out.ConfigEpoch,
+			})
+			if merr != nil {
+				return fmt.Errorf("encode firewall source audit metadata: %w", merr)
+			}
+			e.Meta = meta
+			if err := tx.AppendAudit(ctx, e); err != nil {
+				return err
+			}
+			s.log.Warn("network firewall source changed; every host re-renders its rule set",
+				"network", net.Slug, "from", net.FirewallSource, "to", out.FirewallSource,
+				"hosts", affected, "configEpoch", out.ConfigEpoch)
+		}
+
+		if req.Name == nil && req.ListenPort == nil && req.ConfigMode == nil {
+			// Nothing here is a rename, so do not write a network.renamed entry
+			// claiming one. The switch above already audited itself.
+			return nil
+		}
 		e := id.Audit(store.ActionNetworkRenamed, "network", net.ID.String())
 		e.Meta = []byte(fmt.Sprintf(`{"slug":%q,"name_before":%q,"name_after":%q}`,
 			net.Slug, before, out.Name))
 		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {
+		var gate *firewallSourceGate
+		if errors.As(err, &gate) {
+			writeJSON(w, http.StatusConflict, gate.body)
+			return
+		}
+		if errors.Is(err, store.ErrNoPolicy) {
+			writeErr(w, http.StatusBadRequest,
+				"this network has no policy document to switch to. Nebula's firewall is "+
+					"default-deny, so switching now would render an empty rule set on every "+
+					"host and drop all traffic. PUT a policy document first")
+			return
+		}
 		s.notFoundOr(w, err, "network")
 		return
 	}
-	writeJSON(w, http.StatusOK, networkResponse(out))
+
+	resp := wire.NetworkUpdateResponse{
+		NetworkResponse:       networkResponse(out),
+		FirewallSourceChanged: sourceChanged,
+	}
+	if sourceChanged {
+		resp.HostsAffected = affected
+		resp.Detail = firewallSourceDetail(out.FirewallSource, affected, out.ConfigEpoch)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// firewallSourceGate is the refusal to switch a network's firewall source
+// without an acknowledgement. It carries the response body so the handler does
+// not rebuild it from an error string.
+type firewallSourceGate struct {
+	body wire.FirewallSourceChangeError
+}
+
+func (g *firewallSourceGate) Error() string { return g.body.Error }
+
+// gateFirewallSource refuses an unacknowledged switch, and refuses a switch to
+// policy mode with no document.
+//
+// The acknowledgement is required only when there are live hosts. A switch on a
+// network nobody has enrolled into disrupts nothing, and demanding a confirmation
+// there would teach operators to pass the flag reflexively — which is precisely
+// what makes a confirmation on the dangerous case worthless. It also keeps the
+// natural bring-up order working without ceremony: create the network, write the
+// policy, switch it on, then enroll.
+func (s *Server) gateFirewallSource(ctx context.Context, tx *store.Tx, net *store.Network,
+	to string, req wire.UpdateNetworkRequest, affected *int) error {
+
+	if to == store.FirewallSourcePolicy {
+		// Checked here so the operator gets a sentence. The trigger added in
+		// migration 0009 is what makes the invariant true for every other caller,
+		// including psql — an invariant enforced in one handler is enforced in
+		// whichever handler someone remembers.
+		if _, err := tx.GetPolicy(ctx, net.ID); err != nil {
+			return err
+		}
+	}
+
+	live, err := tx.LiveHostCount(ctx, net.ID)
+	if err != nil {
+		return err
+	}
+	*affected = live
+	if live == 0 || req.AcknowledgeFirewallChange {
+		return nil
+	}
+	return &firewallSourceGate{body: wire.FirewallSourceChangeError{
+		Error: "changing firewall_source replaces the firewall on every host in this network. " +
+			"Resend with acknowledge_firewall_change to proceed",
+		From:          net.FirewallSource,
+		To:            to,
+		HostsAffected: live,
+		Detail:        firewallSourceGateDetail(net.FirewallSource, to, live),
+	}}
+}
+
+func firewallSourceGateDetail(from, to string, hosts int) string {
+	// Worst first. The rule set being REPLACED rather than merged is the part
+	// operators get wrong, because every other firewall edit in this API is
+	// additive within one source.
+	base := fmt.Sprintf(
+		"%d host(s) discard their entire current rule set and render the %s one on their next "+
+			"poll. Nebula's firewall is allow-only and default-deny, so anything the new source "+
+			"does not permit stops being reachable — and the hosts will apply it successfully, "+
+			"report the new epoch, and read as fully converged while doing so. "+
+			"Nothing about that failure is visible from the control plane. ",
+		hosts, to)
+	if to == store.FirewallSourcePolicy {
+		return base + fmt.Sprintf(
+			"Per-role rules are kept, not deleted, so switching back to %q restores them exactly. "+
+				"Check the document against a specific host first: "+
+				"POST /v1/networks/{ref}/policy/check?host=<name>", from)
+	}
+	return base + "The policy document is kept, not deleted, so switching back restores it exactly."
+}
+
+func firewallSourceDetail(source string, hosts int, epoch int64) string {
+	if source == store.FirewallSourcePolicy {
+		return fmt.Sprintf(
+			"the policy document is now the firewall for this network; %d host(s) re-render at "+
+				"config epoch %d, with no certificate reissued. Per-role rules are kept and are "+
+				"no longer enforced — editing one is refused while this is set",
+			hosts, epoch)
+	}
+	return fmt.Sprintf(
+		"per-role firewall rules are in force again; %d host(s) re-render at config epoch %d. "+
+			"The policy document is kept and is no longer enforced", hosts, epoch)
 }
 
 // resolveNetwork reads the {ref} path value as a uuid or a slug.

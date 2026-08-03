@@ -15,6 +15,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/nebulacfg"
+	"github.com/griffithind/orbit/internal/policy"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -53,7 +54,52 @@ type Config struct {
 	// RecoveryGrace is how long past expiry a host may still recover. Zero uses
 	// DefaultRecoveryGrace.
 	RecoveryGrace time.Duration
+
+	// Policy supplies a network's compiled-policy inputs.
+	//
+	// NIL MEANS THE DEFAULT, store.NetworkPolicy — not "disabled". NewService
+	// fills it in, and that default is what makes the feature safe to leave
+	// unmentioned: store.NetworkPolicy returns nil for any network whose
+	// firewall_source is not 'policy', so a deployment that has never heard of
+	// policy renders exactly the per-role rules it always did, byte for byte.
+	//
+	// It defaults rather than requiring each caller to pass it because this
+	// struct is built from a literal in ten places — cmd/orbitd and nine test
+	// harnesses — and a field omitted from a literal is silent. Omitting this
+	// one produced a state where a policy could be stored, switched on, and
+	// reported in force by every endpoint while nothing rendered it: an operator
+	// believing a firewall was enforced when no host had ever seen it.
+	//
+	// Set DisablePolicy to opt out deliberately.
+	Policy PolicySource
+
+	// DisablePolicy turns the policy path off entirely, for a caller that wants
+	// to prove the per-role path in isolation. Explicit, because "I forgot" and
+	// "I meant to" must not look the same.
+	DisablePolicy bool
 }
+
+// PolicySource returns a network's policy document and the fleet its selectors
+// resolve against.
+//
+// A function rather than a method on the store, for two reasons. It keeps
+// internal/policy a pure function of its inputs — the compiler never learns
+// what a database is — and it lets the wiring decide whether a deployment has
+// policy at all, which is what makes the feature opt-in rather than a column
+// everything has to interpret.
+//
+// doc is nil for a network with no policy, which is the common case and is not
+// an error. The transaction is threaded through so the document and the fleet
+// are read at the same instant as the rest of the render: a fleet from one
+// snapshot compiled against a document from another would produce rules for a
+// network that never existed.
+type PolicySource func(ctx context.Context, tx *store.Tx, networkID uuid.UUID) (doc []byte, fleet []policy.Host, err error)
+
+// The store's implementation has to keep fitting. An assertion here rather than
+// at the wiring site because the wiring site is a struct literal, where a
+// signature drift shows up as "cannot use ... as PolicySource" pointing at
+// main.go and explaining nothing.
+var _ PolicySource = store.NetworkPolicy
 
 // Service performs enrollment and renewal.
 type Service struct {
@@ -77,6 +123,10 @@ func NewService(st *store.Store, reg *ca.Registry, h *Hasher, cfg Config) *Servi
 	log := cfg.Log
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	// The safe default, applied here rather than trusted to every call site.
+	if cfg.Policy == nil && !cfg.DisablePolicy {
+		cfg.Policy = store.NetworkPolicy
 	}
 	return &Service{store: st, registry: reg, hasher: h, cfg: cfg, log: log, now: time.Now}
 }
@@ -672,6 +722,11 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Host,
 		}
 	}
 
+	compiled, err := s.compilePolicy(ctx, tx, host, net)
+	if err != nil {
+		return nil, "", err
+	}
+
 	inst, err := s.instanceFor(host, net)
 	if err != nil {
 		return nil, "", err
@@ -694,6 +749,7 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Host,
 		Relays:       relays,
 		Blocklist:    blocklist,
 		Firewall:     fw,
+		Policy:       compiled,
 		ListenPort:   inst.listenPort,
 		TunDev:       tunDev,
 		// A lighthouse with no tun device needs no root. Only safe when it is
@@ -705,6 +761,70 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Host,
 		return nil, "", err
 	}
 	return fragment, bundle, nil
+}
+
+// compilePolicy resolves the network's policy into this host's rules, or
+// returns nil when the network has none.
+//
+// Nil is the answer for every network that has not opted in, and it is the
+// answer that leaves the render byte-identical to what it was before this
+// existed. Anything else here is a change to a running fleet's firewall.
+func (s *Service) compilePolicy(ctx context.Context, tx *store.Tx, host *store.Host, net *store.Network) (*policy.Ruleset, error) {
+	if s.cfg.Policy == nil {
+		return nil, nil
+	}
+	raw, fleet, err := s.cfg.Policy(ctx, tx, net.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read policy for network %s: %w", net.Slug, err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	doc, err := policy.Parse(raw)
+	if err != nil {
+		// Refusing to render is the right failure. A stored document that no
+		// longer compiles — because a host it named was deleted — must not
+		// silently degrade to "no rules", which in authoritative mode is
+		// "nothing may talk to this host".
+		return nil, fmt.Errorf("network %s policy: %w", net.Slug, err)
+	}
+
+	c := policy.Compiler{
+		Fleet:      policy.Snapshot{Members: fleet, CIDRs: net.CIDRs},
+		Management: s.managementEndpoints(ctx, tx, net.ID),
+	}
+	rs, err := c.Host(doc, host.ID.String())
+	if err != nil {
+		return nil, fmt.Errorf("compile policy for host %s: %w", host.Name, err)
+	}
+	return &rs, nil
+}
+
+// managementEndpoints is the control plane reachability the compiled policy may
+// not remove.
+//
+// Read from the live registry, the same source agentEndpoints uses, so the
+// floor names the replicas that actually exist rather than a configured guess.
+// A failure here is deliberately not fatal in the same way agentEndpoints'
+// is not: rendering no floor is bad, and refusing to render a certificate is
+// worse.
+func (s *Service) managementEndpoints(ctx context.Context, tx *store.Tx, networkID uuid.UUID) []policy.Endpoint {
+	stale := s.cfg.ControlPlaneStaleAfter
+	if stale <= 0 {
+		stale = DefaultControlPlaneStaleAfter
+	}
+	live, err := tx.LiveControlPlanes(ctx, networkID, s.clock().Add(-stale))
+	if err != nil {
+		s.log.Warn("could not list control planes for the policy management floor",
+			"network", networkID, "error", err)
+		return nil
+	}
+	out := make([]policy.Endpoint, 0, len(live))
+	for _, cp := range live {
+		out = append(out, policy.Endpoint{Addr: cp.Addr, Port: cp.AgentPort})
+	}
+	return out
 }
 
 // certNetworks pairs each of a host's addresses with the prefix length of the

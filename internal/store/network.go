@@ -78,6 +78,17 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 	if n.Slug == "" {
 		return fmt.Errorf("create network: %w", ErrSlugRequired)
 	}
+	// A network is always created drawing its firewall from roles, whatever the
+	// caller put in the struct, and the column is deliberately absent from the
+	// INSERT below so the database's default is the single answer.
+	//
+	// It cannot be otherwise: a network in policy mode renders the compiled
+	// policy document, a network that does not exist yet cannot have one, and
+	// nebula's firewall is default-deny — so creating one in policy mode would
+	// produce a network whose every host drops all traffic from its first boot.
+	// Migration 0009 refuses the insert too; this keeps the Go side from
+	// silently pretending the field was honoured.
+	n.FirewallSource = FirewallSourceRole
 
 	err := t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.network (slug, name, cidrs, cert_version, curve, cert_ttl,
@@ -94,13 +105,13 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 }
 
 const networkCols = `id, slug, name, cidrs, cert_version, curve, cert_ttl,
-	listen_port, config_mode, config_overrides,
+	listen_port, config_mode, config_overrides, firewall_source,
 	config_epoch, blocklist_epoch, created_at`
 
 func scanNetwork(row interface{ Scan(...any) error }) (*Network, error) {
 	var n Network
 	err := row.Scan(&n.ID, &n.Slug, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve, &n.CertTTL,
-		&n.ListenPort, &n.ConfigMode, &n.Overrides,
+		&n.ListenPort, &n.ConfigMode, &n.Overrides, &n.FirewallSource,
 		&n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
 	if err != nil {
 		return nil, err

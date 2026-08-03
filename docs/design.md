@@ -716,6 +716,92 @@ possible.
 
 ---
 
+## 7a. Policy compilation
+
+A network can express its firewall as **one document** instead of per-role rule
+sets. Opt-in per network via `firewall_source`, which is `role` or `policy` and
+never both.
+
+```json
+{"version": 1,
+ "allow": [{"src": ["tag:web"], "dst": ["tag:db"], "proto": "tcp", "ports": ["5432"]}]}
+```
+
+### It compiles to addresses, not to groups
+
+The obvious target is `groups:`, since nebula matches groups out of the peer's
+certificate. It is the wrong one, and the reason is that `cidr:` is not weaker.
+
+Before any rule is consulted, `Firewall.Drop` validates the peer's claimed source
+address against the networks in its **verified certificate** and returns
+`ErrInvalidRemoteIP` on mismatch. So a `cidr:` selector is bound to a signature
+exactly as strongly as a `groups:` selector.
+
+That inverts the cost. Groups live inside the signed certificate, so changing one
+means reissuing every affected host's certificate and waiting out each host's own
+renewal — a median of half a certificate lifetime. Addresses are configuration, so
+a policy edit is a config epoch: hot, sub-second, **zero certificates reissued**.
+Orbit can do this only because it owns address assignment. Tailscale's
+coordination server does the same thing — it resolves `tag:` to node IPs and ships
+an IP-keyed filter; identity never reaches the node's packet filter there either.
+
+### Both directions are emitted
+
+Outbound rules are enforced on the **sender** against the **destination's**
+certificate (`inside.go` calls `Drop(..., incoming=false, ...)` down the same
+peer-cert path). So one allowance compiles to an inbound rule on each `dst` host
+*and* an outbound rule on each `src` host, and a flow is closed unless both ends
+agree. Nebula gives defence in depth here that Tailscale's model does not.
+
+### The management floor
+
+Authoritative mode drops Orbit's default outbound allow-all — keeping it would
+make every compiled outbound rule dead weight that still reads like enforcement.
+That creates a hazard: a policy that forgets the control plane takes the fleet
+offline *and* removes the path to the fix.
+
+So the compiler emits one thing the document did not ask for — outbound to each
+live replica's agent port on every host, inbound from the network prefixes on the
+replicas. It is not overridable. A firewall you can lock yourself out of with a
+typo is not a safety feature.
+
+### What is refused, permanently
+
+User selectors (`alice@example.com`, `user:`, `localpart:`), every `autogroup:`,
+`app` capabilities, `srcPosture`, `via:`, `svc:`. A nebula certificate identifies
+a **device** — name, networks, unsafe networks, groups — and there is no user
+identity in the handshake and nothing in `FirewallRule.match` that could consume
+one. Accepting a user selector and enforcing a device rule is a lie in the
+permissive direction, so it is an error naming the reason rather than a silent
+drop.
+
+`group:`/`groups:` are refused too, redirected to `role:`/`tag:`: a group cannot
+change without a fleet-wide reissue, and Orbit resolves the equivalent
+server-side for free.
+
+### Scale, measured
+
+Rendered size is the constraint, not compile time (25 ms at 5000 hosts).
+All-to-all with 3 allowances:
+
+| hosts | per-host config | fleet push per epoch |
+|---|---|---|
+| 100 | 43 KiB | 4.2 MiB |
+| 1000 | 432 KiB | 421 MiB |
+| 2000 | 863 KiB | 1.6 GiB |
+
+Tiered policy stays cheap — 1000 hosts at 27 KiB each, 27 MiB fleet-wide. The
+limit is roughly **1000 hosts on an all-to-all shape**.
+
+Caching the resolved document is *not* the fix: compiling all hosts at once is
+only 27% faster than compiling each separately, because emission is quadratic
+while resolution is linear. The structural fix is to **allocate addresses by
+tag** — if a tag is a prefix, every tag selector compiles to one rule and the
+whole thing collapses to O(allowances) regardless of fleet size. Only Orbit can
+do that, because only Orbit assigns addresses.
+
+---
+
 ## 8. Update distribution
 
 The incumbent polls once per minute, so its blocking SLA is "within 60 seconds".

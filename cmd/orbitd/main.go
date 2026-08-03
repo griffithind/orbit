@@ -199,6 +199,11 @@ func serve(args []string) error {
 		ListenPort: *listenPort,
 		EnrollURL:  *enrollURL,
 		Log:        log.With("component", "enroll"),
+
+		// Policy is deliberately not set: NewService defaults it to
+		// store.NetworkPolicy. Naming it here would suggest a caller that omits
+		// it gets something else, which is exactly the assumption that left this
+		// path inert once already.
 	})
 
 	// Metrics. Built before anything that reports into it, and served on its
