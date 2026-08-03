@@ -155,10 +155,11 @@ func newLogger() *slog.Logger {
 func enrollCmd(args []string) error {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	var (
-		url    = fs.String("url", "", "control plane base URL")
-		code   = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-		reload = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty for none`)
-		curve  = fs.String("curve", "CURVE25519", "key curve; must match the network")
+		url       = fs.String("url", "", "control plane base URL")
+		code      = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
+		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty for none`)
+		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
+		nebulaBin = fs.String("nebula", "", "nebula binary used to validate a configuration before applying it (default: nebula on PATH)")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -205,9 +206,10 @@ func enrollCmd(args []string) error {
 	}
 
 	applier := &agent.Applier{
-		Layout:   layout,
-		Reloader: agent.ParseReloader(*reload),
-		Log:      log,
+		Layout:       layout,
+		Reloader:     agent.ParseReloader(*reload),
+		NebulaBinary: *nebulaBin,
+		Log:          log,
 	}
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		return err
@@ -245,8 +247,9 @@ func enrollCmd(args []string) error {
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var (
-		reload  = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
-		restart = fs.String("restart", "",
+		nebulaBin = fs.String("nebula", "", "nebula binary used to validate a configuration before applying it (default: nebula on PATH)")
+		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
+		restart   = fs.String("restart", "",
 			`how to restart nebula: "unit:nebula@<network>", a command, or empty. `+
 				`Required to apply a changed overlay address, and the only way the agent can `+
 				`tell whether nebula is running at all`)
@@ -277,9 +280,10 @@ func runCmd(args []string) error {
 	}
 
 	applier := &agent.Applier{
-		Layout:   layout,
-		Reloader: agent.ParseReloader(*reload),
-		Log:      log,
+		Layout:       layout,
+		Reloader:     agent.ParseReloader(*reload),
+		NebulaBinary: *nebulaBin,
+		Log:          log,
 	}
 	// The pidfile comes from -reload rather than a flag of its own: a host that
 	// reloads by pidfile has exactly one, and naming it twice is one more thing
@@ -376,10 +380,11 @@ func parseCurve(name string) (cert.Curve, error) {
 func recoverCmd(args []string) error {
 	fs := flag.NewFlagSet("recover", flag.ExitOnError)
 	var (
-		url     = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
-		reload  = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
-		restart = fs.String("restart", "", `how to restart nebula: "unit:nebula@<network>", a command, or empty`)
-		curve   = fs.String("curve", "CURVE25519", "key curve; must match the network")
+		url       = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
+		nebulaBin = fs.String("nebula", "", "nebula binary used to validate a configuration before applying it (default: nebula on PATH)")
+		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
+		restart   = fs.String("restart", "", `how to restart nebula: "unit:nebula@<network>", a command, or empty`)
+		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -444,8 +449,9 @@ func recoverCmd(args []string) error {
 		// Recovery re-keys the host, and a recovered certificate can carry a
 		// different overlay address than the expired one. That is a restart, not
 		// a reload, so this path needs a supervisor as much as `run` does.
-		Supervisor: agent.ParseSupervisor(*restart, agent.PidFileFromReloadSpec(*reload)),
-		Log:        log,
+		Supervisor:   agent.ParseSupervisor(*restart, agent.PidFileFromReloadSpec(*reload)),
+		NebulaBinary: *nebulaBin,
+		Log:          log,
 	}
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		return err

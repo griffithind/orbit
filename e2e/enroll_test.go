@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -753,32 +754,108 @@ func TestAdminRequiresToken(t *testing.T) {
 	}
 }
 
-// TestApplyRejectsBadConfig proves the agent validates before touching the live
-// generation. A config nebula would reject must never reach the running node.
-func TestApplyRejectsBadConfig(t *testing.T) {
-	dir := t.TempDir()
-	applier := &agent.Applier{
-		Layout:   agent.DefaultLayout(dir),
-		Reloader: agent.NoopReloader{},
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+// stubNebula writes an executable standing in for the nebula binary, exiting
+// with code and printing msg.
+//
+// The agent validates by running `nebula -test -config`, so a test about
+// validation needs a binary to run. A real one rather than a stubbed
+// ConfigValidator, because what these assert is the whole path: Applier decides
+// to validate, writes a candidate file, executes something, and reads the
+// verdict.
+func stubNebula(t *testing.T, code int, msg string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "nebula")
+	body := "#!/bin/sh\nprintf '%s' '" + msg + "' >&2\nexit " + strconv.Itoa(code) + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	return path
+}
 
-	err := applier.Apply(context.Background(), agent.Material{
+func badMaterial() agent.Material {
+	return agent.Material{
 		Config:      "pki:\n  ca: /nonexistent/ca.crt\n  cert: /nonexistent/host.crt\n",
 		CABundle:    "not a certificate",
 		Certificate: "also not a certificate",
 		PrivateKey:  "nope",
-	})
+	}
+}
+
+// TestApplyRejectsBadConfig proves the agent validates before touching the live
+// generation. A config nebula rejects must never reach the running node.
+func TestApplyRejectsBadConfig(t *testing.T) {
+	dir := t.TempDir()
+	applier := &agent.Applier{
+		Layout:       agent.DefaultLayout(dir),
+		Reloader:     agent.NoopReloader{},
+		NebulaBinary: stubNebula(t, 1, "invalid pki.ca: open /nonexistent/ca.crt: no such file"),
+		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err := applier.Apply(context.Background(), badMaterial())
 	if err == nil {
-		t.Fatal("applied an invalid configuration")
+		t.Fatal("applied a configuration nebula rejected")
 	}
 	if !strings.Contains(err.Error(), "refusing to apply") {
 		t.Errorf("error = %v, want a pre-apply validation failure", err)
+	}
+	// Nebula's own reason has to survive the trip, or an operator reads
+	// "rejected" and has to reproduce by hand what the agent was already told.
+	if !strings.Contains(err.Error(), "no such file") {
+		t.Errorf("nebula's reason was dropped: %v", err)
 	}
 
 	// Nothing may have been installed.
 	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); !os.IsNotExist(err) {
 		t.Error("a rejected configuration was installed anyway")
+	}
+}
+
+// TestApplyProceedsWhenNebulaAccepts is the other half, and it is what keeps
+// the test above honest: a validator that refused everything would pass it.
+func TestApplyProceedsWhenNebulaAccepts(t *testing.T) {
+	dir := t.TempDir()
+	applier := &agent.Applier{
+		Layout:       agent.DefaultLayout(dir),
+		Reloader:     agent.NoopReloader{},
+		NebulaBinary: stubNebula(t, 0, ""),
+		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	if err := applier.Apply(context.Background(), badMaterial()); err != nil {
+		t.Fatalf("nebula accepted the configuration and the agent refused it anyway: %v", err)
+	}
+	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); err != nil {
+		t.Errorf("an accepted configuration was not installed: %v", err)
+	}
+}
+
+// TestApplyProceedsWhenValidationCannotRun pins a deliberate choice, and one
+// that looks wrong at a glance: an agent that cannot find nebula applies
+// anyway.
+//
+// The alternative is worse. A host where nebula lives somewhere unexpected, or
+// where it is not installed yet at first enrollment, would refuse every
+// generation forever — never converging, while reporting a configuration
+// problem that does not exist. Validation is not the only guard: a generation
+// that breaks the host is reverted and quarantined after verification fails.
+// It makes that rarer and cheaper; it is not what makes it survivable.
+func TestApplyProceedsWhenValidationCannotRun(t *testing.T) {
+	dir := t.TempDir()
+	applier := &agent.Applier{
+		Layout:       agent.DefaultLayout(dir),
+		Reloader:     agent.NoopReloader{},
+		NebulaBinary: filepath.Join(t.TempDir(), "no-nebula-here"),
+		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	if err := applier.Apply(context.Background(), badMaterial()); err != nil {
+		t.Fatalf("an agent that cannot validate refused to apply: %v\n"+
+			"That host can never converge, and the reason it reports is a "+
+			"configuration problem it never actually observed.", err)
+	}
+	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); err != nil {
+		t.Errorf("nothing was installed: %v", err)
 	}
 }
 

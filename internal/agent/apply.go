@@ -29,8 +29,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/slackhq/nebula"
-	"github.com/slackhq/nebula/config"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/griffithind/orbit/internal/nebulacfg"
@@ -80,6 +78,20 @@ type Applier struct {
 	// means no verification, which also means the rollback path is never
 	// exercised.
 	Verifier Verifier
+
+	// NebulaBinary is the nebula executable used to validate a candidate
+	// configuration before it goes live: a path, or a name resolved on PATH.
+	// Empty means DefaultNebulaBinary.
+	NebulaBinary string
+
+	// Validator overrides how configurations are checked. Nil takes the
+	// default, which is the whole point — see validator(). Tests that drive
+	// validation supply their own.
+	Validator ConfigValidator
+
+	// DisableValidation turns the check off. It exists so that "I do not want
+	// it" and "I forgot" cannot look the same in a struct literal.
+	DisableValidation bool
 
 	// RestartSettle and RestartPoll bound the wait for a restart to show up as a
 	// new process. Zero uses the defaults.
@@ -182,7 +194,7 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 	// config references absolute production paths, so validation uses a copy
 	// with those paths rewritten to the staging directory; otherwise we would be
 	// validating the new config against the old certificates.
-	if err := a.validateStaged(staged, m); err != nil {
+	if err := a.validateStaged(ctx, staged, m); err != nil {
 		return fmt.Errorf("refusing to apply: %w", err)
 	}
 
@@ -464,9 +476,9 @@ func (a *Applier) localize(cfg string) string {
 	return cfg
 }
 
-// validateStaged runs the candidate configuration through nebula's own
-// config-test path, which loads the PKI and builds the firewall exactly as a
-// running node would.
+// validateStaged runs the candidate configuration through nebula's own config
+// test, which loads the PKI and builds the firewall exactly as a running node
+// would.
 //
 // This is the agent's strongest guard. It catches a malformed config, a
 // certificate that does not match its CA, an expired certificate, and an
@@ -478,7 +490,7 @@ func (a *Applier) localize(cfg string) string {
 // brings one and at the live copy otherwise — pointing at a staged path that
 // was never written makes every config-only push fail validation, which is
 // exactly the shape of bug that only shows up once push is wired end to end.
-func (a *Applier) validateStaged(staged map[string]string, m Material) error {
+func (a *Applier) validateStaged(ctx context.Context, staged map[string]string, m Material) error {
 	cfg := m.Config
 	for _, f := range []struct{ live, name string }{
 		{a.Layout.Paths.CA, CAName},
@@ -492,14 +504,57 @@ func (a *Applier) validateStaged(staged map[string]string, m Material) error {
 		// will keep using, so it is what must be validated against.
 	}
 
-	c := config.NewC(discardLogger())
-	if err := c.LoadString(cfg); err != nil {
-		return fmt.Errorf("nebula cannot parse the configuration: %w", err)
+	err := a.validateFile(ctx, cfg)
+	switch {
+	case err == nil:
+		return nil
+
+	case errors.Is(err, ErrValidationUnavailable):
+		// Could not ASK, which is not the same as being told no, and must not
+		// be treated as one. A host where nebula lives somewhere unexpected, or
+		// where it is not installed yet at first enrollment, would otherwise be
+		// unable to apply anything at all — the agent would refuse every
+		// generation forever and the host would silently never converge.
+		//
+		// Proceeding is safe enough because this is not the only guard: a
+		// generation that breaks the host is reverted and quarantined by the
+		// apply loop after verification fails. Validation makes that rarer and
+		// cheaper; it is not what makes it survivable.
+		a.Log.Warn("could not validate the configuration; applying without it",
+			"error", err, "validator", a.validatorName(),
+			"consequence", "a bad generation will be caught by verification and reverted, not refused up front")
+		return nil
+
+	default:
+		return err
 	}
-	if _, err := nebula.Main(c, true, "orbit-agent", discardLogger(), nil); err != nil {
-		return fmt.Errorf("nebula rejects the configuration: %w", err)
+}
+
+// validator resolves the check to run.
+//
+// Nil takes the DEFAULT rather than meaning "off", because Applier is built
+// from a struct literal at every call site and a field omitted from a literal
+// is silent. If nil meant off, the one call site that forgot it would lose the
+// agent's strongest guard with nothing to show for it — no error, no log line,
+// no failing test, since every test harness would have forgotten it too.
+// DisableValidation is how a caller says so out loud.
+func (a *Applier) validator() ConfigValidator {
+	switch {
+	case a.DisableValidation:
+		return nil
+	case a.Validator != nil:
+		return a.Validator
+	default:
+		return NebulaBinaryValidator{Binary: a.NebulaBinary}
 	}
-	return nil
+}
+
+func (a *Applier) validatorName() string {
+	v := a.validator()
+	if v == nil {
+		return "disabled"
+	}
+	return v.Describe()
 }
 
 // PreviousDir is where the last known-good generation lives.
