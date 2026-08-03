@@ -34,6 +34,8 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"github.com/griffithind/orbit/internal/version"
 )
 
 func main() {
@@ -67,6 +69,9 @@ func main() {
 		err = sessionCmd(ctx, os.Args[2:])
 	case "audit":
 		err = auditCmd(ctx, os.Args[2:])
+	case "version", "-version", "--version":
+		fmt.Println(version.Version)
+		return
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -100,6 +105,7 @@ func usage() {
   token      ls, create, revoke
   session    ls, revoke — browser sessions on the operator console
   audit      read the audit trail
+  version    print the build version
 
 Every command takes -json, which emits the API response verbatim.
 

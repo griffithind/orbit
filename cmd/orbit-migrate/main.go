@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/griffithind/orbit/internal/db"
+	"github.com/griffithind/orbit/internal/version"
 )
 
 func main() {
@@ -35,8 +36,14 @@ func run() error {
 		dsn     = flag.String("dsn", os.Getenv("ORBIT_ADMIN_DSN"), "admin connection string (or ORBIT_ADMIN_DSN)")
 		dryRun  = flag.Bool("dry-run", false, "list pending migrations without applying them")
 		timeout = flag.Duration("timeout", 2*time.Minute, "overall timeout")
+		showVer = flag.Bool("version", false, "print the build version and exit")
 	)
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println(version.Version)
+		return nil
+	}
 
 	if *dsn == "" {
 		return errors.New("-dsn is required (or set ORBIT_ADMIN_DSN)")

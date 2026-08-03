@@ -38,6 +38,7 @@ import (
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/sched"
 	"github.com/griffithind/orbit/internal/store"
+	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/web"
 )
 
@@ -57,6 +58,9 @@ func main() {
 		err = caCmd(os.Args[2:])
 	case "token":
 		err = tokenCmd(os.Args[2:])
+	case "version", "-version", "--version":
+		fmt.Println(version.Version)
+		return
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -105,6 +109,7 @@ func usage() {
   bootstrap  create the first network, CA, role, and admin token
   token      manage API tokens offline (break-glass; see docs/deployment.md)
   ca         encrypt a CA signing key at rest
+  version    print the build version
 
 Run "orbitd <command> -h" for flags.
 `)

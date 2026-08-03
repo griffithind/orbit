@@ -42,9 +42,8 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/version"
 )
-
-const version = "0.1.0"
 
 // dirFlags registers the -dir/-network pair shared by every subcommand.
 //
@@ -105,6 +104,9 @@ func main() {
 		err = runCmd(os.Args[2:])
 	case "recover":
 		err = recoverCmd(os.Args[2:])
+	case "version", "-version", "--version":
+		fmt.Println(version.Version)
+		return
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -125,6 +127,7 @@ func usage() {
   enroll   join a network using an enrollment code
   run      poll for updates and apply them
   recover  re-obtain a certificate after this host's expired while offline
+  version  print the build version
 
 Every command manages exactly ONE network and needs -dir (or -network, which is
 shorthand for `+agent.DefaultRoot+`/<slug>). A host on two networks runs two
@@ -190,7 +193,7 @@ func enrollCmd(args []string) error {
 	}
 
 	client := agent.NewClient(*url)
-	resp, err := client.Enroll(ctx, *code, kp, version)
+	resp, err := client.Enroll(ctx, *code, kp, version.Version)
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {

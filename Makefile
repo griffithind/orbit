@@ -22,7 +22,30 @@ build: ## Build all packages
 .PHONY: orbit
 orbit: ## Build the admin CLI into ./bin/orbit
 	@mkdir -p bin
-	go build -o bin/orbit ./cmd/orbit
+	go build -ldflags "$(LDFLAGS)" -o bin/orbit ./cmd/orbit
+
+# The exact matrix .github/workflows/release.yml ships, run locally. A target
+# that only fails in CI after a tag is pushed is one that finds the breakage at
+# the worst possible moment.
+.PHONY: release-check
+release-check: ## Cross-compile every release target without producing artifacts
+	@set -e; \
+	for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do \
+		for c in orbit orbit-agent; do \
+			CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} \
+				go build -o /dev/null ./cmd/$$c && echo "ok   $$c $$t"; \
+		done; \
+	done; \
+	for t in linux/amd64 linux/arm64; do \
+		for c in orbitd orbit-migrate; do \
+			CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} \
+				go build -o /dev/null ./cmd/$$c && echo "ok   $$c $$t"; \
+		done; \
+	done
+
+.PHONY: third-party
+third-party: ## Regenerate THIRD-PARTY-NOTICES.md from go.mod
+	./scripts/third-party-notices.sh
 	@echo "bin/orbit — set ORBIT_URL and ORBIT_TOKEN, then run: bin/orbit whoami"
 
 .PHONY: test

@@ -1,0 +1,211 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Tag-triggered rather than manual, so a release cannot exist that no commit
+# points at. The version stamped into every binary is derived from the tag and
+# from nothing else.
+
+permissions:
+  contents: write
+
+jobs:
+  # The tag is not trusted to mean the code is good. A release is cut only from
+  # a tree that passes the same gate every pull request passes, because a tag
+  # can be pushed from a laptop.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: orbit
+          POSTGRES_DB: orbit
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ORBIT_TEST_DSN: postgres://postgres:orbit@localhost:5433/orbit?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::these files need gofmt"; echo "$out"; exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./... -count=1 -timeout 15m
+
+      - name: fail on silently skipped database tests
+        run: |
+          go test ./e2e/ ./internal/store/ -count=1 -v 2>&1 | tee out.txt
+          if grep -q "postgres unavailable" out.txt; then
+            echo "::error::database tests skipped; a release must not be cut without them"
+            exit 1
+          fi
+
+      # A stale notices file is a licence claim that is no longer true. It is
+      # generated, so the check is that regenerating changes nothing.
+      - name: third-party notices are current
+        run: |
+          ./scripts/third-party-notices.sh
+          if ! git diff --quiet THIRD-PARTY-NOTICES.md; then
+            echo "::error::THIRD-PARTY-NOTICES.md is stale; run make third-party"
+            git diff THIRD-PARTY-NOTICES.md
+            exit 1
+          fi
+
+  build:
+    name: build
+    needs: verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # CGO_ENABLED=0 everywhere. Every binary is then statically linked and
+      # runs on any libc, which matters most for the two that land on machines
+      # nobody controls: the admin CLI on a laptop, and the agent on whatever
+      # base image a host happens to use. It also removes the cross-compiler
+      # toolchain from this job entirely — one runner builds all eight targets.
+      #
+      # -trimpath so the binary does not carry the runner's directory layout,
+      # and -buildvcs=false because the tag, not the checkout state, is the
+      # version.
+      - name: build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-s -w -X github.com/griffithind/orbit/internal/version.Version=${VERSION}"
+          mkdir -p dist
+
+          # orbit is the admin CLI and orbit-agent runs on managed hosts, so
+          # both ship for laptops as well as servers. The agent's systemd
+          # supervisor is Linux-only, but its command supervisor is not, which
+          # is what makes a macOS build meaningful rather than decorative.
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            goos="${target%/*}"; goarch="${target#*/}"
+            for cmd in orbit orbit-agent; do
+              GOOS="$goos" GOARCH="$goarch" go build \
+                -trimpath -buildvcs=false -ldflags "$LDFLAGS" \
+                -o "build/$cmd" "./cmd/$cmd"
+              tar -czf "dist/${cmd}_${VERSION}_${goos}_${goarch}.tar.gz" \
+                -C build "$cmd" -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
+              rm -f "build/$cmd"
+            done
+          done
+
+          # orbitd and orbit-migrate are Linux only. Both compile for macOS,
+          # and shipping them anyway would be the mistake: the control plane is
+          # documented, deployed, and tested on Linux, and a build nothing
+          # covers is a support burden wearing a version number.
+          for target in linux/amd64 linux/arm64; do
+            goos="${target%/*}"; goarch="${target#*/}"
+            for cmd in orbitd orbit-migrate; do
+              GOOS="$goos" GOARCH="$goarch" go build \
+                -trimpath -buildvcs=false -ldflags "$LDFLAGS" \
+                -o "build/$cmd" "./cmd/$cmd"
+              tar -czf "dist/${cmd}_${VERSION}_${goos}_${goarch}.tar.gz" \
+                -C build "$cmd" -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
+              rm -f "build/$cmd"
+            done
+          done
+
+          # The systemd units belong with the release: an operator downloading
+          # orbitd should not also have to find the right revision of the
+          # unit files in git.
+          tar -czf "dist/orbit-deploy_${VERSION}.tar.gz" deploy LICENSE
+
+      # Assert the stamp took. -ldflags -X fails silently when the symbol path
+      # is wrong: the build succeeds and every binary reports "dev". A release
+      # could otherwise ship with no version in it, which is the one defect that
+      # makes every later bug report unanswerable.
+      #
+      # The runner is linux/amd64, so the real artifact is unpacked and run
+      # rather than a freshly built stand-in.
+      - name: the version stamp took
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          for cmd in orbit orbit-agent orbitd; do
+            tar -xzf "dist/${cmd}_${VERSION}_linux_amd64.tar.gz" -C /tmp "$cmd"
+            got=$("/tmp/$cmd" version)
+            if [ "$got" != "$VERSION" ]; then
+              echo "::error::$cmd reports '$got', not '$VERSION'"; exit 1
+            fi
+            echo "$cmd $got"
+          done
+          tar -xzf "dist/orbit-migrate_${VERSION}_linux_amd64.tar.gz" -C /tmp orbit-migrate
+          got=$(/tmp/orbit-migrate -version)
+          if [ "$got" != "$VERSION" ]; then
+            echo "::error::orbit-migrate reports '$got', not '$VERSION'"; exit 1
+          fi
+          echo "orbit-migrate $got"
+
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          notes=$(mktemp)
+          {
+            echo "## Install"
+            echo
+            echo '```bash'
+            echo "# admin CLI — macOS and Linux, amd64 and arm64"
+            echo "curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/orbit_${VERSION}_\$(uname -s | tr A-Z a-z)_\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar -xz"
+            echo "sudo install orbit /usr/local/bin/"
+            echo '```'
+            echo
+            echo "Verify against \`SHA256SUMS\` before installing."
+            echo
+            echo "| Binary | Runs on |"
+            echo "|---|---|"
+            echo "| \`orbit\` | macOS and Linux, amd64 and arm64 — admin CLI |"
+            echo "| \`orbit-agent\` | macOS and Linux, amd64 and arm64 — managed hosts |"
+            echo "| \`orbitd\` | Linux only, amd64 and arm64 — control plane |"
+            echo "| \`orbit-migrate\` | Linux only, amd64 and arm64 — schema migrations |"
+            echo
+            echo "All binaries are statically linked (\`CGO_ENABLED=0\`) and carry no runtime dependency beyond the kernel."
+            echo
+            echo "\`orbit-deploy_${VERSION}.tar.gz\` holds the systemd units."
+          } > "$notes"
+
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$notes" \
+            --verify-tag \
+            dist/*
