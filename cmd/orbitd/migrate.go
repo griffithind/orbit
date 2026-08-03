@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +35,9 @@ func migrateCmd(args []string) error {
 		dsn     = fs.String("dsn", os.Getenv("ORBIT_ADMIN_DSN"), "admin connection string (or ORBIT_ADMIN_DSN)")
 		dryRun  = fs.Bool("dry-run", false, "list the embedded migrations without applying them")
 		timeout = fs.Duration("timeout", 2*time.Minute, "overall timeout")
+		appPass = fs.String("app-password", "",
+			"set orbit_app's password after migrating (or ORBIT_APP_PASSWORD). "+
+				"Without it the role is created with no password and cannot log in")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -75,16 +79,50 @@ func migrateCmd(args []string) error {
 
 	if len(applied) == 0 {
 		fmt.Println("database is up to date")
-		return nil
 	}
 	for _, name := range applied {
 		fmt.Println("applied", name)
 	}
 
+	// Set the password even when there was nothing to migrate. Returning early
+	// on an up-to-date database would make `migrate -app-password` a no-op that
+	// reports success, which is how a rotated password appears to have been
+	// applied and has not been.
+	if *appPass == "" {
+		*appPass = os.Getenv("ORBIT_APP_PASSWORD")
+	}
+	if *appPass == "" {
+		fmt.Println()
+		fmt.Println("Note: orbit_app was created without a password. Set one before")
+		fmt.Println("connecting the control plane, with -app-password or:")
+		fmt.Println()
+		fmt.Println("  ALTER ROLE orbit_app LOGIN PASSWORD '<secret>';")
+		return nil
+	}
+
+	// Set here rather than left as a psql step an operator runs by hand.
+	//
+	// It is the same connection and the same privilege that just created the
+	// role, and leaving it out produced a documented sequence where the role
+	// exists, cannot log in, and the failure surfaces later as an
+	// authentication error that looks like a wrong password.
+	//
+	// quoteLiteral, not %s: a password is arbitrary text and this is DDL that
+	// cannot be parameterised.
+	if _, err := conn.Exec(ctx,
+		"ALTER ROLE orbit_app LOGIN PASSWORD "+quoteLiteral(*appPass)); err != nil {
+		return fmt.Errorf("set orbit_app password: %w", err)
+	}
 	fmt.Println()
-	fmt.Println("Note: orbit_app was created without a password. Set one before")
-	fmt.Println("connecting the control plane:")
-	fmt.Println()
-	fmt.Println("  ALTER ROLE orbit_app LOGIN PASSWORD '<secret>';")
+	fmt.Println("orbit_app can now log in.")
 	return nil
+}
+
+// quoteLiteral escapes a string for a SQL literal.
+//
+// Postgres doubles a single quote inside a literal, and nothing else needs
+// escaping in a standard_conforming_strings session, which is the default and
+// has been since 9.1.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }

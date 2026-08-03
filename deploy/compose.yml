@@ -1,0 +1,83 @@
+# The control plane, as two containers.
+#
+#   1. Put a passphrase in ./ca-pass and a database password in ./.env
+#   2. docker compose run --rm orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
+#   3. docker compose run --rm orbitd bootstrap -network prod -cidr 10.42.0.0/16
+#   4. Put the printed network id in ./.env as ORBIT_NETWORK
+#   5. docker compose up -d
+#
+# Steps 2 and 3 print things you need. Everything else is this file.
+
+name: orbit
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
+      POSTGRES_DB: orbit
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Not published. The control plane is the only client, and it reaches
+    # Postgres over the compose network — so there is no port to firewall, and
+    # no `listen_addresses` to get wrong.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orbit"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  orbitd:
+    image: ghcr.io/griffithind/orbit:${ORBIT_VERSION:-latest}
+    build:
+      context: ..
+      args:
+        VERSION: ${ORBIT_VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # Host networking, and it is not optional. Nebula punches holes and hands
+    # out the address it believes it is reachable at; behind a NAT bridge it
+    # would advertise a container address and every host would dial somewhere
+    # that does not exist. This also means 4242/udp and 8080/tcp are bound on
+    # the host directly, so the host firewall is what governs them.
+    network_mode: host
+
+    environment:
+      ORBIT_DSN: postgres://orbit_app:${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}@127.0.0.1:5432/orbit?sslmode=disable
+      ORBIT_ADMIN_DSN: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD}@127.0.0.1:5432/orbit?sslmode=disable
+      ORBIT_ENROLL_PEPPER: ${ORBIT_ENROLL_PEPPER:?set ORBIT_ENROLL_PEPPER in .env}
+      ORBIT_NETWORK: ${ORBIT_NETWORK:-}
+      # A path, never the value. The passphrase stays out of the environment,
+      # out of `docker inspect`, and out of anything that dumps a container's
+      # config.
+      ORBIT_CA_KEY_PASSPHRASE_FILE: /run/secrets/ca-pass
+
+    secrets:
+      - ca-pass
+
+    volumes:
+      - cakey:/var/lib/orbit
+
+    command:
+      - serve
+      - -addr=0.0.0.0:8080
+      - -metrics-addr=127.0.0.1:9464
+      - -ui-addr=127.0.0.1:8081
+      - -enroll-url=${ORBIT_ENROLL_URL:?set ORBIT_ENROLL_URL in .env}
+      - -mesh=${ORBIT_NETWORK:-}=${ORBIT_OVERLAY_ADDR:-10.42.0.1}
+      - -lighthouse=${ORBIT_PUBLIC_ADDR:?set ORBIT_PUBLIC_ADDR in .env, as host:4242}
+
+secrets:
+  ca-pass:
+    file: ./ca-pass
+
+volumes:
+  # The CA key. Nebula has no intermediate CAs, so this is a root of trust for
+  # the whole mesh — back it up, and treat losing it as every host re-enrolling
+  # by hand.
+  cakey:
+  pgdata:
