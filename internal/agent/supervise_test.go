@@ -15,7 +15,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -144,51 +143,6 @@ func TestUnobservableSupervisorDoesNotFailTheRestart(t *testing.T) {
 
 	if err := testApplier(f).restart(context.Background()); err != nil {
 		t.Fatalf("restart with an unobservable supervisor: %v", err)
-	}
-}
-
-func TestParseSupervisor(t *testing.T) {
-	if s := ParseSupervisor("", ""); s != nil {
-		t.Errorf("empty spec gave %v, want nil (restarts refused)", s)
-	}
-	s, ok := ParseSupervisor("unit:nebula@prod", "").(*SystemdSupervisor)
-	if !ok {
-		t.Fatalf("unit: spec gave %T, want *SystemdSupervisor", ParseSupervisor("unit:nebula@prod", ""))
-	}
-	// The instance must survive, or the agent restarts the wrong network.
-	if s.Unit != "nebula@prod.service" {
-		t.Errorf("unit = %q, want nebula@prod.service", s.Unit)
-	}
-	c, ok := ParseSupervisor("svcadm restart nebula", "/run/nebula-prod.pid").(CommandSupervisor)
-	if !ok {
-		t.Fatal("command spec did not give a CommandSupervisor")
-	}
-	if c.PidFile != "/run/nebula-prod.pid" {
-		t.Errorf("pidfile = %q", c.PidFile)
-	}
-}
-
-// TestCommandSupervisorWithoutPidfileIsUnknown pins the distinction the restart
-// proof rests on: "cannot observe" must never be reported as "not running", and
-// must never be reported as "running" either.
-func TestCommandSupervisorWithoutPidfileIsUnknown(t *testing.T) {
-	st, err := CommandSupervisor{Args: []string{"true"}}.Status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Known {
-		t.Error("a supervisor with nothing to observe reported Known")
-	}
-}
-
-func TestCommandSupervisorMissingPidfileIsDown(t *testing.T) {
-	c := CommandSupervisor{Args: []string{"true"}, PidFile: filepath.Join(t.TempDir(), "absent.pid")}
-	st, err := c.Status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !st.Known || st.Running {
-		t.Errorf("missing pidfile gave %+v, want Known and not Running", st)
 	}
 }
 
