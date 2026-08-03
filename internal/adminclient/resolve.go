@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -94,26 +95,29 @@ func (e *NoMatchError) Is(target error) bool { return target == ErrNoMatch }
 // as often as not and GET /v1/networks/{id} does not exist. If it ever does,
 // this is the one place to change.
 func (c *Client) ResolveNetwork(ctx context.Context, ref string) (*wire.NetworkResponse, error) {
-	res, err := c.ListNetworks(ctx)
-	if err != nil {
+	// One request. The server resolves a uuid or a name, because network names
+	// are globally unique — this used to list every network and filter here,
+	// which cost a full listing on every command that names one.
+	res, err := c.GetNetwork(ctx, ref)
+	if err == nil {
+		return &res.Value, nil
+	}
+
+	// Only a 404 is worth a second request. Anything else — unreachable, a bad
+	// token, a 500 — is the answer, and listing would just fail the same way
+	// with a less useful message.
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != http.StatusNotFound {
 		return nil, err
 	}
-	nets := res.Value
 
-	if id, err := uuid.Parse(ref); err == nil {
-		for i := range nets {
-			if nets[i].ID == id.String() {
-				return &nets[i], nil
-			}
-		}
-		return nil, &NoMatchError{Kind: "network", Ref: ref, Available: networkNames(nets)}
+	// Not found. Name the alternatives, which needs the listing the fast path
+	// avoids — paid once, on the path where someone is already confused.
+	all, lerr := c.ListNetworks(ctx)
+	if lerr != nil {
+		return nil, err // the original 404 is the more useful error
 	}
-	for i := range nets {
-		if nets[i].Name == ref {
-			return &nets[i], nil
-		}
-	}
-	return nil, &NoMatchError{Kind: "network", Ref: ref, Available: networkNames(nets)}
+	return nil, &NoMatchError{Kind: "network", Ref: ref, Available: networkNames(all.Value)}
 }
 
 // SoleNetwork returns the only network, or an error naming the choice.

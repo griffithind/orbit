@@ -19,6 +19,16 @@ func (c *Client) ListNetworks(ctx context.Context) (Result[[]wire.NetworkRespons
 	return get[[]wire.NetworkResponse](ctx, c, "/v1/networks", nil)
 }
 
+// GetNetwork resolves one network by uuid or by name, in a single request.
+//
+// The server takes either, because network names are globally unique. Before
+// this route existed every command that named a network listed all of them and
+// filtered client-side — a cost paid on each invocation, and proportional to
+// the number of networks rather than to the one being asked about.
+func (c *Client) GetNetwork(ctx context.Context, ref string) (Result[wire.NetworkResponse], error) {
+	return get[wire.NetworkResponse](ctx, c, "/v1/networks/"+url.PathEscape(ref), nil)
+}
+
 func (c *Client) ListRoles(ctx context.Context, networkID uuid.UUID) (Result[[]wire.RoleResponse], error) {
 	q := url.Values{"network_id": {networkID.String()}}
 	return get[[]wire.RoleResponse](ctx, c, "/v1/roles", q)

@@ -51,6 +51,25 @@ func (t *Tx) GetNetwork(ctx context.Context, id uuid.UUID) (*Network, error) {
 	return &n, nil
 }
 
+// GetNetworkByName resolves a network by its name.
+//
+// Names are globally unique for networks — UNIQUE (name), not UNIQUE
+// (something, name) as for hosts and roles — so this cannot be ambiguous, and a
+// name is therefore a first-class way to address one. Migration 0005 keeps a
+// name from ever looking like a uuid, so a caller holding either can resolve it
+// in one query instead of listing every network and filtering.
+func (t *Tx) GetNetworkByName(ctx context.Context, name string) (*Network, error) {
+	var n Network
+	err := t.tx.QueryRow(ctx,
+		`SELECT `+networkCols+` FROM orbit.network WHERE name = $1`, name,
+	).Scan(&n.ID, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve, &n.CertTTL,
+		&n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err, "get network by name")
+	}
+	return &n, nil
+}
+
 func (t *Tx) ListNetworks(ctx context.Context) ([]Network, error) {
 	rows, err := t.tx.Query(ctx, `SELECT `+networkCols+` FROM orbit.network ORDER BY name`)
 	if err != nil {

@@ -74,6 +74,25 @@ func (s *Server) admin(scope string, h http.HandlerFunc) http.Handler {
 	})
 }
 
+// checkHint turns a CHECK-constraint refusal into something an operator can act
+// on.
+//
+// The constraint name alone is accurate and nearly useless — "violates
+// network_name_is_not_a_uuid" states the rule without the reason, and the
+// reason is the part that stops someone retrying the same request. Constraints
+// whose intent is self-evident from their name are left to speak for
+// themselves.
+func checkHint(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "network_name_is_not_a_uuid"):
+		return "a network name may not look like a uuid: names and ids share " +
+			"the /v1/networks/{ref} route, so one that could be either is refused"
+	default:
+		return "the database refused that value: " + msg
+	}
+}
+
 func bearerToken(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
 	rest, ok := strings.CutPrefix(h, "Bearer ")
@@ -102,6 +121,13 @@ func (s *Server) notFoundOr(w http.ResponseWriter, err error, what string) {
 		writeErr(w, http.StatusNotFound, what+" not found")
 	case errors.Is(err, store.ErrConflict):
 		writeErr(w, http.StatusConflict, "already exists")
+	case errors.Is(err, store.ErrInvalid):
+		// A CHECK constraint refused the value. 400, not 500: the request will
+		// never succeed as sent, and the operator needs to know that rather
+		// than retry. The constraint name is in the error and is the only thing
+		// distinguishing one rule from another, so it goes in the message —
+		// checkHint turns the ones with a non-obvious reason into a sentence.
+		writeErr(w, http.StatusBadRequest, checkHint(err))
 	case errors.Is(err, enroll.ErrHostBlocked):
 		writeErr(w, http.StatusForbidden, "host is blocked")
 	case errors.Is(err, store.ErrNoActived):

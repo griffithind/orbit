@@ -23,8 +23,13 @@ import (
 // Common errors. Callers should test with errors.Is rather than comparing
 // pgx errors directly, so the storage layer stays swappable.
 var (
-	ErrNotFound  = errors.New("not found")
-	ErrConflict  = errors.New("conflict")
+	ErrNotFound = errors.New("not found")
+	ErrConflict = errors.New("conflict")
+	// ErrInvalid is a CHECK constraint refusing the value it was given. The
+	// caller sent something the schema forbids, so it belongs in the 4xx range
+	// with the constraint named — not in a 500, which tells an operator only
+	// that something went wrong somewhere.
+	ErrInvalid   = errors.New("invalid")
 	ErrNoActived = errors.New("network has no active CA")
 )
 
@@ -196,6 +201,18 @@ func mapErr(err error, what string) error {
 			// rather than as a database error, because that is what it means to
 			// the caller.
 			return fmt.Errorf("%s: %w: %s", what, ErrNotFound, pgErr.ConstraintName)
+		case "23514": // check_violation
+			// A value the schema forbids. Several invariants live only in CHECK
+			// constraints — network names that look like uuids, port ranges,
+			// state values — and without this they surfaced as a 500, which
+			// tells an operator that something broke rather than that they sent
+			// something the system will never accept.
+			//
+			// The constraint name is included deliberately: it is the only
+			// machine-readable thing distinguishing one refusal from another,
+			// and it is what lets a handler add a sentence about this specific
+			// rule instead of a generic one.
+			return fmt.Errorf("%s: %w: %s", what, ErrInvalid, pgErr.ConstraintName)
 		}
 	}
 	return fmt.Errorf("%s: %w", what, err)

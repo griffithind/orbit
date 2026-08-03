@@ -290,6 +290,7 @@ Scoped bearer tokens, modeled on the incumbent's `hosts:create` /
 ```
 POST   /v1/networks                      networks:write
 GET    /v1/networks                      networks:read
+GET    /v1/networks/:ref                 networks:read  (uuid OR name)
 GET    /v1/networks/:id/convergence      networks:read  (§6 rotation gate)
 
 POST   /v1/cas                           cas:write      (pending, not active)

@@ -40,6 +40,11 @@ func (s *Server) resourceRoutes() []route {
 	return []route{
 		a("POST /v1/networks", "networks:write", s.handleCreateNetwork),
 		a("GET /v1/networks", "networks:read", s.handleListNetworks),
+		// {ref} is a uuid OR a name. Network names are globally unique, which
+		// hosts' and roles' are not, so this is the one resource where a name
+		// is an unambiguous identifier — and it removes a full listing from
+		// every client that knows a network by the name its operator uses.
+		a("GET /v1/networks/{ref}", "networks:read", s.handleGetNetwork),
 
 		a("POST /v1/roles", "roles:write", s.handleCreateRole),
 		a("GET /v1/roles", "roles:read", s.handleListRoles),
@@ -157,6 +162,43 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, networkResponse(&net))
+}
+
+// handleGetNetwork resolves one network by uuid or by name.
+//
+// Both, in one route, because a caller usually has whichever of the two a human
+// gave it and should not have to care which. The database refuses a network
+// name shaped like a uuid (migration 0005), so trying uuid.Parse first cannot
+// shadow a name.
+func (s *Server) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
+	ref := r.PathValue("ref")
+	if ref == "" {
+		writeErr(w, http.StatusBadRequest, "a network id or name is required")
+		return
+	}
+
+	var out wire.NetworkResponse
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		var (
+			net *store.Network
+			err error
+		)
+		if id, perr := uuid.Parse(ref); perr == nil {
+			net, err = tx.GetNetwork(ctx, id)
+		} else {
+			net, err = tx.GetNetworkByName(ctx, ref)
+		}
+		if err != nil {
+			return err
+		}
+		out = networkResponse(net)
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "network")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
