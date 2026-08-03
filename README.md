@@ -198,7 +198,9 @@ detail and says plainly what has and has not been measured.
 | [docs/deployment.md](docs/deployment.md) | Running it: bring-up order, CA key protection, break-glass, backups, alerts |
 | [docs/design.md](docs/design.md) | Architecture, data model, API surfaces, CA custody and rotation, threat model |
 | [docs/enrollment.md](docs/enrollment.md) | Enrollment methods, wire protocol, renewal, recovery, attack analysis |
+| [docs/policy-model.md](docs/policy-model.md) | How Nebula's firewall enforces, what a certificate can carry, and how policy compiles |
 | [docs/revocation.md](docs/revocation.md) | How blocking propagates, and how to measure it |
+| [docs/diagnostics.md](docs/diagnostics.md) | Design for `orbit status`, `orbit peers` and `orbit why` (not yet built) |
 
 Start with `design.md` §1. It documents six properties of Nebula's certificate
 code that every other decision here follows from, with file references — most
