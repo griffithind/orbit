@@ -42,6 +42,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -96,13 +97,15 @@ func (d *dirFlags) layout() (agent.Layout, error) {
 	return agent.LayoutFor(filepath.Clean(*d.dir), mode), nil
 }
 
-const agentVerbs = "enroll, run, recover"
+const agentVerbs = "install, enroll, run, recover"
 
 func agentCmd(_ context.Context, args []string) error {
 	if len(args) == 0 {
 		return agentUsage()
 	}
 	switch args[0] {
+	case "install":
+		return installCmd(args[1:])
 	case "enroll":
 		return enrollCmd(args[1:])
 	case "run":
@@ -119,6 +122,7 @@ func agentCmd(_ context.Context, args []string) error {
 func agentUsage() error {
 	fmt.Fprint(errOut, `orbit agent <command> [flags]
 
+  install  enroll and set this host up as a service, in one step
   enroll   join a network using an enrollment code
   run      poll for updates and apply them
   recover  re-obtain a certificate after this host's expired while offline
@@ -475,5 +479,88 @@ func recoverCmd(args []string) error {
 		"and is worth investigating")
 	fmt.Printf("recovered as %s (%s)\ncertificate expires %s\n",
 		resp.HostName, resp.HostID, resp.NotAfter.Format(time.RFC3339))
+	return nil
+}
+
+// installCmd is enrollment plus everything an operator would otherwise do by
+// hand afterwards: write the service definition, enable it, start it.
+//
+// It exists because the manual sequence is six steps on Linux and seven on
+// macOS, every one of them a place to mistype a path — and a deployment that
+// followed the written version hit four separate failures before reaching
+// anything Orbit does.
+func installCmd(args []string) error {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	var (
+		url       = fs.String("url", "", "control plane base URL")
+		code      = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
+		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
+		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
+		dryRun    = fs.Bool("dry-run", false, "print what would be written and installed, and change nothing")
+		noStart   = fs.Bool("no-start", false, "write the service definition but do not enable or start it")
+	)
+	df := addDirFlags(fs)
+	_ = fs.Parse(args)
+
+	layout, err := df.layout()
+	if err != nil {
+		return err
+	}
+
+	// The binary's own path, resolved before anything is written. A unit that
+	// names a path the binary is not at starts once — from the shell that
+	// installed it — and never again after a reboot.
+	binary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve this binary's path: %w", err)
+	}
+	if binary, err = filepath.EvalSymlinks(binary); err != nil {
+		return fmt.Errorf("resolve this binary's path: %w", err)
+	}
+
+	slug := filepath.Base(layout.Dir)
+	plan, err := agent.PlanService(slug, layout.Dir, binary, *verifyURL)
+	if err != nil {
+		return err
+	}
+
+	if *dryRun {
+		fmt.Fprintf(errOut, "would enroll into %s\nwould write %s (%s)\nwould run: %s\n\n",
+			layout.Dir, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
+		fmt.Fprintln(out, plan.Contents)
+		return nil
+	}
+
+	// Enroll FIRST. Writing a service definition for a host that then fails to
+	// enroll leaves a unit pointing at an empty directory, and a service
+	// manager restarting it forever.
+	if err := enrollCmd([]string{
+		"-url", *url, "-code", *code, "-curve", *curve, "-dir", layout.Dir,
+	}); err != nil {
+		return err
+	}
+
+	if err := plan.Write(); err != nil {
+		return err
+	}
+	fmt.Fprintf(errOut, "wrote %s\n", plan.Path)
+
+	if *noStart {
+		fmt.Fprintf(errOut, "\nNot started. When you are ready:\n\n  %s\n",
+			strings.Join(plan.Start, " "))
+		return nil
+	}
+
+	if err := plan.Enable(); err != nil {
+		return fmt.Errorf("%w\n\nThe host IS enrolled and %s is written; only starting the "+
+			"service failed. Fix that and run:\n\n  %s",
+			err, plan.Path, strings.Join(plan.Start, " "))
+	}
+
+	fmt.Fprintf(errOut, `
+%s is running. This host is on the mesh and will renew on its own.
+
+  %s
+`, plan.Name, strings.Join(plan.Status, " "))
 	return nil
 }
