@@ -26,9 +26,12 @@ const (
 	CertSuperseded = "superseded"
 	CertRevoked    = "revoked"
 
-	MethodCode        = "code"
-	MethodCloudIID    = "cloud_iid"
-	MethodAttestation = "attestation"
+	// MethodCode is the only enrollment method. Cloud instance identity and TPM
+	// attestation were sketched into the schema before either was built, which
+	// was worse than leaving them out: a CHECK constraint listing a method is a
+	// claim the method works. Adding one back is an ALTER and a handler, the
+	// same work it always was.
+	MethodCode = "code"
 )
 
 type Network struct {

@@ -30,6 +30,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/enroll"
+	"github.com/griffithind/orbit/internal/metrics"
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
@@ -79,6 +80,10 @@ type Config struct {
 	// DisableEnrollLimit removes rate limiting entirely. For tests and for
 	// deployments that limit at a proxy instead.
 	DisableEnrollLimit bool
+
+	// Metrics counts events. Nil is safe and every call becomes a no-op, so
+	// tests and metric-less deployments need no branching at the call sites.
+	Metrics *metrics.Metrics
 }
 
 type Server struct {
@@ -132,6 +137,10 @@ func (s *Server) AdminRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/hosts", s.admin("hosts:read", s.handleListHosts))
 	mux.Handle("GET /v1/hosts/{id}", s.admin("hosts:read", s.handleGetHost))
 	mux.Handle("PATCH /v1/hosts/{id}", s.admin("hosts:write", s.handleUpdateHost))
+	// Deletion revokes, so it takes hosts:block rather than hosts:write. A token
+	// trusted to edit a host but not to cut one off must not reach the stronger
+	// outcome through a different verb.
+	mux.Handle("DELETE /v1/hosts/{id}", s.admin("hosts:block", s.handleDeleteHost))
 	mux.Handle("POST /v1/hosts/{id}/enrollment-code", s.admin("hosts:enroll", s.handleCreateEnrollCode))
 	mux.Handle("POST /v1/hosts/{id}/block", s.admin("hosts:block", s.handleBlockHost))
 	mux.Handle("POST /v1/hosts/{id}/unblock", s.admin("hosts:block", s.handleUnblockHost))
@@ -151,6 +160,17 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.enroll.Enroll(r.Context(), req, s.clientAddr(r))
 	if err != nil {
+		// Labelled by class, not by error string: an unbounded label set is
+		// how a metrics endpoint becomes the thing that falls over.
+		switch {
+		case errors.Is(err, enroll.ErrInvalidCredential), errors.Is(err, enroll.ErrHostBlocked):
+			s.cfg.Metrics.EnrollAttempt("rejected")
+		case errors.Is(err, enroll.ErrInvalidPublicKey), errors.Is(err, enroll.ErrCurveMismatch):
+			s.cfg.Metrics.EnrollAttempt("bad_request")
+		default:
+			s.cfg.Metrics.EnrollAttempt("error")
+		}
+
 		switch {
 		case errors.Is(err, enroll.ErrInvalidCredential):
 			// One message for unknown, already-used, and expired. Telling a
@@ -171,6 +191,8 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.cfg.Metrics.EnrollAttempt("ok")
+	s.cfg.Metrics.CertificateIssued("enroll")
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -281,6 +303,7 @@ func (s *Server) handleAgentRenew(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "renewal failed")
 		return
 	}
+	s.cfg.Metrics.CertificateIssued("renew")
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -390,9 +413,14 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.enroll.Recover(r.Context(), req, s.clientAddr(r))
 	if err != nil {
+		s.cfg.Metrics.EnrollAttempt("recovery_denied")
 		s.recoveryError(w, err)
 		return
 	}
+	// Counted separately from renew: a nonzero rate here means renewal is
+	// failing somewhere, and it is invisible if it shares a counter with the
+	// normal path.
+	s.cfg.Metrics.CertificateIssued("recover")
 	writeJSON(w, http.StatusOK, resp)
 }
 

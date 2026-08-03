@@ -34,10 +34,21 @@ type Event struct {
 	Epoch     int64     `json:"epoch"`
 }
 
+// Observer receives listener state changes. *metrics.Metrics satisfies it.
+//
+// An interface rather than a direct dependency on the metrics package: this
+// package is the one thing that must keep working when everything else is
+// broken, and it should not gain an import to be observable.
+type Observer interface {
+	ListenerUp(up bool)
+	EpochNotified(kind string)
+}
+
 // Notifier listens for epoch changes and wakes per-network subscribers.
 type Notifier struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger
+	obs  Observer
 
 	mu   sync.Mutex
 	subs map[uuid.UUID]map[int]chan Event
@@ -55,6 +66,18 @@ func New(pool *pgxpool.Pool, log *slog.Logger) *Notifier {
 		log:   log,
 		subs:  map[uuid.UUID]map[int]chan Event{},
 		ready: make(chan struct{}),
+	}
+}
+
+// Observe attaches an observer. Safe to skip; nil means no reporting.
+func (n *Notifier) Observe(o Observer) *Notifier {
+	n.obs = o
+	return n
+}
+
+func (n *Notifier) up(state bool) {
+	if n.obs != nil {
+		n.obs.ListenerUp(state)
 	}
 }
 
@@ -83,6 +106,7 @@ func (n *Notifier) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		n.up(false)
 		if err != nil {
 			n.log.Warn("epoch listener dropped, reconnecting",
 				"error", err, "retryIn", backoff)
@@ -109,6 +133,7 @@ func (n *Notifier) listen(ctx context.Context) error {
 		return err
 	}
 	n.readyOnce.Do(func() { close(n.ready) })
+	n.up(true)
 	n.log.Debug("listening for epoch changes", "channel", Channel)
 
 	for {
@@ -125,6 +150,9 @@ func (n *Notifier) listen(ctx context.Context) error {
 			n.log.Error("unparseable epoch notification",
 				"payload", raw.Payload, "error", err)
 			continue
+		}
+		if n.obs != nil {
+			n.obs.EpochNotified(ev.Kind)
 		}
 		n.dispatch(ev)
 	}

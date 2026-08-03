@@ -44,6 +44,7 @@ func (s *Server) handleAgentWatch(w http.ResponseWriter, r *http.Request) {
 	// connection pool for every other network on this deployment. The cap fails
 	// soft: an agent refused a slot falls back to polling.
 	if max := s.cfg.MaxWatchers; max > 0 && s.cfg.Notifier.Subscribers(s.cfg.Agent.NetworkID) >= max {
+		s.cfg.Metrics.PollFallback()
 		w.Header().Set("Retry-After", "5")
 		writeErr(w, http.StatusServiceUnavailable, "too many watchers; falling back to polling is expected")
 		return
@@ -61,6 +62,11 @@ func (s *Server) handleAgentWatch(w http.ResponseWriter, r *http.Request) {
 
 	events, release := s.cfg.Notifier.Subscribe(s.cfg.Agent.NetworkID)
 	defer release()
+
+	// Paired with the deferred close so every early return below still
+	// decrements. A gauge that only counts up is worse than no gauge.
+	s.cfg.Metrics.WatcherOpened()
+	defer s.cfg.Metrics.WatcherClosed()
 
 	// Fast path: already behind, answer now.
 	resp, err := s.enroll.State(r.Context(), id.HostID, knownConfig, knownBlock)

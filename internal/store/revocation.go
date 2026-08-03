@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,6 +74,55 @@ func (t *Tx) BlockHost(ctx context.Context, hostID uuid.UUID, reason string) (in
 	}
 
 	if err := t.SetHostState(ctx, hostID, HostSuspended); err != nil {
+		return 0, err
+	}
+	return epoch, nil
+}
+
+// DeleteHost removes a host permanently, revoking it on the way out.
+//
+// The order is the entire point. Deleting the row first would destroy the
+// certificate records that name the fingerprints to revoke, leaving a
+// decommissioned machine holding a certificate that stays valid until it
+// expires — a delete that is weaker than a block, which is the opposite of what
+// the word leads anyone to expect. So this blocks first, then deletes.
+//
+// The blocklist entries survive the host: blocklist_entry references
+// network_id, not host_id, so nothing cascades them away. They are pruned
+// normally once the revoked certificates pass their expiry, at which point
+// nebula rejects those certificates on age alone and the fingerprints stop
+// being worth distributing.
+//
+// One consequence worth stating: a deleted host cannot be unblocked, because
+// UnblockHost finds entries by joining through certificates that no longer
+// exist. Deletion is not reversible, and it releases the name for reuse by a
+// new host with a new identity.
+//
+// Returns the new blocklist epoch.
+func (t *Tx) DeleteHost(ctx context.Context, hostID uuid.UUID, reason string) (int64, error) {
+	host, err := t.GetHost(ctx, hostID)
+	if err != nil {
+		return 0, err
+	}
+
+	epoch, err := t.BlockHost(ctx, hostID, reason)
+	if err != nil {
+		return 0, err
+	}
+
+	// Cascades to host_address, certificate, and enrollment_credential.
+	tag, err := t.tx.Exec(ctx, `DELETE FROM orbit.host WHERE id = $1`, hostID)
+	if err != nil {
+		return 0, mapErr(err, "delete host")
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, fmt.Errorf("delete host: %w", ErrNotFound)
+	}
+
+	// A deleted host changes what every other host renders — most visibly a
+	// lighthouse leaving static_host_map. Without this the fleet keeps dialling
+	// a machine that is gone.
+	if _, err := t.BumpEpoch(ctx, host.NetworkID, EpochConfig); err != nil {
 		return 0, err
 	}
 	return epoch, nil

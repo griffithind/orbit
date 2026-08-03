@@ -33,6 +33,7 @@ import (
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/mesh"
+	"github.com/griffithind/orbit/internal/metrics"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/sched"
@@ -148,19 +149,21 @@ func openStore(ctx context.Context, dsn string) (*store.Store, error) {
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
-		dsn        = fs.String("dsn", "", "postgres DSN for the orbit_app role (or ORBIT_DSN)")
-		addr       = fs.String("addr", ":8080", "listen address")
-		enrollURL  = fs.String("enroll-url", "", "public enroll URL handed to agents")
-		agentPort  = fs.Int("agent-port", 8443, "port the agent API listens on, on each overlay")
-		listenPort = fs.Int("nebula-port", 4242, "nebula UDP port written into rendered configs")
-		trustXFF   = fs.Bool("trust-forwarded-for", false, "read the client address from X-Forwarded-For (only behind a trusted proxy)")
-		maxWatch   = fs.Int("max-watchers", 5000, "cap on concurrent long-poll connections per network")
-		noPush     = fs.Bool("no-push", false, "disable push updates; agents fall back to polling")
-		lighthouse = fs.String("lighthouse", "", "seed: public host:port entries to advertise as a lighthouse, applied only when this control plane's host record is first created (comma separated)")
-		relay      = fs.Bool("relay", false, "seed: act as a relay, applied only when this control plane's host record is first created")
-		maintEvery = fs.Duration("maintenance-interval", 15*time.Minute, "how often to prune and report")
-		noMaint    = fs.Bool("no-maintenance", false, "disable periodic maintenance on this instance")
-		meshes     meshSpecs
+		dsn         = fs.String("dsn", "", "postgres DSN for the orbit_app role (or ORBIT_DSN)")
+		addr        = fs.String("addr", ":8080", "listen address")
+		enrollURL   = fs.String("enroll-url", "", "public enroll URL handed to agents")
+		agentPort   = fs.Int("agent-port", 8443, "port the agent API listens on, on each overlay")
+		listenPort  = fs.Int("nebula-port", 4242, "nebula UDP port written into rendered configs")
+		trustXFF    = fs.Bool("trust-forwarded-for", false, "read the client address from X-Forwarded-For (only behind a trusted proxy)")
+		maxWatch    = fs.Int("max-watchers", 5000, "cap on concurrent long-poll connections per network")
+		noPush      = fs.Bool("no-push", false, "disable push updates; agents fall back to polling")
+		lighthouse  = fs.String("lighthouse", "", "seed: public host:port entries to advertise as a lighthouse, applied only when this control plane's host record is first created (comma separated)")
+		relay       = fs.Bool("relay", false, "seed: act as a relay, applied only when this control plane's host record is first created")
+		maintEvery  = fs.Duration("maintenance-interval", 15*time.Minute, "how often to prune and report")
+		noMaint     = fs.Bool("no-maintenance", false, "disable periodic maintenance on this instance")
+		metricsAddr = fs.String("metrics-addr", "127.0.0.1:9464",
+			"Prometheus exposition address; empty disables it. Bind to localhost or the overlay: the output is fleet inventory")
+		meshes meshSpecs
 	)
 	fs.Var(&meshes, "mesh", "join a network: <network-uuid>=<overlay-addr> (repeatable)")
 	_ = fs.Parse(args)
@@ -194,10 +197,29 @@ func serve(args []string) error {
 		Log:        log.With("component", "enroll"),
 	})
 
+	// Metrics. Built before anything that reports into it, and served on its
+	// own listener: /metrics enumerates network names and host counts, which is
+	// inventory that has no business on the public enrollment listener.
+	var mx *metrics.Metrics
+	if *metricsAddr != "" {
+		mx = metrics.New()
+		if err := mx.RegisterDB(st, log.With("component", "metrics")); err != nil {
+			return fmt.Errorf("register metrics collector: %w", err)
+		}
+		go func() {
+			if err := mx.ServeMetrics(ctx, *metricsAddr, log.With("component", "metrics")); err != nil {
+				log.Error("metrics listener stopped", "error", err)
+			}
+		}()
+	} else {
+		log.Warn("metrics disabled; convergence and log lines are the only signals")
+	}
+
 	apiCfg := api.Config{
 		TrustForwardedFor: *trustXFF,
 		MaxWatchers:       *maxWatch,
 		SignerFactory:     ca.FileSignerFactory,
+		Metrics:           mx,
 	}
 
 	// Push. The notifier holds a dedicated connection listening for epoch
@@ -207,7 +229,7 @@ func serve(args []string) error {
 	// letting an operator discover it from a latency graph.
 	var notifier *notify.Notifier
 	if !*noPush {
-		notifier = notify.New(st.Pool(), log)
+		notifier = notify.New(st.Pool(), log).Observe(mx)
 		go func() {
 			if err := notifier.Run(ctx); err != nil && ctx.Err() == nil {
 				log.Error("epoch notifier stopped", "error", err)

@@ -1,0 +1,106 @@
+package store
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+)
+
+// NetworkStats is one network's operational state, for the metrics endpoint.
+//
+// Everything here answers a question an operator asks during an incident, and
+// nothing here is per-host: a gauge labelled by host id would grow a time
+// series per machine and make Prometheus the most expensive part of a
+// deployment that otherwise runs on one small VM. The per-host detail lives in
+// /v1/networks/{id}/convergence, which is queried when someone is looking.
+type NetworkStats struct {
+	NetworkID      uuid.UUID
+	Name           string
+	ConfigEpoch    int64
+	BlocklistEpoch int64
+
+	HostsTotal    int
+	ConfigApplied int
+	BlockApplied  int
+
+	// LagSeconds is how long the most stale un-converged host has gone without
+	// reporting. Zero when everything has converged.
+	//
+	// This is the number the revocation SLO is actually about. It is a gauge
+	// and not the histogram docs/revocation.md originally proposed, because a
+	// histogram measures the distribution of completed events and convergence
+	// lag is a level: at any instant a host either is or is not behind, and
+	// what matters is how long the worst one has been.
+	LagSeconds float64
+
+	// CertsExpiringSoon counts active certificates with under a quarter of
+	// their lifetime left. Renewal targets roughly half, so a nonzero value
+	// means renewal is failing for someone, well before anything drops off.
+	CertsExpiringSoon int
+
+	// MinCertRemainingSeconds is the closest active certificate to expiry.
+	// Negative if one has already expired and nothing has cleaned it up.
+	MinCertRemainingSeconds float64
+
+	// BlocklistSize is the number of distributed fingerprints. It bounds the
+	// size of every host's config, so unbounded growth is worth seeing.
+	BlocklistSize int
+}
+
+// FleetStats returns one row per network in a single round trip.
+//
+// One query rather than a loop over networks: this runs on every Prometheus
+// scrape, and a per-network query would make scrape cost scale with the number
+// of networks for data that is a single aggregate.
+func (t *Tx) FleetStats(ctx context.Context) ([]NetworkStats, error) {
+	rows, err := t.tx.Query(ctx, `
+		SELECT n.id, n.name, n.config_epoch, n.blocklist_epoch,
+		       -- Only enrolled and active hosts count. A host in 'created' has
+		       -- never had a certificate and can never converge, so including
+		       -- it would peg the ratio below 100% forever.
+		       (SELECT count(*) FROM orbit.host h
+		         WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')),
+		       (SELECT count(*) FROM orbit.host h
+		         WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')
+		           AND h.applied_config_epoch >= n.config_epoch),
+		       (SELECT count(*) FROM orbit.host h
+		         WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')
+		           AND h.applied_blocklist_epoch >= n.blocklist_epoch),
+		       -- A host that has never reported has no last_seen_at; coalescing
+		       -- to created_at makes a never-converged host register as lagging
+		       -- since it was created rather than as zero.
+		       COALESCE((SELECT max(extract(epoch FROM now() - COALESCE(h.last_seen_at, h.created_at)))
+		                   FROM orbit.host h
+		                  WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')
+		                    AND (h.applied_config_epoch < n.config_epoch
+		                      OR h.applied_blocklist_epoch < n.blocklist_epoch)), 0),
+		       (SELECT count(*) FROM orbit.certificate c
+		          JOIN orbit.host h ON h.id = c.host_id
+		         WHERE h.network_id = n.id AND c.state = 'active'
+		           AND (c.not_after - now()) < (c.not_after - c.not_before) * 0.25),
+		       COALESCE((SELECT min(extract(epoch FROM c.not_after - now()))
+		                   FROM orbit.certificate c
+		                   JOIN orbit.host h ON h.id = c.host_id
+		                  WHERE h.network_id = n.id AND c.state = 'active'), 0),
+		       (SELECT count(*) FROM orbit.blocklist_entry b
+		         WHERE b.network_id = n.id AND b.not_after > now())
+		  FROM orbit.network n
+		 ORDER BY n.name`)
+	if err != nil {
+		return nil, mapErr(err, "fleet stats")
+	}
+	defer rows.Close()
+
+	var out []NetworkStats
+	for rows.Next() {
+		var s NetworkStats
+		if err := rows.Scan(&s.NetworkID, &s.Name, &s.ConfigEpoch, &s.BlocklistEpoch,
+			&s.HostsTotal, &s.ConfigApplied, &s.BlockApplied,
+			&s.LagSeconds, &s.CertsExpiringSoon, &s.MinCertRemainingSeconds,
+			&s.BlocklistSize); err != nil {
+			return nil, mapErr(err, "scan fleet stats")
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}

@@ -283,20 +283,6 @@ func (t *Tx) CreateEnrollmentCredential(ctx context.Context, c *EnrollmentCreden
 	return mapErr(err, "create enrollment credential")
 }
 
-// ClaimInstance records a cloud instance as enrolled.
-//
-// The (provider, instance_id) primary key is what makes cloud IID enrollment
-// single-use. A replayed identity document races this insert and loses with
-// ErrConflict; an application-level check could be raced.
-func (t *Tx) ClaimInstance(ctx context.Context, provider, instanceID string, networkID, hostID uuid.UUID) error {
-	_, err := t.tx.Exec(ctx, `
-		INSERT INTO orbit.enrolled_instance
-			(provider, instance_id, network_id, host_id)
-		VALUES ($1, $2, $3, $4)`,
-		provider, instanceID, networkID, hostID)
-	return mapErr(err, "claim instance")
-}
-
 // PruneExpiredCredentials deletes unredeemed credentials past their expiry.
 // Redeemed ones are retained: they are evidence.
 func (t *Tx) PruneExpiredCredentials(ctx context.Context, before time.Time) (int64, error) {

@@ -311,6 +311,14 @@ type TokenResponse struct {
 	Name      string   `json:"name"`
 	Scopes    []string `json:"scopes"`
 	ExpiresAt string   `json:"expires_at,omitempty"`
+	CreatedAt string   `json:"created_at,omitempty"`
+	// LastUsedAt is what makes a listing worth having: after a leak the
+	// question is whether the token was used, and when.
+	LastUsedAt string `json:"last_used_at,omitempty"`
+	// RevokedAt is set on revoked tokens, which stay listed rather than
+	// disappearing. A row that vanishes cannot answer "was it used after we
+	// revoked it".
+	RevokedAt string `json:"revoked_at,omitempty"`
 }
 
 type AuditRecordResponse struct {

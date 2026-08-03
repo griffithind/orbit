@@ -57,13 +57,14 @@ func dsn(env, def string) string {
 
 // harness is a running control plane backed by a real database.
 type harness struct {
-	t      *testing.T
-	store  *store.Store
-	server *httptest.Server
-	netID  uuid.UUID
-	roleID uuid.UUID
-	token  string
-	caKey  string
+	t       *testing.T
+	store   *store.Store
+	server  *httptest.Server
+	netID   uuid.UUID
+	netName string
+	roleID  uuid.UUID
+	token   string
+	caKey   string
 }
 
 func setup(t *testing.T) *harness {
@@ -130,10 +131,11 @@ func (h *harness) bootstrap(t *testing.T) {
 		t.Fatalf("new token: %v", err)
 	}
 	h.token = token
+	h.netName = "e2e-" + uuid.NewString()[:8]
 
 	err = h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		net := store.Network{
-			Name:    "e2e-" + uuid.NewString()[:8],
+			Name:    h.netName,
 			CIDRs:   []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
 			CertVer: int16(cert.Version2),
 			Curve:   cert.Curve_CURVE25519.String(),
@@ -327,6 +329,14 @@ func (h *harness) adminPost(t *testing.T, url string, body, out any) int {
 
 func (h *harness) adminReq(t *testing.T, method, url string, body, out any) int {
 	t.Helper()
+	return h.reqAs(t, h.token, method, url, body, out)
+}
+
+// reqAs issues a request with a specific token, for exercising scope
+// enforcement. The bootstrap token holds "*", so it can never prove that a
+// route checks the scope it declares.
+func (h *harness) reqAs(t *testing.T, token, method, url string, body, out any) int {
+	t.Helper()
 
 	var rdr io.Reader
 	if body != nil {
@@ -340,7 +350,7 @@ func (h *harness) adminReq(t *testing.T, method, url string, body, out any) int 
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)

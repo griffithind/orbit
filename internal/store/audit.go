@@ -127,6 +127,10 @@ const (
 	ActionEnrolled          = "host.enrolled"
 	ActionEnrollFailed      = "host.enroll_failed"
 	ActionRecovered         = "host.recovered"
+	ActionHostUpdated       = "host.updated"
+	ActionRoleCreated       = "role.created"
+	ActionTokenCreated      = "token.created"
+	ActionTokenRevoked      = "token.revoked"
 )
 
 // AuditTarget is a small helper for the common "target is a UUID" case.

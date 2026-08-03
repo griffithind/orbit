@@ -166,8 +166,10 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 		return nil, err
 	}
 	if redeemed.HostID == nil {
-		// Only cloud_iid creates its host on redemption, and that path is not
-		// implemented yet. Fail loudly rather than inventing a host.
+		// Unreachable: host_id is NOT NULL as of migration 0003. Kept as an
+		// assertion because the alternative to failing here is inventing a
+		// host, and a control plane that mints an identity out of a NULL is a
+		// worse outcome than an error nobody ever sees.
 		return nil, ErrNoHost
 	}
 

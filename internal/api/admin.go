@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
@@ -262,7 +263,7 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		}
 		return tx.AppendAudit(ctx, store.AuditEntry{
 			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: "host.updated", TargetType: "host", TargetID: hostID.String(),
+			Action: store.ActionHostUpdated, TargetType: "host", TargetID: hostID.String(),
 		})
 	})
 	if err != nil {
@@ -361,6 +362,60 @@ func (s *Server) handleUnblockHost(w http.ResponseWriter, r *http.Request) {
 		s.notFoundOr(w, err, "host")
 		return
 	}
+	writeJSON(w, http.StatusOK, wire.BlockResponse{BlocklistEpoch: epoch})
+}
+
+// handleDeleteHost decommissions a host: revoke, then remove.
+//
+// Distinct from block, which is reversible and keeps the record. This releases
+// the name and the overlay address for reuse and cannot be undone, so the
+// certificates have to be revoked on the way out — see store.DeleteHost for why
+// the ordering carries the whole guarantee.
+//
+// Returns the blocklist epoch, like block does, because the caller's next
+// question is the same one: has the fleet seen this yet.
+func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	hostID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	reason := r.URL.Query().Get("reason")
+	if reason == "" {
+		reason = "deleted via admin API"
+	}
+
+	var (
+		epoch int64
+		name  string
+	)
+	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		// Read the name before the row goes, so the audit entry says which host
+		// this was. A uuid alone is useless to whoever reads the log later.
+		host, err := tx.GetHost(ctx, hostID)
+		if err != nil {
+			return err
+		}
+		name = host.Name
+
+		epoch, err = tx.DeleteHost(ctx, hostID, reason)
+		if err != nil {
+			return err
+		}
+		return tx.AppendAudit(ctx, store.AuditEntry{
+			ActorType: "token", ActorID: id.TokenID.String(),
+			Action: store.ActionHostDeleted, TargetType: "host", TargetID: hostID.String(),
+			Meta: []byte(fmt.Sprintf(`{"name":%q,"reason":%q}`, name, reason)),
+		})
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "host")
+		return
+	}
+
+	s.log.Info("host deleted and its certificates revoked",
+		"host", hostID, "name", name, "by", id.TokenID)
 	writeJSON(w, http.StatusOK, wire.BlockResponse{BlocklistEpoch: epoch})
 }
 

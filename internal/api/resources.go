@@ -34,6 +34,9 @@ func (s *Server) ResourceRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/cas/{id}/retire", s.admin("cas:write", s.handleRetireCA))
 
 	mux.Handle("POST /v1/tokens", s.admin("tokens:write", s.handleCreateToken))
+	mux.Handle("GET /v1/tokens", s.admin("tokens:read", s.handleListTokens))
+	mux.Handle("DELETE /v1/tokens/{id}", s.admin("tokens:write", s.handleRevokeToken))
+
 	mux.Handle("GET /v1/audit-logs", s.admin("audit:read", s.handleListAudit))
 }
 
@@ -191,7 +194,7 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		}
 		return tx.AppendAudit(ctx, store.AuditEntry{
 			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: "role.created", TargetType: "role", TargetID: role.ID.String(),
+			Action: store.ActionRoleCreated, TargetType: "role", TargetID: role.ID.String(),
 		})
 	})
 	if err != nil {
@@ -523,7 +526,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		}
 		return tx.AppendAudit(ctx, store.AuditEntry{
 			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: "token.created", TargetType: "token", TargetID: tokenID.String(),
+			Action: store.ActionTokenCreated, TargetType: "token", TargetID: tokenID.String(),
 		})
 	})
 	if err != nil {
@@ -538,6 +541,82 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		resp.ExpiresAt = expiresAt.Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	var out []wire.TokenResponse
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		toks, err := tx.ListAPITokens(ctx)
+		if err != nil {
+			return err
+		}
+		out = make([]wire.TokenResponse, 0, len(toks))
+		for _, t := range toks {
+			// No Token field. The plaintext existed only in the response that
+			// created it and is not recoverable from here — which is the point
+			// of storing a hash.
+			out = append(out, wire.TokenResponse{
+				ID: t.ID.String(), Name: t.Name, Scopes: t.Scopes,
+				CreatedAt:  t.CreatedAt.Format(time.RFC3339),
+				ExpiresAt:  formatTime(t.ExpiresAt),
+				LastUsedAt: formatTime(t.LastUsedAt),
+				RevokedAt:  formatTime(t.RevokedAt),
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "tokens")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRevokeToken makes a token unusable from the next request onward.
+//
+// Revoking the token that authorized this request is allowed. It is what
+// rotating a credential looks like from the last step's point of view, and
+// refusing it would mean the most privileged token is the one you cannot
+// retire. The audit entry records the actor, so a self-revocation is legible
+// afterwards.
+func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	tokenID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if err := tx.RevokeAPIToken(ctx, tokenID); err != nil {
+			return err
+		}
+		return tx.AppendAudit(ctx, store.AuditEntry{
+			ActorType: "token", ActorID: id.TokenID.String(),
+			Action: store.ActionTokenRevoked, TargetType: "token", TargetID: tokenID.String(),
+		})
+	})
+	if err != nil {
+		// ErrNotFound also covers an already-revoked token, deliberately: see
+		// store.RevokeAPIToken.
+		s.notFoundOr(w, err, "token")
+		return
+	}
+
+	if tokenID == id.TokenID {
+		s.log.Warn("token revoked itself; this request was its last", "token", tokenID)
+	} else {
+		s.log.Info("api token revoked", "token", tokenID, "by", id.TokenID)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// formatTime renders an optional timestamp, or "" when it is unset, so the
+// omitempty tags on TokenResponse mean what they look like they mean.
+func formatTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }
 
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
