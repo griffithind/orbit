@@ -98,7 +98,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # fetch-depth: 0 so the tag OBJECT is present, not just the commit it
+      # points at. A shallow checkout gives `git tag -l --format=...` nothing to
+      # read, and the release notes would silently lose their body.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -188,6 +193,17 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           notes=$(mktemp)
           {
+            # The tag's own annotation, first. It is where whoever cut the
+            # release said what changed and what breaks, and a release page that
+            # opens with install instructions buries exactly that.
+            body=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
+            if [ -n "$body" ]; then
+              echo "$body"
+              echo
+              echo "---"
+              echo
+            fi
+
             echo "## Install"
             echo
             echo '```bash'

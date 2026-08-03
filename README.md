@@ -26,7 +26,7 @@ From [releases](https://github.com/griffithind/orbit/releases). Every binary is
 statically linked with no runtime dependencies.
 
 ```bash
-VERSION=0.1.0
+VERSION=0.2.0
 OS=$(uname -s | tr A-Z a-z)
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
@@ -252,13 +252,13 @@ Designed but not implemented, and marked as such where they appear: SSO/OIDC
 
 ## Maturity
 
-**v0.1.0 is an early release.** The tests are thorough and run against a real
+**v0.2.0 is an early release.** The tests are thorough and run against a real
 Postgres and real Nebula tunnels, with no mock layer — the constraints this
 design rests on live in Nebula's own code, and a mock would encode our belief
 about them rather than the behaviour. CI fails if the database tests silently
 skip.
 
-What it does not have is production hours. Pilot v0.1.0 on infrastructure you
+What it does not have is production hours. Pilot it on infrastructure you
 own rather than putting a fleet behind it. Two gaps are worth naming: there is
 no rolling-upgrade procedure yet for schema changes across replicas, and
 restoring from backup has not been exercised end to end.

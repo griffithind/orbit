@@ -120,7 +120,7 @@ POST /enroll/v1/enroll
 { "credential":  "orb_1_aBcD…",
   "public_key":  "<base64 raw X25519 or ECDH P-256 public key>",
   "curve":       "CURVE25519",
-  "agent_version": "0.1.0",
+  "agent_version": "0.2.0",
   "host_info":   { "hostname": "web-01", "os": "linux", "arch": "amd64" } }
 ```
 
