@@ -1,6 +1,13 @@
 # Deployment
 
-Running Orbit on one ordinary VM. Unit files are in [`deploy/`](../deploy).
+Running Orbit on one ordinary VM.
+
+Service files are **generated**, not copied: `orbitd bootstrap -write-unit`
+writes the control plane's, and `orbit agent install` writes each host's. A unit
+file kept in a docs directory drifts — the flags change, the example does not,
+and somebody pastes something that stopped working two releases ago.
+[`deploy/`](../deploy) holds only what cannot be generated: the compose file and
+an environment template.
 
 ---
 
@@ -29,8 +36,9 @@ is the cheapest working topology:
 ```
 
 `orbitd` runs nebula in-process on a userspace stack, so there is no tun device,
-no root, and no separate nebula service on this machine. Managed hosts run the
-stock nebula binary with an agent alongside it.
+no root, and no separate nebula service on this machine. Managed hosts run
+nebula in-process too, inside `orbit agent run` — one binary and one service,
+serving every network the host has joined.
 
 Put a reverse proxy in front of `:8080` for TLS. The agent API is **not** on
 that listener — it lives only on the overlay — so nothing an unauthenticated

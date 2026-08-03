@@ -143,19 +143,44 @@ fine; running them on one listener is not.
 The control plane is **stateless**. All state is Postgres. Run N replicas behind
 a load balancer.
 
-### 2.1 The agent supervises the stock `nebula` binary
+### 2.1 The agent runs Nebula in-process
 
-The agent does not embed Nebula. It:
+One binary and one service per host. The agent:
 
 1. writes `/var/lib/orbit/<slug>/nebula.yml`, `host.crt`, `ca.crt`
-2. sends `SIGHUP`, or restarts the service when §1.5 requires it
-3. reports applied config version and observed tunnel health back to Orbit
+2. reloads Nebula, or stops and starts it when §1.5 requires it
+3. reports the applied config epoch and observed tunnel health back to Orbit
 
-Rationale: operators upgrade Nebula on their own schedule; an agent crash cannot
-take down the data plane; Nebula's own signed releases and platform packaging
-are inherited rather than reimplemented. Library embedding (`nebula.Main` +
-`Control`) is reserved for mobile and appliance targets where process
-supervision is not available.
+It does this for EVERY network the host has joined, in one process: a host can
+belong to several networks run by control planes that have never heard of each
+other, and each keeps its own directory, certificate, and Nebula instance. The
+instances are irreducible — two overlays cannot share a UDP port or a tun
+device — so what is shared is the process and the service, not the engine.
+
+**This was the other way round until v0.3.0**, and the reasoning that changed is
+worth keeping. Supervising a separately-installed binary meant: a Nebula to
+install and keep on PATH, a second unit, a `-restart` spec naming a systemd
+instance, and a version skew between the configuration Orbit renders and the
+binary that loads it — the config test could pass something the real Nebula then
+rejected. Deployment cost more than the isolation was worth.
+
+What the isolation bought, stated precisely so the trade is legible:
+
+- **Unchanged.** A control plane outage still leaves every host holding its
+  certificate and its tunnels. Nothing in that path involves the control plane,
+  and §9 is unaffected.
+- **Changed.** Agent liveness and tunnel liveness are now the same liveness. A
+  crash in the poll loop takes the data plane down until the service manager
+  restarts it, where two processes under two units failed independently. With
+  `Restart=always` that is seconds.
+- **Changed.** A Nebula security fix ships on Orbit's release cadence rather
+  than the host package manager's. That is a real cost and the main argument
+  for the old arrangement.
+
+The agent recovers from its own failures rather than requiring a visit: a
+network whose directory is not ready is retried with backoff, and a Nebula that
+failed to start or has died is restarted at the top of every poll — before the
+poll, so a host whose data plane is down spends the tick getting it back.
 
 ---
 
@@ -904,8 +929,12 @@ enrollment.md §4–5.
 
 ## 12. Non-goals
 
-- **Forking Nebula.** Orbit works against released upstream binaries. The moment
-  it requires a patched client, it inherits Nebula's entire maintenance burden.
+- **Forking Nebula.** Orbit imports upstream Nebula as a library and runs it
+  unmodified. The moment it requires a patched client it inherits Nebula's
+  entire maintenance burden, so the version is a go.mod line and nothing else.
+  Note the distinction from §2.1: not forking is the non-goal, and running it
+  in-process rather than supervising a separate binary is a deployment choice
+  that does not touch it.
 - **Reimplementing `dnclient`'s wire protocol.** It is undocumented and
   proprietary. Orbit's agent is its own thing.
 - **Being a general-purpose CA.** Nebula certificates only.

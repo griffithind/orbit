@@ -66,12 +66,12 @@ jobs:
       # The version the README tells people to install must have notes. Checked
       # on every push, because the alternative is finding out at tag time, which
       # is the moment it is most expensive to fix.
-      - name: the pinned version has changelog notes
+      - name: the changelog is readable and its newest section is not empty
         run: |
           set -eu
-          pinned=$(sed -n 's/^VERSION=\(.*\)$/\1/p' README.md | head -1)
-          ./scripts/changelog-section.sh "$pinned" > /dev/null
-          echo "CHANGELOG.md has notes for $pinned"
+          v=$(./scripts/changelog-latest.sh)
+          ./scripts/changelog-section.sh "$v" > /dev/null
+          echo "CHANGELOG.md describes $v"
 
       # Here and not only in the release workflow. This check first ran at
       # release time, found that the generator's output depended on the local

@@ -69,26 +69,23 @@ jobs:
       # thing that notices it went stale, and the honest moment to check is
       # here: at any other time the README legitimately names the last release
       # rather than the next one.
-      - name: the README installs the version being released
-        run: |
-          set -eu
-          VERSION="${GITHUB_REF_NAME#v}"
-          pinned=$(sed -n 's/^VERSION=\(.*\)$/\1/p' README.md | head -1)
-          if [ "$pinned" != "$VERSION" ]; then
-            echo "::error::README installs $pinned but this release is $VERSION."
-            echo "Set VERSION=$VERSION in the README install block and re-tag."
-            exit 1
-          fi
-          echo "README pins $pinned"
-
       # Before anything is built. Discovering that a release has no notes after
       # the artifacts exist means either publishing without them or throwing the
       # build away.
       - name: the changelog has a section for this release
         run: |
           set -eu
-          ./scripts/changelog-section.sh "${GITHUB_REF_NAME#v}" > /dev/null
-          echo "CHANGELOG.md has notes for ${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./scripts/changelog-section.sh "$VERSION" > /dev/null
+          # The tag must be what the changelog describes NEWEST, not merely a
+          # version it mentions somewhere: tagging v0.2.0 again with a v0.3.0
+          # changelog would otherwise pass and publish stale notes.
+          latest=$(./scripts/changelog-latest.sh)
+          if [ "$latest" != "$VERSION" ]; then
+            echo "::error::the changelog's newest section is $latest, not $VERSION"
+            exit 1
+          fi
+          echo "CHANGELOG.md has notes for $VERSION"
 
       # A stale notices file is a licence claim that is no longer true. It is
       # generated, so the check is that regenerating changes nothing.

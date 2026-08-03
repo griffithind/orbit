@@ -42,8 +42,8 @@ release-check: ## Cross-compile every release target without producing artifacts
 # Everything the release workflow checks, before a tag exists to check it.
 .PHONY: release-ready
 release-ready: ## Verify this tree could be released as the version the README pins
-	@v=$$(sed -n 's/^VERSION=\(.*\)$$/\1/p' README.md | head -1); \
-	echo "README pins $$v"; \
+	@v=$$(./scripts/changelog-latest.sh); \
+	echo "changelog describes $$v"; \
 	./scripts/changelog-section.sh "$$v" > /dev/null && echo "changelog ok"; \
 	./scripts/third-party-notices.sh > /dev/null; \
 	git diff --quiet THIRD-PARTY-NOTICES.md && echo "notices ok" \

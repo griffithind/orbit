@@ -9,12 +9,13 @@ out how much of that you actually wrote down.
 
 Orbit is the other half: enrollment, certificate issuance and renewal,
 configuration distribution, firewall policy, and revocation — with an API, a
-CLI, and a web console. It manages the stock Nebula binary and never forks it.
+CLI, and a web console. It runs Nebula unforked, as a library, so a managed host
+is one binary and one service.
 
 ```bash
 orbit host create -name web-03 -addr 10.42.0.7 -role web  # a record
 orbit host code web-03                                   # → orb_1_…, single use
-orbit agent enroll -code orb_1_…                         # on the host itself
+sudo orbit agent install -code orb_1_…                   # on the host itself
 orbit host block web-03                                  # off the mesh in ~5s
 ```
 
@@ -26,25 +27,14 @@ From [releases](https://github.com/griffithind/orbit/releases). Every binary is
 statically linked with no runtime dependencies.
 
 ```bash
-VERSION=0.2.1
-OS=$(uname -s | tr A-Z a-z)
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-
-curl -fsSLO https://github.com/griffithind/orbit/releases/download/v$VERSION/orbit_${VERSION}_${OS}_${ARCH}.tar.gz
-tar -xzf orbit_${VERSION}_${OS}_${ARCH}.tar.gz
-sudo install orbit /usr/local/bin/
-orbit version
+curl -fsSL https://raw.githubusercontent.com/griffithind/orbit/main/scripts/install.sh | sh
 ```
 
-Pinned to a version on purpose. `releases/latest/download/` resolves to whatever
-the newest release is, and every artifact name here carries its version — so the
-two together produce a URL that 404s the day after the next release. Bump
-`VERSION` to upgrade; the release workflow refuses to publish a tag whose README
-still points at an older one.
-
-Check the download against `SHA256SUMS` on the release page before installing.
-
-Two binaries, and that is the whole install surface:
+It detects the platform, verifies against `SHA256SUMS`, and installs to
+`/usr/local/bin`. Add `--control-plane` on the machine that will run `orbitd`,
+and `--version X.Y.Z` to pin. It enrolls nothing and starts nothing: the steps
+that change a machine are `orbit agent install` and `orbitd bootstrap`, and
+those should be run deliberately rather than by a pipe.
 
 | Binary | Platforms | Runs on |
 |---|---|---|
@@ -53,9 +43,9 @@ Two binaries, and that is the whole install surface:
 
 They stay separate for one reason: `orbitd token create` mints a `*` token
 straight from the database, bypassing every scope check — it is the documented
-break-glass path — and that does not belong on an operator laptop. `orbitd` also
-links Nebula and gvisor, so merging would make `go install ./cmd/orbit` pull
-down a userspace TCP/IP stack.
+break-glass path — and that does not belong on an operator laptop or on every
+managed host. `orbitd` also links gvisor for its userspace network stack, which
+no managed host needs.
 
 Or from source — Go 1.26 and nothing else:
 
@@ -70,23 +60,27 @@ git clone https://github.com/griffithind/orbit && cd orbit && make build
 One VM, acting as its own lighthouse. This is a complete working mesh.
 
 ```bash
-# 1. Schema. orbit_app is created here and holds no CREATE privilege.
-orbitd migrate -dsn "postgres://postgres@localhost/orbit"
-psql -c "ALTER ROLE orbit_app LOGIN PASSWORD '…'"
+# Control plane. -write-unit leaves a systemd unit and an env file ready to go.
+orbitd migrate -dsn "postgres://postgres@localhost/orbit" -app-password '<secret>'
+orbitd bootstrap -dsn "$ORBIT_DSN" -network prod -cidr 10.42.0.0/16 \
+    -write-unit -enroll-url https://orbit.example.com/enroll/v1/enroll \
+    -overlay-addr 10.42.0.1 -lighthouse 203.0.113.10:4242
+systemctl enable --now orbit-control
 
-# 2. First network, CA, role, and admin token. Prints the token once.
-export ORBIT_CA_KEY_PASSPHRASE_FILE=/etc/orbit/ca-pass
-orbitd bootstrap -dsn "$ORBIT_DSN" -network prod -cidr 10.42.0.0/16
-
-# 3. Serve, as its own lighthouse. Nothing else to install first.
-orbitd serve -mesh "$ORBIT_NETWORK=10.42.0.1" -lighthouse 203.0.113.10:4242
-
-# 4. Mint the break-glass token now, while everything works.
+# Mint the break-glass token now, while everything works.
 orbitd token create -name break-glass -scopes '*'
 ```
 
-Every host after that is two commands: `orbit host create` on your laptop,
-`orbit agent enroll` on the host.
+Or skip the host entirely — `deploy/compose.yml` runs the control plane and
+Postgres as two containers, which removes `pg_hba`, firewalld, SELinux, unit
+files, and the CA key's file mode from the problem.
+
+Every host after that is two commands, one on your laptop and one on the host:
+
+```bash
+orbit host create -name web-01 -addr 10.42.0.7 -role web && orbit host code web-01
+sudo orbit agent install -url https://orbit.example.com -code orb_1_… -network prod
+```
 
 [docs/deployment.md](docs/deployment.md) has the whole of it — bring-up order,
 sealing the CA key to a TPM, backups, alerts, and what survives an outage.
@@ -154,16 +148,22 @@ its scopes, so revoking the token closes every browser it opened.
                             │
      ┌──────────────────────┴──────────────────────┐
      │  managed host                               │
-     │    nebula          ← stock binary, unforked │
-     │    orbit agent run ← writes config, signals │
+     │    orbit agent run                          │
+     │      └─ nebula (unforked, in-process)       │
+     │           one per joined network            │
      └─────────────────────────────────────────────┘
 ```
 
-The agent never embeds Nebula, and never restarts it merely because the process
-died — the service manager owns that, so an agent failure cannot take down the
-data plane. It writes configuration and certificate material, then signals a
-reload; when the change is one Nebula cannot hot-load it restarts and verifies
-that the restart took.
+One binary and one service per host, serving every network it has joined —
+including networks run by control planes that have never heard of each other.
+Each keeps its own directory, certificate, and Nebula instance, because two
+overlays cannot share a UDP port or a tun device.
+
+The agent heals itself: a network whose directory is not ready is retried with
+backoff, and a Nebula that failed to start or has died is restarted at the top
+of every poll. The trade for running Nebula in-process is that an agent crash
+now takes this host's tunnels with it until the service manager restarts it —
+seconds, with `Restart=always`.
 
 `orbitd` runs Nebula in-process on a userspace stack, so the control plane needs
 no tun device and no root.
@@ -257,7 +257,7 @@ Designed but not implemented, and marked as such where they appear: SSO/OIDC
 
 ## Maturity
 
-**v0.2.1 is an early release.** The tests are thorough and run against a real
+**This is early software.** The tests are thorough and run against a real
 Postgres and real Nebula tunnels, with no mock layer — the constraints this
 design rests on live in Nebula's own code, and a mock would encode our belief
 about them rather than the behaviour. CI fails if the database tests silently
