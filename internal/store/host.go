@@ -51,16 +51,27 @@ const hostCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
 	h.is_lighthouse, h.is_relay, h.static_addrs, h.state,
 	h.applied_config_epoch, h.applied_blocklist_epoch,
 	h.last_seen_at, coalesce(h.nebula_version, ''), coalesce(h.agent_version, ''),
-	h.created_at,
+	h.created_at, coalesce(r.name, ''),
 	coalesce(array(SELECT a.addr FROM orbit.host_address a WHERE a.host_id = h.id
 	               ORDER BY a.addr), '{}')`
+
+// hostFrom is the FROM clause hostCols is written against; the two travel
+// together because hostCols selects the role name out of it.
+//
+// The join is composite — (network_id, id) — for the same reason the schema's
+// foreign key is: a role belongs to exactly one network, and a join on role id
+// alone would happily attach another network's name to a host if a row ever got
+// past that constraint. LEFT, because a host may have no role at all.
+const hostFrom = `FROM orbit.host h
+	LEFT JOIN orbit.role r ON (r.network_id, r.id) = (h.network_id, h.role_id)`
 
 func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 	var h Host
 	err := row.Scan(&h.ID, &h.NetworkID, &h.Name, &h.RoleID, &h.Tags,
 		&h.IsLighthouse, &h.IsRelay, &h.StaticAddrs, &h.State,
 		&h.AppliedConfigEpoch, &h.AppliedBlocklistEpoch,
-		&h.LastSeenAt, &h.NebulaVersion, &h.AgentVersion, &h.CreatedAt, &h.Addrs)
+		&h.LastSeenAt, &h.NebulaVersion, &h.AgentVersion, &h.CreatedAt,
+		&h.RoleName, &h.Addrs)
 	if err != nil {
 		return nil, err
 	}
@@ -69,32 +80,181 @@ func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 
 func (t *Tx) GetHost(ctx context.Context, id uuid.UUID) (*Host, error) {
 	h, err := scanHost(t.tx.QueryRow(ctx,
-		`SELECT `+hostCols+` FROM orbit.host h WHERE h.id = $1`, id))
+		`SELECT `+hostCols+` `+hostFrom+` WHERE h.id = $1`, id))
 	if err != nil {
 		return nil, mapErr(err, "get host")
 	}
 	return h, nil
 }
 
-// ListHosts returns every host in a network, excluding deleted ones.
-func (t *Tx) ListHosts(ctx context.Context, networkID uuid.UUID) ([]Host, error) {
+// HostCursor is a position in a host listing: the sort key of the last row a
+// caller has already seen.
+//
+// Keyset, not OFFSET. An offset is a count of rows the database must walk and
+// then discard, and it is computed against whatever the table looks like at the
+// moment of the second request: a host created or deleted between two page
+// fetches shifts every later page by one, silently skipping or repeating a row.
+// A key comparison names a position instead of a distance, so concurrent
+// inserts change what comes after the cursor without moving what came before.
+//
+// Name alone would be unique — UNIQUE (network_id, name), and a listing is
+// scoped to one network — so ID is not breaking a tie. It is there so the
+// cursor is a total order over a single index-friendly row comparison, and so
+// the key survives that uniqueness constraint ever being relaxed.
+type HostCursor struct {
+	Name string
+	ID   uuid.UUID
+}
+
+// HostFilter narrows a host listing. Zero values mean "no constraint".
+//
+// Every field is applied in SQL. Filtering in Go would mean fetching the whole
+// host table on every request to answer a question about a handful of rows —
+// the same argument NetworkTopology makes, and it matters most here because the
+// filter an operator reaches for during an incident (Behind) is the one that
+// runs against the largest network they have.
+type HostFilter struct {
+	NetworkID uuid.UUID
+
+	// State, Tag, RoleID, and NameContains are the operator's four questions:
+	// what is suspended, what carries this tag, what carries this role, and
+	// "the web boxes, I don't remember the exact names".
+	State        string
+	Tag          string
+	RoleID       *uuid.UUID
+	NameContains string
+
+	// Behind selects hosts that have not applied the network's current config
+	// or blocklist epoch. It is the question /v1/networks/{id}/convergence
+	// answers as a summary, asked here as a filter so the answer is a list that
+	// can be acted on rather than a count.
+	//
+	// Scoped to enrolled and active hosts, exactly as Convergence counts them.
+	// A host in 'created' has never held a certificate and can never report an
+	// epoch, so including it would make this filter permanently non-empty and
+	// make its result disagree with the number on the convergence endpoint.
+	Behind bool
+
+	// After is the keyset cursor; nil starts at the beginning.
+	After *HostCursor
+
+	// Limit bounds the page. Out of range falls back to the default, which is
+	// why the API layer refuses a limit it cannot honour instead of passing it
+	// through — a caller who asks for 5000 and receives 100 has no way to tell.
+	Limit int
+
+	// WithCount asks for the total matching the filter. Opt-in because it is a
+	// second query that visits every matching row: a CLI printing one page does
+	// not need it, and a UI wants it once rather than on every scroll.
+	WithCount bool
+}
+
+// HostPage is one page of a host listing.
+type HostPage struct {
+	Hosts []Host
+
+	// More reports whether another page exists. Determined by reading one row
+	// past the limit, not by comparing len(Hosts) with it: a final page that is
+	// exactly full is indistinguishable from a full page with more behind it,
+	// and guessing wrong hands the client a cursor that returns nothing.
+	More bool
+
+	// Total is the number of hosts matching the filter, ignoring pagination.
+	// nil unless WithCount asked for it, so "not requested" and "zero" are
+	// different values rather than the same 0.
+	Total *int
+}
+
+const (
+	hostPageDefault = 100
+	// HostPageMax is the largest page this store will produce. Exported because
+	// the API layer refuses anything larger rather than silently returning the
+	// default, and the two numbers must be the same one.
+	HostPageMax = 1000
+)
+
+// hostFilterWhere is shared verbatim by the page query and the count query.
+//
+// One text, so a filter cannot come to mean two different things — a count that
+// disagrees with the rows it is supposed to be counting is worse than no count.
+// Parameters $1..$6 are the same in both, and only the page query adds a cursor
+// and a limit after them.
+//
+// Deleted hosts are excluded unconditionally: DeleteHost removes the row
+// outright, so the state exists for a host on its way out, and a decommissioned
+// machine is not part of the fleet a listing describes.
+const hostFilterWhere = `
+	 WHERE h.network_id = $1
+	   AND h.state <> 'deleted'
+	   AND ($2 = '' OR h.state = $2)
+	   AND ($3 = '' OR $3 = ANY (h.tags))
+	   AND ($4::uuid IS NULL OR h.role_id = $4)
+	   -- strpos rather than LIKE: a name containing % or _ is a legal name, and
+	   -- with LIKE it would silently become a pattern that matches other hosts.
+	   AND ($5 = '' OR strpos(lower(h.name), lower($5)) > 0)
+	   AND (NOT $6 OR (h.state IN ('enrolled', 'active')
+	                   AND (h.applied_config_epoch < n.config_epoch
+	                     OR h.applied_blocklist_epoch < n.blocklist_epoch)))`
+
+// ListHosts returns one page of the hosts in a network, ordered by (name, id).
+func (t *Tx) ListHosts(ctx context.Context, f HostFilter) (HostPage, error) {
+	if f.Limit <= 0 || f.Limit > HostPageMax {
+		f.Limit = hostPageDefault
+	}
+
+	var roleID, cursorName, cursorID any
+	if f.RoleID != nil {
+		roleID = *f.RoleID
+	}
+	if f.After != nil {
+		cursorName, cursorID = f.After.Name, f.After.ID
+	}
+
+	var page HostPage
+	if f.WithCount {
+		// Before the page, so the count describes the same snapshot the rows
+		// come from. Both statements run in the caller's transaction, which is
+		// what makes that true rather than merely likely.
+		var total int
+		if err := t.tx.QueryRow(ctx, `
+			SELECT count(*) FROM orbit.host h
+			  JOIN orbit.network n ON n.id = h.network_id`+hostFilterWhere,
+			f.NetworkID, f.State, f.Tag, roleID, f.NameContains, f.Behind,
+		).Scan(&total); err != nil {
+			return HostPage{}, mapErr(err, "count hosts")
+		}
+		page.Total = &total
+	}
+
 	rows, err := t.tx.Query(ctx,
-		`SELECT `+hostCols+` FROM orbit.host h
-		  WHERE h.network_id = $1 AND h.state <> 'deleted' ORDER BY h.name`, networkID)
+		`SELECT `+hostCols+` `+hostFrom+`
+		  JOIN orbit.network n ON n.id = h.network_id`+hostFilterWhere+`
+		   AND ($7::text IS NULL OR (h.name, h.id) > ($7, $8::uuid))
+		 ORDER BY h.name, h.id
+		 LIMIT $9`,
+		f.NetworkID, f.State, f.Tag, roleID, f.NameContains, f.Behind,
+		cursorName, cursorID, f.Limit+1)
 	if err != nil {
-		return nil, mapErr(err, "list hosts")
+		return HostPage{}, mapErr(err, "list hosts")
 	}
 	defer rows.Close()
 
-	var out []Host
 	for rows.Next() {
 		h, err := scanHost(rows)
 		if err != nil {
-			return nil, mapErr(err, "scan host")
+			return HostPage{}, mapErr(err, "scan host")
 		}
-		out = append(out, *h)
+		page.Hosts = append(page.Hosts, *h)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return HostPage{}, mapErr(err, "list hosts")
+	}
+
+	if len(page.Hosts) > f.Limit {
+		page.Hosts = page.Hosts[:f.Limit]
+		page.More = true
+	}
+	return page, nil
 }
 
 // SetHostState transitions a host. Returns ErrNotFound if it does not exist.
@@ -337,6 +497,129 @@ func (t *Tx) ActiveCertificates(ctx context.Context, hostID uuid.UUID) ([]Certif
 	return out, rows.Err()
 }
 
+// CertificateRow is one row of a host's certificate history.
+//
+// Not store.Certificate, and the difference is the point: this carries the
+// issuing CA's NAME, and it carries no PEM.
+//
+// The name, because "which CA signed this" is asked during a rotation, where
+// the answer decides whether a host has moved to the new authority — and a uuid
+// turns that into a second lookup per row for a client that then has to render
+// it anyway. The join is composite, so a row cannot be labelled with another
+// network's CA name.
+//
+// No PEM, because it is the largest column by an order of magnitude and a host
+// that has renewed hourly for a year has thousands of rows here. Nothing an
+// operator reads out of a history needs the bytes; LatestCertificate is where
+// the PEM comes from when something actually needs it.
+type CertificateRow struct {
+	ID          uuid.UUID
+	HostID      uuid.UUID
+	CAID        uuid.UUID
+	CAName      string
+	Fingerprint string
+	CertVer     int16
+	NotBefore   time.Time
+	NotAfter    time.Time
+	State       string
+	IssuedAt    time.Time
+}
+
+// RenewAt reports when this certificate should have been renewed. It delegates
+// to Certificate.RenewAt so the 50%-of-lifetime rule has exactly one definition;
+// a second copy of that arithmetic is a second thing to get out of step with the
+// agent's schedule and the renewal sweep.
+func (c CertificateRow) RenewAt() time.Time {
+	return Certificate{NotBefore: c.NotBefore, NotAfter: c.NotAfter}.RenewAt()
+}
+
+// CertCursor is a position in a certificate history: the sort key of the last
+// row already seen. Keyset for the same reason HostCursor is, and over
+// (issued_at, id) because issued_at is not unique — two renewals in the same
+// second are ordinary, and a cursor on a non-unique key alone either repeats or
+// skips them.
+type CertCursor struct {
+	IssuedAt time.Time
+	ID       uuid.UUID
+}
+
+// CertFilter narrows a host's certificate history.
+type CertFilter struct {
+	// State selects one of pending, active, superseded, revoked. Empty means
+	// the whole history, which is what makes "has this host been renewing"
+	// answerable at all.
+	State string
+	After *CertCursor
+	Limit int
+}
+
+// CertPage is one page of a certificate history.
+type CertPage struct {
+	Certificates []CertificateRow
+	More         bool
+}
+
+const (
+	certPageDefault = 50
+	// CertPageMax bounds a page for the same reason HostPageMax does.
+	CertPageMax = 500
+)
+
+// HostCertificates returns one page of a host's certificates, newest first.
+//
+// Paginated from the start, not once it hurts: certificate rows are never
+// deleted except by host cascade, so a host renewing hourly accumulates
+// thousands, and an unbounded "history" endpoint would be a way to make the
+// control plane serialize megabytes on request.
+//
+// Newest first because every question asked of this — when does it expire, has
+// it been renewing, which CA signed the current one — is about the recent end.
+func (t *Tx) HostCertificates(ctx context.Context, hostID uuid.UUID, f CertFilter) (CertPage, error) {
+	if f.Limit <= 0 || f.Limit > CertPageMax {
+		f.Limit = certPageDefault
+	}
+
+	var cursorAt, cursorID any
+	if f.After != nil {
+		cursorAt, cursorID = f.After.IssuedAt, f.After.ID
+	}
+
+	rows, err := t.tx.Query(ctx, `
+		SELECT c.id, c.host_id, c.ca_id, ca.name, c.fingerprint, c.cert_version,
+		       c.not_before, c.not_after, c.state, c.issued_at
+		  FROM orbit.certificate c
+		  JOIN orbit.ca ca ON (ca.network_id, ca.id) = (c.network_id, c.ca_id)
+		 WHERE c.host_id = $1
+		   AND ($2 = '' OR c.state = $2)
+		   AND ($3::timestamptz IS NULL OR (c.issued_at, c.id) < ($3, $4::uuid))
+		 ORDER BY c.issued_at DESC, c.id DESC
+		 LIMIT $5`,
+		hostID, f.State, cursorAt, cursorID, f.Limit+1)
+	if err != nil {
+		return CertPage{}, mapErr(err, "host certificates")
+	}
+	defer rows.Close()
+
+	var page CertPage
+	for rows.Next() {
+		var c CertificateRow
+		if err := rows.Scan(&c.ID, &c.HostID, &c.CAID, &c.CAName, &c.Fingerprint,
+			&c.CertVer, &c.NotBefore, &c.NotAfter, &c.State, &c.IssuedAt); err != nil {
+			return CertPage{}, mapErr(err, "scan certificate")
+		}
+		page.Certificates = append(page.Certificates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return CertPage{}, mapErr(err, "host certificates")
+	}
+
+	if len(page.Certificates) > f.Limit {
+		page.Certificates = page.Certificates[:f.Limit]
+		page.More = true
+	}
+	return page, nil
+}
+
 // CertificatesDueForRenewal returns active certificates past the midpoint of
 // their lifetime, oldest first. This drives the renewal sweep; agents also
 // renew on their own schedule, and the sweep exists to catch the ones that
@@ -419,7 +702,7 @@ func (t *Tx) AddHostAddress(ctx context.Context, h *Host, addr netip.Addr) error
 // this one runs inside the caller's transaction.
 func (t *Tx) FindHostByAddr(ctx context.Context, networkID uuid.UUID, addr netip.Addr) (*Host, error) {
 	h, err := scanHost(t.tx.QueryRow(ctx,
-		`SELECT `+hostCols+` FROM orbit.host h
+		`SELECT `+hostCols+` `+hostFrom+`
 		   JOIN orbit.host_address a ON a.host_id = h.id
 		  WHERE a.network_id = $1 AND a.addr = $2`, networkID, addr))
 	if err != nil {

@@ -97,6 +97,14 @@ type Host struct {
 	NebulaVersion string
 	AgentVersion  string
 	CreatedAt     time.Time
+
+	// RoleName is the assigned role's name, resolved by the same query that
+	// reads the host. Empty when the host carries no role.
+	//
+	// Denormalized into the read path rather than left to the caller: a client
+	// rendering a host shows the name, and resolving RoleID one request per
+	// host is what turns a 500-host listing into 501 queries.
+	RoleName string
 }
 
 type Certificate struct {

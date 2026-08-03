@@ -137,6 +137,9 @@ func (s *Server) AdminRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/hosts", s.admin("hosts:create", s.handleCreateHost))
 	mux.Handle("GET /v1/hosts", s.admin("hosts:read", s.handleListHosts))
 	mux.Handle("GET /v1/hosts/{id}", s.admin("hosts:read", s.handleGetHost))
+	// hosts:read, not a scope of its own: the response carries no PEM and no key
+	// material, only what a host's own listing already implies about it.
+	mux.Handle("GET /v1/hosts/{id}/certificates", s.admin("hosts:read", s.handleHostCertificates))
 	mux.Handle("PATCH /v1/hosts/{id}", s.admin("hosts:write", s.handleUpdateHost))
 	// Deletion revokes, so it takes hosts:block rather than hosts:write. A token
 	// trusted to edit a host but not to cut one off must not reach the stronger

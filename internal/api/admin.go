@@ -2,12 +2,16 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -183,30 +187,274 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 
 var errOutOfRange = errors.New("overlay address is not within the network")
 
+// handleListHosts serves the fleet: filtered, keyset-paginated, in an envelope.
+//
+// Every filter is passed to the store and applied in SQL. A parameter accepted
+// and dropped here would be worse than one not offered, for the same reason it
+// is on the audit trail: the caller reads an unfiltered page as the answer to
+// the question they asked, and "nothing matches" is the wrong conclusion to
+// draw during an incident. So an unparseable value is a 400 that names it.
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
-	networkID, err := uuid.Parse(r.URL.Query().Get("network_id"))
+	q := r.URL.Query()
+	networkID, err := uuid.Parse(q.Get("network_id"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "network_id query parameter is required")
 		return
 	}
 
-	var out []wire.HostResponse
-	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		hosts, err := tx.ListHosts(ctx, networkID)
+	f := store.HostFilter{
+		NetworkID:    networkID,
+		Tag:          q.Get("tag"),
+		NameContains: q.Get("name_contains"),
+	}
+
+	if v := q.Get("state"); v != "" {
+		if !containsStr(listableHostStates, v) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+				"state must be one of %s; any other value matches no host and would read as an empty fleet",
+				strings.Join(listableHostStates, ", ")))
+			return
+		}
+		f.State = v
+	}
+	if v := q.Get("role_id"); v != "" {
+		roleID, err := uuid.Parse(v)
 		if err != nil {
-			return err
+			writeErr(w, http.StatusBadRequest,
+				"role_id must be a uuid, not a role name; anything else matches no host "+
+					"and would read as a role nobody carries")
+			return
 		}
-		out = make([]wire.HostResponse, 0, len(hosts))
-		for i := range hosts {
-			out = append(out, hostResponse(&hosts[i]))
+		f.RoleID = &roleID
+	}
+
+	var ok bool
+	if f.Behind, ok = boolParam(w, q, "behind"); !ok {
+		return
+	}
+	if f.WithCount, ok = boolParam(w, q, "count"); !ok {
+		return
+	}
+	if f.Limit, ok = pageLimitParam(w, q, store.HostPageMax); !ok {
+		return
+	}
+	if v := q.Get("cursor"); v != "" {
+		c, err := decodeHostCursor(v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest,
+				"cursor is not one this endpoint issued; pass next_cursor back unmodified, "+
+					"or omit it to start from the beginning")
+			return
 		}
-		return nil
+		f.After = &c
+	}
+
+	var page store.HostPage
+	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		page, err = tx.ListHosts(ctx, f)
+		return err
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "network")
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	// An unknown network id yields an empty page rather than a 404, as it did
+	// before pagination: the filter is a network id, and a listing endpoint
+	// that distinguishes "no such network" from "no hosts yet" is one more way
+	// to probe for which ids exist.
+	resp := wire.HostListResponse{
+		Hosts:      make([]wire.HostResponse, 0, len(page.Hosts)),
+		TotalCount: page.Total,
+	}
+	for i := range page.Hosts {
+		resp.Hosts = append(resp.Hosts, hostResponse(&page.Hosts[i]))
+	}
+	// The cursor comes from the last row actually returned, and only when the
+	// store saw one more beyond it. A cursor emitted on a full final page would
+	// send every client one request further to learn nothing.
+	if page.More && len(page.Hosts) > 0 {
+		resp.NextCursor = encodeHostCursor(&page.Hosts[len(page.Hosts)-1])
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// listableHostStates are the states a host can be listed in. 'deleted' is
+// absent because DeleteHost removes the row: the state exists for a host on its
+// way out, and offering it as a filter would promise a listing of decommissioned
+// machines that is always empty.
+var listableHostStates = []string{
+	store.HostCreated, store.HostEnrolled, store.HostActive, store.HostSuspended,
+}
+
+// handleHostCertificates serves a host's certificate history.
+//
+// The question at the centre of every rotation and every renewal failure —
+// when does this expire, which CA signed it, has it been renewing — was
+// answerable only from psql before this route existed.
+func (s *Server) handleHostCertificates(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	q := r.URL.Query()
+	var f store.CertFilter
+	if v := q.Get("state"); v != "" {
+		if !containsStr(certStates, v) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+				"state must be one of %s; any other value matches nothing and would read "+
+					"as a host that has never been issued a certificate",
+				strings.Join(certStates, ", ")))
+			return
+		}
+		f.State = v
+	}
+	if f.Limit, ok = pageLimitParam(w, q, store.CertPageMax); !ok {
+		return
+	}
+	if v := q.Get("cursor"); v != "" {
+		c, err := decodeCertCursor(v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest,
+				"cursor is not one this endpoint issued; pass next_cursor back unmodified, "+
+					"or omit it to start from the newest certificate")
+			return
+		}
+		f.After = &c
+	}
+
+	var page store.CertPage
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		// Resolve the host first so an unknown id is a 404. Without it, a typo'd
+		// host id and a host that has never enrolled both return an empty list,
+		// and during a failed enrollment those are opposite diagnoses.
+		if _, err := tx.GetHost(ctx, hostID); err != nil {
+			return err
+		}
+		var err error
+		page, err = tx.HostCertificates(ctx, hostID, f)
+		return err
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "host")
+		return
+	}
+
+	resp := wire.CertificateListResponse{
+		Certificates: make([]wire.CertificateResponse, 0, len(page.Certificates)),
+	}
+	for _, c := range page.Certificates {
+		resp.Certificates = append(resp.Certificates, certificateResponse(c))
+	}
+	if page.More && len(page.Certificates) > 0 {
+		resp.NextCursor = encodeCertCursor(page.Certificates[len(page.Certificates)-1])
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+var certStates = []string{
+	store.CertPending, store.CertActive, store.CertSuperseded, store.CertRevoked,
+}
+
+// Cursors are opaque to the client on purpose: they encode a sort key, and a
+// client that learns to read one has taken a dependency on an ordering this API
+// is free to change. They are not signed, because a cursor names a position in a
+// listing the caller is already authorized to read — a forged one either fails
+// to decode or starts a page somewhere harmless, and neither reveals a row the
+// caller could not have paged to anyway.
+//
+// NUL is the field separator because Postgres text cannot contain one, so no
+// host name can ever collide with it.
+
+func encodeHostCursor(h *store.Host) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(h.Name + "\x00" + h.ID.String()))
+}
+
+func decodeHostCursor(s string) (store.HostCursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return store.HostCursor{}, err
+	}
+	name, rest, found := strings.Cut(string(raw), "\x00")
+	if !found {
+		return store.HostCursor{}, errBadCursor
+	}
+	id, err := uuid.Parse(rest)
+	if err != nil {
+		return store.HostCursor{}, err
+	}
+	return store.HostCursor{Name: name, ID: id}, nil
+}
+
+func encodeCertCursor(c store.CertificateRow) string {
+	// Nanosecond precision, because two renewals inside the same second are
+	// ordinary and a cursor rounded to the second would re-serve or skip them.
+	return base64.RawURLEncoding.EncodeToString(
+		[]byte(c.IssuedAt.Format(time.RFC3339Nano) + "\x00" + c.ID.String()))
+}
+
+func decodeCertCursor(s string) (store.CertCursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return store.CertCursor{}, err
+	}
+	at, rest, found := strings.Cut(string(raw), "\x00")
+	if !found {
+		return store.CertCursor{}, errBadCursor
+	}
+	issued, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return store.CertCursor{}, err
+	}
+	id, err := uuid.Parse(rest)
+	if err != nil {
+		return store.CertCursor{}, err
+	}
+	return store.CertCursor{IssuedAt: issued, ID: id}, nil
+}
+
+var errBadCursor = errors.New("malformed cursor")
+
+// boolParam parses an optional flag. Absent means false; present and
+// unparseable is refused rather than treated as false, because silently
+// ignoring ?behind=yes returns the whole fleet as the answer to "who is behind".
+func boolParam(w http.ResponseWriter, q url.Values, name string) (bool, bool) {
+	v := q.Get(name)
+	if v == "" {
+		return false, true
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, name+" must be true or false")
+		return false, false
+	}
+	return b, true
+}
+
+// pageLimitParam parses an optional page size. Zero means the store's default.
+//
+// A limit above the ceiling is refused rather than clamped: the store falls back
+// to its default page for an out-of-range value, so asking for more than the
+// maximum would return fewer rows than asking for nothing, with nothing in the
+// response to say why.
+func pageLimitParam(w http.ResponseWriter, q url.Values, max int) (int, bool) {
+	v := q.Get("limit")
+	if v == "" {
+		return 0, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		writeErr(w, http.StatusBadRequest, "limit must be a positive integer")
+		return 0, false
+	}
+	if n > max {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+			"limit must be %d or fewer; a larger value returns the default page, not more", max))
+		return 0, false
+	}
+	return n, true
 }
 
 // handleUpdateHost changes a host's roles and metadata.
@@ -288,17 +536,38 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var host *store.Host
+	var (
+		host  *store.Host
+		certs store.CertPage
+	)
 	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
 		host, err = tx.GetHost(ctx, hostID)
+		if err != nil {
+			return err
+		}
+		// The current certificate, on the detail response rather than behind a
+		// second request. Expiry is the first thing an operator opening a host
+		// wants, and one extra query on a single-host read is a different cost
+		// from one per row in a listing, which is why this is not in ListHosts.
+		//
+		// The limit is a bound, not a page: certificate_one_active_per_host_version
+		// permits one active certificate per cert_version, so this is one row,
+		// or two during a v1-to-v2 migration.
+		certs, err = tx.HostCertificates(ctx, hostID,
+			store.CertFilter{State: store.CertActive, Limit: 8})
 		return err
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "host")
 		return
 	}
-	writeJSON(w, http.StatusOK, hostResponse(host))
+
+	resp := hostResponse(host)
+	for _, c := range certs.Certificates {
+		resp.ActiveCertificates = append(resp.ActiveCertificates, certificateResponse(c))
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCreateEnrollCode(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +751,7 @@ func hostResponse(h *store.Host) wire.HostResponse {
 	for _, a := range h.Addrs {
 		addrs = append(addrs, a.String())
 	}
-	return wire.HostResponse{
+	out := wire.HostResponse{
 		ID:                    h.ID.String(),
 		Name:                  h.Name,
 		NetworkID:             h.NetworkID.String(),
@@ -491,8 +760,32 @@ func hostResponse(h *store.Host) wire.HostResponse {
 		Tags:                  h.Tags,
 		IsLighthouse:          h.IsLighthouse,
 		IsRelay:               h.IsRelay,
+		RoleName:              h.RoleName,
+		StaticAddrs:           h.StaticAddrs,
 		AppliedConfigEpoch:    h.AppliedConfigEpoch,
 		AppliedBlocklistEpoch: h.AppliedBlocklistEpoch,
 		LastSeenAt:            h.LastSeenAt,
+		NebulaVersion:         h.NebulaVersion,
+		AgentVersion:          h.AgentVersion,
+		CreatedAt:             h.CreatedAt,
+	}
+	if h.RoleID != nil {
+		out.RoleID = h.RoleID.String()
+	}
+	return out
+}
+
+func certificateResponse(c store.CertificateRow) wire.CertificateResponse {
+	return wire.CertificateResponse{
+		ID:          c.ID.String(),
+		Fingerprint: c.Fingerprint,
+		State:       c.State,
+		CAID:        c.CAID.String(),
+		CAName:      c.CAName,
+		CertVersion: int(c.CertVer),
+		NotBefore:   c.NotBefore,
+		NotAfter:    c.NotAfter,
+		RenewAt:     c.RenewAt(),
+		IssuedAt:    c.IssuedAt,
 	}
 }

@@ -376,6 +376,34 @@ func (s *Service) State(ctx context.Context, hostID uuid.UUID, knownConfig, know
 			c := certs[len(certs)-1]
 			resp.RenewAfter = c.RenewAt()
 			resp.NotAfter = c.NotAfter
+
+			// Pull renewal forward when this host's certificate predates its
+			// role's last groups change.
+			//
+			// Groups are inside the signed certificate, so a role edit does not
+			// reach a host until it renews — at its own midpoint, hours away.
+			// For an access-control change that is not latency, it is a window
+			// in which the policy an operator has been told is live is not.
+			//
+			// Sending "now" does not stampede: the agent spreads a pulled-forward
+			// hint across PullForwardSpread using its own deterministic per-host
+			// offset (internal/agent/renew.go, RenewAtWithHint), and clamps it
+			// into the certificate's validity window. It also ignores a hint that
+			// merely restates the midpoint, which is why this must be the only
+			// place that sends anything else — the unconditional midpoint above
+			// is precisely the value the agent is documented to disregard.
+			//
+			// Cost of being wrong is one early signature. Cost of not doing it is
+			// a policy change that silently takes half a certificate lifetime.
+			if host.RoleID != nil {
+				changed, err := tx.RoleGroupsChangedAt(ctx, *host.RoleID)
+				if err != nil {
+					return err
+				}
+				if changed != nil && c.IssuedAt.Before(*changed) {
+					resp.RenewAfter = s.clock()
+				}
+			}
 		}
 
 		if knownConfig >= net.ConfigEpoch && knownBlock >= net.BlocklistEpoch {

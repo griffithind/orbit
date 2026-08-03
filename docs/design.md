@@ -295,19 +295,54 @@ GET    /v1/networks/:id/convergence      networks:read  (§6 rotation gate)
 POST   /v1/cas                           cas:write      (pending, not active)
 GET    /v1/cas?network_id=               cas:read
 POST   /v1/cas/:id/activate              cas:write
+POST   /v1/cas/:id/retire                cas:write
 
 POST   /v1/roles                         roles:write
 GET    /v1/roles?network_id=             roles:read
+GET    /v1/roles/:id                     roles:read
+PATCH  /v1/roles/:id                     roles:write    (202 if groups changed)
+DELETE /v1/roles/:id                     roles:write    (409 if any host carries it)
 
 POST   /v1/hosts                         hosts:create
-GET    /v1/hosts?network_id=             hosts:read
+GET    /v1/hosts?network_id=&…           hosts:read     (filtered, paginated)
+GET    /v1/hosts/:id                     hosts:read
+PATCH  /v1/hosts/:id                     hosts:write
+DELETE /v1/hosts/:id                     hosts:block    (revokes, then removes)
+GET    /v1/hosts/:id/certificates        hosts:read     (paginated, no PEM)
 POST   /v1/hosts/:id/enrollment-code     hosts:enroll
 POST   /v1/hosts/:id/block               hosts:block
 POST   /v1/hosts/:id/unblock             hosts:block
 
+GET    /v1/networks/:id/convergence      networks:read
 POST   /v1/tokens                        tokens:write
-GET    /v1/audit-logs                    audit:read
+GET    /v1/tokens                        tokens:read
+DELETE /v1/tokens/:id                    tokens:write
+GET    /v1/audit-logs                    audit:read     (action, target, since, until, limit)
+GET    /v1/whoami                        —              (authenticated; no scope)
 ```
+
+Two status codes on that list are not decoration.
+
+`PATCH /v1/roles/:id` answers **202, not 200, when `groups` changed**. Firewall
+rules are configuration and converge in seconds; groups are inside the signed
+certificate, so every host carrying the role presents the old set until it
+reissues. "Accepted, processing not complete" is literally the state of the
+system, and it is the one signal a caller that ignores the body cannot miss. The
+response carries the affected host count and the instant the last one converges,
+computed from live certificate rows rather than estimated — the renewal jitter
+is a SHA-256 of the host id, so the true time is derivable.
+
+A group change also stamps `role.groups_changed_at`, and `enroll.Service.State`
+pulls renewal forward for any host whose certificate predates it (§7). Without
+that the 202's deadline would be half a certificate lifetime away; with it, about
+a minute. The agent has always been able to honour such a hint — what was
+missing was any reason for the server to send one.
+
+`DELETE /v1/roles/:id` answers **409 naming the hosts** that carry the role.
+`ON DELETE RESTRICT` means the database refuses regardless, but `mapErr` renders
+a foreign-key violation as `ErrNotFound` — so without the pre-check an operator
+would be told the role does not exist when the truth is that fourteen hosts use
+it.
 
 Three checks live here rather than downstream, because each one otherwise fails
 much later and much less legibly:

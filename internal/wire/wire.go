@@ -202,9 +202,113 @@ type HostResponse struct {
 	IsLighthouse bool     `json:"is_lighthouse"`
 	IsRelay      bool     `json:"is_relay"`
 
+	// RoleID and RoleName both, and for different readers.
+	//
+	// RoleID because UpdateHostRequest takes one: a field that can be written
+	// and not read makes a safe read-modify-write impossible, and a client that
+	// PATCHes tags without being able to see the current role cannot tell
+	// whether it just preserved one or cleared it.
+	//
+	// RoleName because a uuid is not something an operator or a UI can render.
+	// It costs nothing extra: the store resolves it in the join that reads the
+	// host, so it does not add a query per host to the listing path.
+	RoleID   string `json:"role_id,omitempty"`
+	RoleName string `json:"role_name,omitempty"`
+
+	// StaticAddrs is settable through PATCH for the same reason RoleID is
+	// readable here — and this one is worse if omitted: a lighthouse whose
+	// static_addrs a read-modify-write silently drops is one every host in the
+	// mesh keeps dialling and none can reach.
+	StaticAddrs []string `json:"static_addrs,omitempty"`
+
 	AppliedConfigEpoch    int64      `json:"applied_config_epoch"`
 	AppliedBlocklistEpoch int64      `json:"applied_blocklist_epoch"`
 	LastSeenAt            *time.Time `json:"last_seen_at,omitempty"`
+
+	// NebulaVersion and AgentVersion are what the host reported on its last
+	// successful apply. They are the first question asked of a host that has
+	// stopped renewing — an agent too old to know an endpoint, or a nebula that
+	// rejects the certificate version the network moved to — and until now the
+	// only way to see them was psql.
+	NebulaVersion string `json:"nebula_version,omitempty"`
+	AgentVersion  string `json:"agent_version,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+
+	// ActiveCertificates is present on the single-host response only.
+	//
+	// An operator opening a host wants its expiry immediately, and behind a
+	// second request that is a question most callers never ask. It is bounded:
+	// the partial unique index permits one active certificate per cert_version,
+	// so this holds one row, or two mid version-migration.
+	//
+	// Deliberately absent from the listing, where it would be one query per
+	// host — the cost this response's role name exists to avoid.
+	ActiveCertificates []CertificateResponse `json:"active_certificates,omitempty"`
+}
+
+// HostListResponse is one page of GET /v1/hosts.
+//
+// An envelope, not a bare array with X-Total-Count and Link headers. Both
+// clients this is about — a CLI drawing a table and a UI drawing a list — have
+// to know whether another page exists, and in an envelope that fact is part of
+// the type both sides compile against, which is the reason this package exists.
+// A header is not: it survives neither a `curl | jq` pipeline nor most fetch
+// wrappers, and when it is dropped the client concludes it has the whole fleet.
+//
+// This replaces a bare JSON array and is a breaking change on purpose. Nothing
+// is deployed, and the alternative is a listing that silently truncates.
+type HostListResponse struct {
+	Hosts []HostResponse `json:"hosts"`
+
+	// NextCursor is empty on the last page, and is the only way to ask for the
+	// next one: pass it back unmodified as ?cursor=. It is opaque — it encodes
+	// a sort key, and a client that parses it has taken a dependency on an
+	// ordering this endpoint is free to change.
+	NextCursor string `json:"next_cursor,omitempty"`
+
+	// TotalCount is present only when the request asked for it with count=true.
+	// A pointer so "not requested" is not reported as zero, which would read as
+	// an empty fleet.
+	TotalCount *int `json:"total_count,omitempty"`
+}
+
+// CertificateResponse is one certificate in a host's history.
+//
+// No PEM field at all, rather than an empty one: it is the largest thing on the
+// row, a host renewing hourly has thousands of rows, and nothing an operator
+// reads here needs the bytes.
+type CertificateResponse struct {
+	ID          string `json:"id"`
+	Fingerprint string `json:"fingerprint"`
+	State       string `json:"state"`
+
+	// CAID and CAName name the issuer. During a rotation this is the field that
+	// says whether a host has moved to the new authority, which is what decides
+	// when the old one can be retired.
+	CAID   string `json:"ca_id"`
+	CAName string `json:"ca_name"`
+
+	CertVersion int       `json:"cert_version"`
+	NotBefore   time.Time `json:"not_before"`
+	NotAfter    time.Time `json:"not_after"`
+
+	// RenewAt is the midpoint of the lifetime: when the agent should have
+	// renewed. Present because otherwise "overdue" is arithmetic every reader
+	// has to redo — a certificate that is still valid but past this is one
+	// whose renewal is already failing, and that is the whole warning.
+	RenewAt time.Time `json:"renew_at"`
+
+	IssuedAt time.Time `json:"issued_at"`
+}
+
+// CertificateListResponse is one page of a host's certificate history. Envelope
+// and cursor for the same reasons as HostListResponse; no count, because
+// nothing an operator asks of a certificate history is answered by how many
+// certificates there have been.
+type CertificateListResponse struct {
+	Certificates []CertificateResponse `json:"certificates"`
+	NextCursor   string                `json:"next_cursor,omitempty"`
 }
 
 // EnrollmentCodeResponse returns a freshly minted code. The plaintext appears
@@ -282,6 +386,22 @@ type CreateRoleRequest struct {
 	// keys it does not recognise, so a typo would otherwise become a rule with
 	// a different meaning than its author wrote.
 	Firewall json.RawMessage `json:"firewall,omitempty"`
+}
+
+// UpdateRoleRequest edits a role in place.
+//
+// Pointer fields for the same reason UpdateHostRequest uses them: "not
+// supplied" must be distinguishable from "set to empty". A PATCH that cannot
+// express "leave this alone" forces read-modify-write, which races — and for a
+// role, losing that race silently rewrites the firewall on every host carrying
+// it.
+type UpdateRoleRequest struct {
+	Name   *string   `json:"name,omitempty"`
+	Groups *[]string `json:"groups,omitempty"`
+	// Firewall replaces the rule set wholesale rather than merging. Merging
+	// would make "remove this rule" inexpressible, and a rule an operator
+	// believes they deleted is the worst possible outcome for a firewall.
+	Firewall *json.RawMessage `json:"firewall,omitempty"`
 }
 
 type RoleResponse struct {

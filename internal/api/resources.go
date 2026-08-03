@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/slackhq/nebula/cert"
 
+	// The agent package is imported for its renewal policy, not to run an
+	// agent. When a role's groups change, the control plane has to say when
+	// every host will have a certificate carrying the new set, and the only
+	// honest source for that is the schedule the agent will actually follow.
+	// Restating the formula here instead would let the two drift silently, and
+	// the number would then be wrong in the direction that matters.
+	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/store"
@@ -29,6 +37,9 @@ func (s *Server) ResourceRoutes(mux *http.ServeMux) {
 
 	mux.Handle("POST /v1/roles", s.admin("roles:write", s.handleCreateRole))
 	mux.Handle("GET /v1/roles", s.admin("roles:read", s.handleListRoles))
+	mux.Handle("GET /v1/roles/{id}", s.admin("roles:read", s.handleGetRole))
+	mux.Handle("PATCH /v1/roles/{id}", s.admin("roles:write", s.handleUpdateRole))
+	mux.Handle("DELETE /v1/roles/{id}", s.admin("roles:write", s.handleDeleteRole))
 
 	mux.Handle("POST /v1/cas", s.admin("cas:write", s.handleCreateCA))
 	mux.Handle("GET /v1/cas", s.admin("cas:read", s.handleListCAs))
@@ -195,26 +206,8 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		FirewallRules: req.Firewall,
 	}
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		// Groups must be a subset of the signing CA's, or issuance fails later
-		// with a constraint error that names the certificate rather than the
-		// role. Check now, while the operator is looking at the role.
-		if len(role.Groups) > 0 {
-			caRow, err := tx.GetActiveCA(ctx, networkID)
-			if err != nil {
-				return err
-			}
-			caCert, _, perr := cert.UnmarshalCertificateFromPEM([]byte(caRow.CertPEM))
-			if perr != nil {
-				return fmt.Errorf("parse active CA: %w", perr)
-			}
-			if allowed := caCert.Groups(); len(allowed) > 0 {
-				for _, g := range role.Groups {
-					if !containsStr(allowed, g) {
-						return fmt.Errorf("%w: group %q is not permitted by CA %q (allows %v)",
-							ca.ErrGroupNotInCA, g, caRow.Name, allowed)
-					}
-				}
-			}
+		if err := checkGroupsAgainstCA(ctx, tx, networkID, role.Groups); err != nil {
+			return err
 		}
 		if err := tx.CreateRole(ctx, &role); err != nil {
 			return err
@@ -235,6 +228,362 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, roleResponse(&role))
+}
+
+// checkGroupsAgainstCA refuses groups the signing CA will not certify.
+//
+// Groups must be a subset of the active CA's, or issuance fails later with a
+// constraint error that names the certificate rather than the role. Check while
+// the operator is still looking at the role — and on every path that can write
+// groups, since a role created legally and then edited illegally fails just as
+// confusingly.
+func checkGroupsAgainstCA(ctx context.Context, tx *store.Tx, networkID uuid.UUID, groups []string) error {
+	if len(groups) == 0 {
+		return nil
+	}
+	caRow, err := tx.GetActiveCA(ctx, networkID)
+	if err != nil {
+		return err
+	}
+	caCert, _, perr := cert.UnmarshalCertificateFromPEM([]byte(caRow.CertPEM))
+	if perr != nil {
+		return fmt.Errorf("parse active CA: %w", perr)
+	}
+	// An unconstrained CA permits anything. The API refuses to create one
+	// (handleCreateCA), but one may predate that rule.
+	allowed := caCert.Groups()
+	if len(allowed) == 0 {
+		return nil
+	}
+	for _, g := range groups {
+		if !containsStr(allowed, g) {
+			return fmt.Errorf("%w: group %q is not permitted by CA %q (allows %v)",
+				ca.ErrGroupNotInCA, g, caRow.Name, allowed)
+		}
+	}
+	return nil
+}
+
+func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
+	roleID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var role *store.Role
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		role, err = tx.GetRole(ctx, roleID)
+		return err
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "role")
+		return
+	}
+	writeJSON(w, http.StatusOK, roleResponse(role))
+}
+
+// roleUpdateResponse is the edited role plus what the edit is going to cost.
+//
+// The extra fields exist because a role edit has two wildly different prices
+// depending on which field was touched, and a response that looked identical
+// either way would let an operator believe a policy change had landed when it
+// had not. See handleUpdateRole.
+type roleUpdateResponse struct {
+	wire.RoleResponse
+
+	// Changed is false when the request restated what was already stored. The
+	// role is returned unmodified and no epoch was bumped.
+	Changed bool `json:"changed"`
+
+	// GroupsChanged marks the edit that outlives this request.
+	GroupsChanged bool `json:"groups_changed,omitempty"`
+
+	// HostsAwaitingCertificate is how many hosts are still presenting a
+	// certificate carrying the old groups.
+	HostsAwaitingCertificate int `json:"hosts_awaiting_certificate,omitempty"`
+
+	// CertificatesConvergeBy is when the last of them will have renewed.
+	// Computed from the live certificate rows and the agent's renewal policy,
+	// which is deterministic per host, so it is a deadline rather than a guess.
+	CertificatesConvergeBy string `json:"certificates_converge_by,omitempty"`
+
+	// Detail says in words what the two numbers above mean, for the operator
+	// reading a terminal rather than parsing JSON.
+	Detail string `json:"detail,omitempty"`
+}
+
+// handleUpdateRole edits a role in place.
+//
+// Sibling of handleCreateRole, and runs the same two checks for the same
+// reasons: firewall rules are validated strictly because nebula silently
+// ignores keys it does not recognise, and groups are checked against the
+// signing CA because otherwise issuance fails later with a certificate error
+// that names nothing an operator can act on.
+//
+// Two things are specific to editing.
+//
+// The epoch advances only when something actually changed. store.UpdateRole
+// decides that, comparing firewall_rules as jsonb so a re-send with different
+// key order is correctly nothing. A no-op PATCH must not wake every agent on
+// the network to re-render a fragment identical to the one it is already
+// running, or re-running a reconcile loop becomes fleet-wide work.
+//
+// And a change to `groups` is reported differently from a change to anything
+// else, because it costs something entirely different. Firewall rules are
+// configuration: they reach every host on the next poll and converge in
+// seconds. Groups are embedded in the signed certificate, so every host
+// carrying this role keeps the old set until it renews — at the midpoint of
+// its own certificate's lifetime, hours away on a day-long certificate, and
+// nothing here can pull that forward (see the note on RenewAfter below).
+//
+// So a group change answers 202 rather than 200, with the number of hosts still
+// holding stale certificates and the instant the last of them renews, and it is
+// audited under its own action. 202 is not decoration: "accepted, processing
+// not complete" is literally the state of the system, and it is the one signal
+// a caller that checks the status code and ignores the body cannot miss. The
+// alternative shapes were considered and are worse with the request type as it
+// stands — refusing group edits outright leaves them with no supported path at
+// all, and the create-a-second-role workaround has exactly the same
+// certificate lag, since reassigning a host's role does not reissue anything
+// either.
+func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	roleID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var req wire.UpdateRoleRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Name == nil && req.Groups == nil && req.Firewall == nil {
+		writeErr(w, http.StatusBadRequest,
+			"no fields supplied; set name, groups, or firewall")
+		return
+	}
+	if req.Name != nil && *req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "name cannot be empty")
+		return
+	}
+	if req.Firewall != nil {
+		if err := nebulacfg.ValidateFirewall(*req.Firewall); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	upd := store.RoleUpdate{Name: req.Name, Groups: req.Groups}
+	if req.Firewall != nil {
+		raw := []byte(*req.Firewall)
+		upd.Firewall = &raw
+	}
+
+	var (
+		change *store.RoleChange
+		lag    certificateLag
+	)
+	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		role, err := tx.GetRole(ctx, roleID)
+		if err != nil {
+			return err
+		}
+		if req.Groups != nil {
+			if err := checkGroupsAgainstCA(ctx, tx, role.NetworkID, *req.Groups); err != nil {
+				return err
+			}
+		}
+
+		change, err = tx.UpdateRole(ctx, roleID, upd)
+		if err != nil {
+			return err
+		}
+		if !change.Changed {
+			return nil
+		}
+
+		if change.GroupsChanged {
+			hosts, err := tx.RoleHosts(ctx, roleID)
+			if err != nil {
+				return err
+			}
+			lag = certificateLagFor(hosts, time.Now())
+		}
+
+		// The role changed what every host carrying it may do, so it advances
+		// the config epoch and every affected agent picks it up on the next
+		// push — the firewall part of it, at least.
+		if _, err := tx.BumpEpoch(ctx, role.NetworkID, store.EpochConfig); err != nil {
+			return err
+		}
+
+		// A group change is audited under its own action rather than as one
+		// more role.updated, for the same reason ca.force_activated is not
+		// ca.activated: it is the entry an incident review needs to find with a
+		// WHERE clause, and the one that explains why a host was still trusted
+		// hours after policy said it should not be.
+		e := id.Audit(store.ActionRoleUpdated, "role", roleID.String())
+		if change.GroupsChanged {
+			e.Action = store.ActionRoleGroupsChanged
+			meta, merr := json.Marshal(map[string]any{
+				"groups_before":              change.Before.Groups,
+				"groups_after":               change.After.Groups,
+				"hosts_awaiting_certificate": lag.Hosts,
+				"certificates_converge_by":   lag.formatted(),
+			})
+			if merr != nil {
+				return fmt.Errorf("encode role update audit metadata: %w", merr)
+			}
+			e.Meta = meta
+		}
+		return tx.AppendAudit(ctx, e)
+	})
+	if err != nil {
+		if errors.Is(err, ca.ErrGroupNotInCA) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.notFoundOr(w, err, "role")
+		return
+	}
+
+	resp := roleUpdateResponse{
+		RoleResponse: roleResponse(&change.After),
+		Changed:      change.Changed,
+	}
+	if !change.GroupsChanged {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	s.log.Warn("role groups changed; hosts keep the old groups until they renew",
+		"role", roleID, "hosts", lag.Hosts, "convergeBy", lag.formatted())
+
+	resp.GroupsChanged = true
+	resp.HostsAwaitingCertificate = lag.Hosts
+	resp.CertificatesConvergeBy = lag.formatted()
+	resp.Detail = lag.detail()
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
+// certificateLag is how far behind a role's hosts are after a group change.
+type certificateLag struct {
+	// Hosts is how many are still presenting a certificate with the old
+	// groups. Hosts that have never enrolled are excluded: they have no stale
+	// certificate, and will be issued the new groups the first time they ask.
+	Hosts int
+
+	// ConvergeBy is when the last of them renews. Zero when Hosts is zero.
+	ConvergeBy time.Time
+}
+
+// certificateLagFor computes when a group change will actually be in force.
+//
+// Not an estimate. Each agent's renewal instant is the midpoint of its
+// certificate's lifetime offset by a jitter derived from a SHA-256 of its host
+// id — deterministic, not random (agent.RenewalPolicy.RenewAt explains why), so
+// the same policy the agent will apply, applied here to the certificate rows we
+// already hold, yields the exact instant. The default policy is what
+// orbit-agent runs; a fleet running a custom one will differ, which is the one
+// assumption in this number.
+//
+// It is a ceiling in the sense that matters: an agent may renew EARLIER, if the
+// control plane pulls it forward or the maintenance sweep gets there first, but
+// nothing schedules it later.
+func certificateLagFor(hosts []store.RoleHost, now time.Time) certificateLag {
+	policy := agent.DefaultRenewalPolicy()
+
+	var lag certificateLag
+	for _, h := range hosts {
+		if h.CertNotAfter.IsZero() {
+			continue // never enrolled; nothing stale to replace
+		}
+		if h.State != store.HostEnrolled && h.State != store.HostActive {
+			continue // suspended or deleted; not renewing, and not on the mesh
+		}
+		lag.Hosts++
+
+		at := policy.RenewAt(h.CertNotBefore, h.CertNotAfter, h.ID.String())
+		if at.Before(now) {
+			at = now // already due; it converges as soon as the agent polls
+		}
+		if at.After(lag.ConvergeBy) {
+			lag.ConvergeBy = at
+		}
+	}
+	return lag
+}
+
+func (l certificateLag) formatted() string {
+	if l.ConvergeBy.IsZero() {
+		return ""
+	}
+	return l.ConvergeBy.UTC().Format(time.RFC3339)
+}
+
+func (l certificateLag) detail() string {
+	if l.Hosts == 0 {
+		return "firewall and configuration changes are live; no host currently holds a certificate for this role"
+	}
+	return fmt.Sprintf(
+		"firewall and configuration changes are live, but groups are carried in the signed certificate: "+
+			"%d host(s) keep the previous groups until they renew, the last by %s. "+
+			"Revoke a host's certificate to force it sooner",
+		l.Hosts, l.formatted())
+}
+
+// handleDeleteRole removes a role no host carries.
+//
+// It exists rather than not because the database makes the dangerous case
+// impossible: host.role_id is ON DELETE RESTRICT, so a role in use cannot be
+// deleted however this endpoint is called. What the endpoint adds is the
+// answer to the only question an operator has when it is refused — which hosts
+// — because a bare 409 leaves them scanning a host list by hand, and because
+// the raw database error would surface through mapErr as a 404 claiming the
+// role does not exist.
+func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	roleID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var carriers []store.RoleHost
+	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if _, err := tx.GetRole(ctx, roleID); err != nil {
+			return err
+		}
+		var err error
+		carriers, err = tx.RoleHosts(ctx, roleID)
+		if err != nil {
+			return err
+		}
+		if err := tx.DeleteRole(ctx, roleID); err != nil {
+			return err
+		}
+		return tx.AppendAudit(ctx, id.Audit(store.ActionRoleDeleted, "role", roleID.String()))
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrRoleInUse) {
+			names := make([]string, 0, len(carriers))
+			for _, h := range carriers {
+				names = append(names, h.Name)
+			}
+			// 409, not 400: the request is well-formed, the system is not in a
+			// state that permits it. The carriers are in the body because
+			// "still in use" without naming who is not actionable.
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "role is still assigned to hosts; reassign them first. " +
+					"Deleting it would change the firewall on every one of them at once",
+				"hosts": names,
+			})
+			return
+		}
+		s.notFoundOr(w, err, "role")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {

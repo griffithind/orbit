@@ -873,6 +873,427 @@ func TestCertificateSupersedesPerVersion(t *testing.T) {
 	}
 }
 
+//------------------------------------------------------------------------------
+// Host listing: filters, keyset pagination, count
+//------------------------------------------------------------------------------
+
+// listHosts is the common "one page, no filters beyond these" call.
+func listHosts(t *testing.T, s *store.Store, f store.HostFilter) store.HostPage {
+	t.Helper()
+	var page store.HostPage
+	err := s.Read(context.Background(), func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		page, err = tx.ListHosts(ctx, f)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("ListHosts: %v", err)
+	}
+	return page
+}
+
+func hostNames(page store.HostPage) []string {
+	out := make([]string, 0, len(page.Hosts))
+	for _, h := range page.Hosts {
+		out = append(out, h.Name)
+	}
+	return out
+}
+
+// TestListHostsFiltersInSQL covers every filter the store offers, and asserts
+// the role name comes back with the host.
+//
+// The filters exist because an operator's questions are not "give me every
+// host": they are "what is suspended", "what carries this tag", "what carries
+// this role", and "the web boxes". Answering those in Go would mean fetching
+// the whole table per request — the cost NetworkTopology's comment describes.
+func TestListHostsFiltersInSQL(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	net := newNetwork(t, s, "10.42.0.0/16")
+
+	var web, db store.Role
+	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		web = store.Role{NetworkID: net.ID, Name: "web"}
+		if err := tx.CreateRole(ctx, &web); err != nil {
+			return err
+		}
+		db = store.Role{NetworkID: net.ID, Name: "db"}
+		return tx.CreateRole(ctx, &db)
+	})
+	if err != nil {
+		t.Fatalf("CreateRole: %v", err)
+	}
+
+	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		hosts := []store.Host{
+			{NetworkID: net.ID, Name: "web-01", RoleID: &web.ID,
+				Tags: []string{"prod", "eu"}, State: store.HostActive,
+				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.1")}},
+			{NetworkID: net.ID, Name: "web-02", RoleID: &web.ID,
+				Tags: []string{"staging"}, State: store.HostSuspended,
+				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.2")}},
+			{NetworkID: net.ID, Name: "db-01", RoleID: &db.ID,
+				Tags: []string{"prod"}, State: store.HostActive,
+				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.3")}},
+			{NetworkID: net.ID, Name: "unroled", State: store.HostCreated,
+				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.4")}},
+		}
+		for i := range hosts {
+			if err := tx.CreateHost(ctx, &hosts[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("CreateHost: %v", err)
+	}
+
+	base := store.HostFilter{NetworkID: net.ID}
+
+	cases := []struct {
+		name   string
+		filter store.HostFilter
+		want   []string
+	}{
+		{"unfiltered", base, []string{"db-01", "unroled", "web-01", "web-02"}},
+		{"state", store.HostFilter{NetworkID: net.ID, State: store.HostSuspended}, []string{"web-02"}},
+		{"tag", store.HostFilter{NetworkID: net.ID, Tag: "prod"}, []string{"db-01", "web-01"}},
+		{"role", store.HostFilter{NetworkID: net.ID, RoleID: &web.ID}, []string{"web-01", "web-02"}},
+		{"name substring", store.HostFilter{NetworkID: net.ID, NameContains: "eb-0"}, []string{"web-01", "web-02"}},
+		// Case-insensitive: an operator typing a hostname does not think about case.
+		{"name case", store.HostFilter{NetworkID: net.ID, NameContains: "WEB"}, []string{"web-01", "web-02"}},
+		// A name containing a LIKE metacharacter must be matched literally. With
+		// LIKE, "_01" would match "web-01" too and the filter would quietly
+		// answer a different question than the one asked.
+		{"name metacharacter", store.HostFilter{NetworkID: net.ID, NameContains: "b_01"}, nil},
+		{"combined", store.HostFilter{NetworkID: net.ID, RoleID: &web.ID, Tag: "prod"}, []string{"web-01"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hostNames(listHosts(t, s, tc.filter))
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("names = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The role name has to arrive with the host, or a client rendering a list
+	// makes one lookup per row.
+	for _, h := range listHosts(t, s, base).Hosts {
+		switch h.Name {
+		case "web-01", "web-02":
+			if h.RoleName != "web" {
+				t.Errorf("%s role name = %q, want web", h.Name, h.RoleName)
+			}
+		case "unroled":
+			if h.RoleName != "" || h.RoleID != nil {
+				t.Errorf("unroled host has role %v/%q", h.RoleID, h.RoleName)
+			}
+		}
+	}
+}
+
+// TestListHostsBehindFilter covers the incident question: which hosts have not
+// applied the current generation. It must agree with Convergence, which counts
+// only enrolled and active hosts — a host in 'created' has never held a
+// certificate and can never report an epoch.
+func TestListHostsBehindFilter(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	net := newNetwork(t, s, "10.42.0.0/16")
+	caughtUp := newHost(t, s, net, "caught-up", "10.42.1.1")
+	newHost(t, s, net, "behind", "10.42.1.2")
+
+	// A host that never enrolled: behind by the numbers, excluded on purpose.
+	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		h := store.Host{NetworkID: net.ID, Name: "never-enrolled", State: store.HostCreated,
+			Addrs: []netip.Addr{netip.MustParseAddr("10.42.1.3")}}
+		return tx.CreateHost(ctx, &h)
+	})
+	if err != nil {
+		t.Fatalf("CreateHost: %v", err)
+	}
+
+	var conv *store.Convergence
+	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		epoch, err := tx.BumpEpoch(ctx, net.ID, store.EpochConfig)
+		if err != nil {
+			return err
+		}
+		if err := tx.RecordAgentReport(ctx, caughtUp.ID, store.AgentReport{
+			ConfigEpoch: epoch, BlocklistEpoch: 1,
+		}); err != nil {
+			return err
+		}
+		conv, err = tx.Convergence(ctx, net.ID, 10)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	page := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Behind: true})
+	got := hostNames(page)
+	if fmt.Sprint(got) != fmt.Sprint([]string{"behind"}) {
+		t.Errorf("behind = %v, want [behind]", got)
+	}
+	// The filter and the convergence endpoint must not disagree about who is
+	// behind; two numbers for one question is how an operator loses trust in
+	// both.
+	if len(got) != conv.HostsTotal-conv.ConfigApplied {
+		t.Errorf("behind filter returned %d hosts, convergence says %d are lagging",
+			len(got), conv.HostsTotal-conv.ConfigApplied)
+	}
+}
+
+// TestListHostsKeysetPagination covers the two boundaries that actually break.
+//
+// First, a page edge that lands exactly on the last row: a listing that decides
+// "there is more" by comparing the row count with the limit hands out a cursor
+// that returns nothing, and a client that trusts it shows an empty final page.
+//
+// Second, a host created between two page fetches. Under OFFSET, an insert
+// before the offset shifts every later page by one and a row is silently
+// skipped; a keyset cursor names a position, so what came before it cannot
+// move.
+func TestListHostsKeysetPagination(t *testing.T) {
+	s := setup(t)
+	net := newNetwork(t, s, "10.42.0.0/16")
+	for i, name := range []string{"a", "b", "c", "d"} {
+		newHost(t, s, net, name, fmt.Sprintf("10.42.2.%d", i+1))
+	}
+
+	// Four hosts, two per page: the second page is exactly full and is still
+	// the last one.
+	var (
+		seen   []string
+		cursor *store.HostCursor
+		pages  int
+	)
+	for {
+		page := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2, After: cursor})
+		pages++
+		seen = append(seen, hostNames(page)...)
+		if !page.More {
+			if len(page.Hosts) != 2 {
+				t.Errorf("final page had %d hosts, want 2 (an exactly-full last page)", len(page.Hosts))
+			}
+			break
+		}
+		if len(page.Hosts) == 0 {
+			t.Fatal("a page reported More with no rows to build a cursor from")
+		}
+		last := page.Hosts[len(page.Hosts)-1]
+		cursor = &store.HostCursor{Name: last.Name, ID: last.ID}
+		if pages > 5 {
+			t.Fatal("pagination did not terminate")
+		}
+	}
+	if pages != 2 {
+		t.Errorf("walked %d pages, want 2 — the last full page must not claim a next one", pages)
+	}
+	if fmt.Sprint(seen) != fmt.Sprint([]string{"a", "b", "c", "d"}) {
+		t.Errorf("paged names = %v, want [a b c d]", seen)
+	}
+
+	// Now the concurrent insert. Take the first page, create a host that sorts
+	// before the cursor and one that sorts after, then take the second page.
+	first := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2})
+	last := first.Hosts[len(first.Hosts)-1]
+	after := &store.HostCursor{Name: last.Name, ID: last.ID}
+
+	newHost(t, s, net, "a-inserted", "10.42.2.20") // before the cursor
+	newHost(t, s, net, "c-inserted", "10.42.2.21") // after it
+
+	second := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2, After: after})
+	got := hostNames(second)
+	// "c" is still the row after the cursor: the insert before it did not shift
+	// the window, which is exactly what OFFSET would have got wrong.
+	if fmt.Sprint(got) != fmt.Sprint([]string{"c", "c-inserted"}) {
+		t.Errorf("page after a concurrent insert = %v, want [c c-inserted]", got)
+	}
+	if !second.More {
+		t.Error("second page should report more: d is still unread")
+	}
+
+	// A cursor past the end is an empty page, not an error.
+	end := listHosts(t, s, store.HostFilter{
+		NetworkID: net.ID,
+		After:     &store.HostCursor{Name: "zzz", ID: uuid.Nil},
+	})
+	if len(end.Hosts) != 0 || end.More {
+		t.Errorf("cursor past the end returned %d hosts (more=%v)", len(end.Hosts), end.More)
+	}
+}
+
+// TestListHostsCountIsOptIn proves the count describes the filter rather than
+// the page, and that not asking is different from a count of zero.
+func TestListHostsCountIsOptIn(t *testing.T) {
+	s := setup(t)
+	net := newNetwork(t, s, "10.42.0.0/16")
+	for i, name := range []string{"one", "two", "three"} {
+		newHost(t, s, net, name, fmt.Sprintf("10.42.3.%d", i+1))
+	}
+
+	page := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2})
+	if page.Total != nil {
+		t.Errorf("count was returned without being asked for: %d", *page.Total)
+	}
+
+	page = listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2, WithCount: true})
+	if page.Total == nil {
+		t.Fatal("WithCount returned no total")
+	}
+	if *page.Total != 3 {
+		t.Errorf("total = %d, want 3 (the filter, not the page)", *page.Total)
+	}
+	if len(page.Hosts) != 2 {
+		t.Errorf("page = %d hosts, want 2", len(page.Hosts))
+	}
+
+	// And it narrows with the filter, or it is not a count of anything useful.
+	page = listHosts(t, s, store.HostFilter{
+		NetworkID: net.ID, NameContains: "t", WithCount: true,
+	})
+	if page.Total == nil || *page.Total != 2 {
+		t.Errorf("filtered total = %v, want 2", page.Total)
+	}
+}
+
+//------------------------------------------------------------------------------
+// Certificate history
+//------------------------------------------------------------------------------
+
+// TestHostCertificateHistory covers the listing behind
+// GET /v1/hosts/{id}/certificates: newest first, the issuing CA by name, and a
+// cursor that works when every row shares a timestamp.
+//
+// Sharing a timestamp is the normal case, not a contrived one: issued_at
+// defaults to now(), which in Postgres is the transaction's start time, and
+// nebula's second-granularity validity means renewals genuinely collide. A
+// cursor keyed on issued_at alone would re-serve or skip those rows.
+func TestHostCertificateHistory(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	net := newNetwork(t, s, "10.42.0.0/16")
+	host := newHost(t, s, net, "renewer", "10.42.4.1")
+	other := newHost(t, s, net, "bystander", "10.42.4.2")
+	now := time.Now()
+
+	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		caRow := store.CA{
+			NetworkID: net.ID, Name: "history-ca", Fingerprint: uuid.NewString(),
+			CertPEM: "pem", SignerRef: "file://k", Curve: "CURVE25519",
+			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(90 * 24 * time.Hour),
+		}
+		if err := tx.CreateCA(ctx, &caRow); err != nil {
+			return err
+		}
+
+		// Four superseded renewals and one current certificate, all in one
+		// transaction and therefore all with the same issued_at.
+		for i := 0; i < 4; i++ {
+			c := store.Certificate{
+				HostID: host.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+				CertVer: 2, NotBefore: now.Add(-time.Duration(i+1) * time.Hour),
+				NotAfter: now.Add(time.Duration(i) * time.Hour), State: store.CertSuperseded,
+			}
+			if err := tx.InsertCertificate(ctx, &c); err != nil {
+				return err
+			}
+		}
+		current := store.Certificate{
+			HostID: host.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+			CertVer: 2, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour),
+		}
+		if err := tx.InsertCertificate(ctx, &current); err != nil {
+			return err
+		}
+		// A certificate belonging to another host must never appear below.
+		stray := store.Certificate{
+			HostID: other.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+			CertVer: 2, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour),
+		}
+		return tx.InsertCertificate(ctx, &stray)
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	certPage := func(f store.CertFilter) store.CertPage {
+		t.Helper()
+		var page store.CertPage
+		err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+			var err error
+			page, err = tx.HostCertificates(ctx, host.ID, f)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("HostCertificates: %v", err)
+		}
+		return page
+	}
+
+	all := certPage(store.CertFilter{})
+	if len(all.Certificates) != 5 {
+		t.Fatalf("history = %d rows, want 5", len(all.Certificates))
+	}
+	for _, c := range all.Certificates {
+		if c.HostID != host.ID {
+			t.Errorf("history contains another host's certificate: %s", c.ID)
+		}
+		if c.CAName != "history-ca" {
+			t.Errorf("ca name = %q, want history-ca", c.CAName)
+		}
+		// RenewAt is the whole reason "overdue" is legible without arithmetic.
+		if want := c.NotBefore.Add(c.NotAfter.Sub(c.NotBefore) / 2); !c.RenewAt().Equal(want) {
+			t.Errorf("RenewAt() = %s, want %s", c.RenewAt(), want)
+		}
+	}
+
+	// Paging with the tiebreaker: every row shares issued_at, so if id were not
+	// part of the key this would loop or lose rows.
+	var (
+		seen   []uuid.UUID
+		cursor *store.CertCursor
+	)
+	for i := 0; ; i++ {
+		page := certPage(store.CertFilter{Limit: 2, After: cursor})
+		for _, c := range page.Certificates {
+			seen = append(seen, c.ID)
+		}
+		if !page.More {
+			break
+		}
+		last := page.Certificates[len(page.Certificates)-1]
+		cursor = &store.CertCursor{IssuedAt: last.IssuedAt, ID: last.ID}
+		if i > 5 {
+			t.Fatal("certificate pagination did not terminate")
+		}
+	}
+	if len(seen) != 5 {
+		t.Errorf("paged %d certificates, want 5", len(seen))
+	}
+	unique := map[uuid.UUID]bool{}
+	for _, id := range seen {
+		if unique[id] {
+			t.Errorf("certificate %s was served on two pages", id)
+		}
+		unique[id] = true
+	}
+
+	// The state filter is what makes "which one is live" a single request.
+	active := certPage(store.CertFilter{State: store.CertActive})
+	if len(active.Certificates) != 1 {
+		t.Errorf("active certificates = %d, want 1", len(active.Certificates))
+	}
+}
+
 // TestRenewAtMidpoint pins the 50%-of-lifetime rule that the agent's renewal
 // schedule and the sweep both depend on.
 func TestRenewAtMidpoint(t *testing.T) {
@@ -882,3 +1303,183 @@ func TestRenewAtMidpoint(t *testing.T) {
 		t.Errorf("RenewAt() = %s, want %s", c.RenewAt(), want)
 	}
 }
+
+// TestUpdateRoleOnlyReportsRealChanges is the guard on the config epoch.
+//
+// Every bump wakes every agent in the network to fetch and re-render a
+// fragment. A PATCH that restates what is already stored must therefore report
+// nothing changed, so that re-running a reconcile loop — or retrying a request
+// that may not have landed — stays free instead of becoming fleet-wide work.
+func TestUpdateRoleOnlyReportsRealChanges(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	net := newNetwork(t, s, "10.61.0.0/16")
+
+	var role store.Role
+	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		role = store.Role{
+			NetworkID: net.ID, Name: "web", Groups: []string{"web", "edge"},
+			FirewallRules: []byte(`{"inbound":[{"port":"443","proto":"tcp","host":"any"}]}`),
+		}
+		return tx.CreateRole(ctx, &role)
+	})
+	if err != nil {
+		t.Fatalf("CreateRole: %v", err)
+	}
+
+	update := func(u store.RoleUpdate) *store.RoleChange {
+		t.Helper()
+		var c *store.RoleChange
+		err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+			var err error
+			c, err = tx.UpdateRole(ctx, role.ID, u)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("UpdateRole: %v", err)
+		}
+		return c
+	}
+
+	// Nothing supplied at all.
+	if c := update(store.RoleUpdate{}); c.Changed {
+		t.Error("an empty update reported a change")
+	}
+
+	// The same rules, reformatted. firewall_rules is jsonb, so the database
+	// compares it semantically: different whitespace and key order is not an
+	// edit. A []byte comparison in Go would call this a change and bump the
+	// epoch for it.
+	same := []byte(`{ "inbound" : [ { "host":"any", "proto":"tcp", "port":"443" } ] }`)
+	if c := update(store.RoleUpdate{Firewall: &same}); c.Changed {
+		t.Error("re-sending the stored rules with different formatting reported a change")
+	}
+
+	// The same groups in the same order.
+	groups := []string{"web", "edge"}
+	if c := update(store.RoleUpdate{Groups: &groups}); c.Changed {
+		t.Error("re-sending the stored groups reported a change")
+	}
+
+	// A real firewall edit is a change, and is not a group change: it converges
+	// on the next poll rather than on the next certificate renewal.
+	rules := []byte(`{"inbound":[{"port":"8443","proto":"tcp","host":"any"}]}`)
+	c := update(store.RoleUpdate{Firewall: &rules})
+	if !c.Changed {
+		t.Fatal("a firewall edit reported no change")
+	}
+	if c.GroupsChanged {
+		t.Error("a firewall edit reported GroupsChanged; it does not touch any certificate")
+	}
+
+	// A real group edit is both, and Before must still hold the old set: it is
+	// what an audit entry needs to say what the change actually was.
+	next := []string{"web"}
+	c = update(store.RoleUpdate{Groups: &next})
+	if !c.Changed || !c.GroupsChanged {
+		t.Fatalf("group edit: Changed=%v GroupsChanged=%v", c.Changed, c.GroupsChanged)
+	}
+	if len(c.Before.Groups) != 2 || len(c.After.Groups) != 1 {
+		t.Errorf("group edit went %v -> %v", c.Before.Groups, c.After.Groups)
+	}
+	// Untouched fields survive a partial update.
+	if c.After.Name != "web" {
+		t.Errorf("name became %q after a groups-only update", c.After.Name)
+	}
+
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		_, err := tx.UpdateRole(ctx, uuid.New(), store.RoleUpdate{Name: &c.After.Name})
+		return err
+	}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("UpdateRole on a missing role = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteRoleIsRefusedWhileHostsCarryIt covers ON DELETE RESTRICT and the
+// reason the store checks it itself.
+//
+// The database refuses the delete regardless. But mapErr renders a foreign key
+// violation as ErrNotFound, so without the check the API would tell an operator
+// the role does not exist when the truth is that hosts are using it.
+func TestDeleteRoleIsRefusedWhileHostsCarryIt(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	net := newNetwork(t, s, "10.62.0.0/16")
+
+	var role store.Role
+	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		role = store.Role{NetworkID: net.ID, Name: "carried"}
+		return tx.CreateRole(ctx, &role)
+	})
+	if err != nil {
+		t.Fatalf("CreateRole: %v", err)
+	}
+
+	var host store.Host
+	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		host = store.Host{
+			NetworkID: net.ID, Name: "carrier", RoleID: &role.ID,
+			Addrs: []netip.Addr{netip.MustParseAddr("10.62.0.1")},
+			State: store.HostActive,
+		}
+		return tx.CreateHost(ctx, &host)
+	})
+	if err != nil {
+		t.Fatalf("CreateHost: %v", err)
+	}
+
+	del := func() error {
+		return s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+			return tx.DeleteRole(ctx, role.ID)
+		})
+	}
+	if err := del(); !errors.Is(err, store.ErrRoleInUse) {
+		t.Fatalf("DeleteRole with a host carrying it = %v, want ErrRoleInUse", err)
+	}
+
+	// A soft-deleted host still holds role_id, so it still blocks the delete.
+	// A blocker list that filtered it out would report an empty set for a
+	// delete the database then refuses.
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.SetHostState(ctx, host.ID, store.HostDeleted)
+	}); err != nil {
+		t.Fatalf("SetHostState: %v", err)
+	}
+	var carriers []store.RoleHost
+	if err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		carriers, err = tx.RoleHosts(ctx, role.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("RoleHosts: %v", err)
+	}
+	if len(carriers) != 1 || carriers[0].Name != "carrier" {
+		t.Errorf("RoleHosts after soft delete = %+v, want the carrier", carriers)
+	}
+	// A host that never enrolled has no certificate, so nothing stale to
+	// replace when the role's groups change.
+	if !carriers[0].CertNotAfter.IsZero() {
+		t.Errorf("unenrolled host reported a certificate window: %+v", carriers[0])
+	}
+	if err := del(); !errors.Is(err, store.ErrRoleInUse) {
+		t.Errorf("DeleteRole with a soft-deleted carrier = %v, want ErrRoleInUse", err)
+	}
+
+	// Reassign, and it goes.
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.UpdateHostMeta(ctx, host.ID, ptrStr(""), nil)
+	}); err != nil {
+		t.Fatalf("UpdateHostMeta: %v", err)
+	}
+	if err := del(); err != nil {
+		t.Fatalf("DeleteRole with nothing carrying it: %v", err)
+	}
+	if err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		_, err := tx.GetRole(ctx, role.ID)
+		return err
+	}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetRole after delete = %v, want ErrNotFound", err)
+	}
+}
+
+func ptrStr(s string) *string { return &s }

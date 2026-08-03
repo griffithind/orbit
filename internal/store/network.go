@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // CreateNetwork inserts a network.
@@ -254,6 +256,259 @@ func (t *Tx) GetRole(ctx context.Context, id uuid.UUID) (*Role, error) {
 		return nil, mapErr(err, "get role")
 	}
 	return &r, nil
+}
+
+// Audit actions for role edits.
+//
+// Declared beside the role store functions rather than with their siblings in
+// audit.go for the same reason ActionConfigReverted is declared in host.go:
+// what matters about them is the split, and the split is only legible next to
+// the code that explains it.
+//
+// RoleGroupsChangedAt reports when a role's groups last changed, or nil if they
+// never have.
+//
+// Read on the agent's state poll, so it is one indexed primary-key lookup and
+// nothing more. The value it feeds is a renewal hint, not an authorization
+// decision: being wrong makes a host renew sooner than it needed to, which
+// costs one signature.
+func (t *Tx) RoleGroupsChangedAt(ctx context.Context, roleID uuid.UUID) (*time.Time, error) {
+	var at *time.Time
+	err := t.tx.QueryRow(ctx,
+		`SELECT groups_changed_at FROM orbit.role WHERE id = $1`, roleID).Scan(&at)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, mapErr(err, "role groups changed at")
+	}
+	return at, nil
+}
+
+// ActionRoleGroupsChanged is not ActionRoleUpdated with a flag in the metadata.
+// A firewall edit is live within seconds; a group edit is not in force until
+// every host has renewed its certificate, which is hours. "Which policy changes
+// were not yet in force at time T" is the question an incident review asks, and
+// it should be a WHERE clause rather than a scan through metadata. Same
+// reasoning as ca.force_activated being distinct from ca.activated.
+const (
+	ActionRoleUpdated       = "role.updated"
+	ActionRoleGroupsChanged = "role.groups_changed"
+	ActionRoleDeleted       = "role.deleted"
+)
+
+// RoleUpdate is a partial edit to a role. A nil field is left as it is.
+//
+// Absolute values rather than a delta, so two concurrent edits cannot compose
+// into a state neither operator asked for. That also makes an edit that
+// restates the current value a no-op rather than a change, which is what
+// UpdateRole reports.
+type RoleUpdate struct {
+	Name   *string
+	Groups *[]string
+	// Firewall replaces the rule set wholesale. Merging would make "remove
+	// this rule" inexpressible, and a rule an operator believes they deleted is
+	// the worst possible outcome for a firewall.
+	Firewall *[]byte
+}
+
+// RoleChange describes what an edit actually did.
+type RoleChange struct {
+	Before Role
+	After  Role
+
+	// Changed is false when the supplied values already matched what was
+	// stored. The caller must not bump the config epoch in that case: a bump
+	// wakes every agent in the network to fetch and re-render a fragment, so a
+	// no-op PATCH that bumped would make the safest thing an operator can do —
+	// re-run a reconcile loop, retry a request that may not have landed —
+	// fleet-wide work. Same reasoning as SetHostRoles.
+	Changed bool
+
+	// GroupsChanged is reported separately from Changed because it costs
+	// something entirely different.
+	//
+	// Firewall rules are configuration: they reach every host on its next poll
+	// and converge in seconds. Groups are embedded in the signed certificate
+	// (enroll.issueAndRender reads them from the role at issuance), so every
+	// host carrying this role keeps the OLD set until it happens to renew, on
+	// its own schedule, at the midpoint of its certificate's lifetime. Nothing
+	// here shortens that. A caller that presents the two as one operation is
+	// telling an operator a policy change has taken effect when it has not.
+	GroupsChanged bool
+}
+
+// UpdateRole applies a partial edit and reports what it did.
+//
+// The row is locked for the read so Before and After describe one transition
+// rather than two that interleaved. Without it a concurrent edit landing
+// between the read and the write would make GroupsChanged report on a
+// transition that never happened.
+//
+// The write itself is conditional — `IS DISTINCT FROM` — rather than
+// unconditional plus a comparison in Go. That matters for firewall_rules
+// specifically: the column is jsonb, so the database compares it semantically,
+// and a client that re-sends the same rules with different key order or
+// whitespace is correctly recognised as changing nothing. A []byte comparison
+// in Go would call that an edit and bump the epoch for it.
+func (t *Tx) UpdateRole(ctx context.Context, id uuid.UUID, u RoleUpdate) (*RoleChange, error) {
+	var before Role
+	err := t.tx.QueryRow(ctx, `
+		SELECT id, network_id, name, groups, firewall_rules, created_at
+		  FROM orbit.role WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&before.ID, &before.NetworkID, &before.Name, &before.Groups,
+		&before.FirewallRules, &before.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err, "get role for update")
+	}
+
+	after := before
+	if u.Name != nil {
+		after.Name = *u.Name
+	}
+	if u.Groups != nil {
+		after.Groups = *u.Groups
+	}
+	if u.Firewall != nil {
+		after.FirewallRules = *u.Firewall
+	}
+	if len(after.FirewallRules) == 0 {
+		after.FirewallRules = []byte(`{}`)
+	}
+
+	var stored []byte
+	err = t.tx.QueryRow(ctx, `
+		UPDATE orbit.role
+		   SET name = $2, groups = $3, firewall_rules = $4,
+		       -- Stamped only when the groups themselves move, in the same
+		       -- statement that moves them so the two cannot disagree. This is
+		       -- what enroll.Service.State compares a certificate's issued_at
+		       -- against to decide whether to pull a host's renewal forward:
+		       -- groups live inside the signed certificate, so a host holding
+		       -- one issued before this instant is presenting a group set the
+		       -- role no longer has.
+		       groups_changed_at = CASE
+		           WHEN groups IS DISTINCT FROM $3::text[] THEN now()
+		           ELSE groups_changed_at END
+		 WHERE id = $1
+		   AND (name, groups, firewall_rules)
+		       IS DISTINCT FROM ($2::text, $3::text[], $4::jsonb)
+		RETURNING firewall_rules`,
+		id, after.Name, nonNil(after.Groups), after.FirewallRules,
+	).Scan(&stored)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Nothing to write. Return the stored row unchanged so the caller
+		// reports what is actually there rather than the request it was sent.
+		return &RoleChange{Before: before, After: before}, nil
+	case err != nil:
+		return nil, mapErr(err, "update role")
+	}
+	after.FirewallRules = stored
+
+	// Order-sensitive, deliberately. Nebula treats groups as a set, so a
+	// reorder is semantically nothing — but normalizing here would disagree
+	// with what CreateRole stored, and every read-modify-write client echoes
+	// back the order it was given, so the exact comparison has no false
+	// positives in practice and needs no normalization rule to explain.
+	return &RoleChange{
+		Before: before, After: after, Changed: true,
+		GroupsChanged: !slices.Equal(before.Groups, after.Groups),
+	}, nil
+}
+
+// RoleHost is a host carrying a role, with the certificate it is currently
+// presenting.
+type RoleHost struct {
+	ID    uuid.UUID
+	Name  string
+	State string
+
+	// CertNotBefore and CertNotAfter are the window of the certificate the host
+	// leads with, and are zero when it holds none. A host that has not enrolled
+	// yet has no stale groups to carry: it will be issued the role's current
+	// ones the first time it asks.
+	CertNotBefore time.Time
+	CertNotAfter  time.Time
+}
+
+// RoleHosts returns every host carrying a role.
+//
+// Two callers with one query, because they need the same rows for opposite
+// reasons: an edit that changes groups needs to know how many certificates are
+// now stale and when the last of them renews, and a delete needs to know which
+// hosts the schema's ON DELETE RESTRICT will refuse it for.
+//
+// Deleted hosts are included. They still hold role_id, so they still block a
+// delete, and a blocker list that omitted them would report an empty set for a
+// delete the database then refuses.
+func (t *Tx) RoleHosts(ctx context.Context, roleID uuid.UUID) ([]RoleHost, error) {
+	// The highest cert_version is the one the host leads with, matching what
+	// enroll.State reports as its renewal deadline. A host mid-migration holds
+	// a v1 and a v2 certificate and both carry the role's groups, but both are
+	// reissued by the same renewal, so the leading one dates the convergence.
+	rows, err := t.tx.Query(ctx, `
+		SELECT h.id, h.name, h.state, c.not_before, c.not_after
+		  FROM orbit.host h
+		  LEFT JOIN LATERAL (
+		      SELECT not_before, not_after
+		        FROM orbit.certificate
+		       WHERE host_id = h.id AND state = 'active'
+		       ORDER BY cert_version DESC
+		       LIMIT 1
+		  ) c ON true
+		 WHERE h.role_id = $1
+		 ORDER BY h.name`, roleID)
+	if err != nil {
+		return nil, mapErr(err, "role hosts")
+	}
+	defer rows.Close()
+
+	var out []RoleHost
+	for rows.Next() {
+		var (
+			h      RoleHost
+			nb, na *time.Time
+		)
+		if err := rows.Scan(&h.ID, &h.Name, &h.State, &nb, &na); err != nil {
+			return nil, mapErr(err, "scan role host")
+		}
+		if nb != nil && na != nil {
+			h.CertNotBefore, h.CertNotAfter = *nb, *na
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// ErrRoleInUse is returned when a role still has hosts assigned to it.
+var ErrRoleInUse = errors.New("role is still assigned to hosts")
+
+// DeleteRole removes a role that no host carries.
+//
+// The schema already refuses the dangerous case: host.role_id is ON DELETE
+// RESTRICT, so a role in use cannot be deleted no matter what this function
+// does. The check here exists because of what the refusal would otherwise look
+// like — mapErr renders a foreign key violation as ErrNotFound, which would
+// tell an operator the role does not exist when the truth is that fourteen
+// hosts are using it. Re-role those hosts first.
+func (t *Tx) DeleteRole(ctx context.Context, id uuid.UUID) error {
+	hosts, err := t.RoleHosts(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(hosts) > 0 {
+		return fmt.Errorf("%w: %d host(s) still carry it", ErrRoleInUse, len(hosts))
+	}
+
+	tag, err := t.tx.Exec(ctx, `DELETE FROM orbit.role WHERE id = $1`, id)
+	if err != nil {
+		return mapErr(err, "delete role")
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 //------------------------------------------------------------------------------
