@@ -18,6 +18,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +55,12 @@ type Notifier struct {
 	subs map[uuid.UUID]map[int]chan Event
 	next int
 
+	// live is the current LISTEN state, read by Up. Not guarded by mu: the
+	// readers are request handlers answering a health probe or rendering a
+	// status badge, and taking the same lock the dispatch hot path holds to read
+	// a boolean would put them behind every fan-out.
+	live atomic.Bool
+
 	// ready is closed once LISTEN is established, so a caller can avoid the
 	// race where it publishes before the listener is actually listening.
 	ready     chan struct{}
@@ -76,9 +83,26 @@ func (n *Notifier) Observe(o Observer) *Notifier {
 }
 
 func (n *Notifier) up(state bool) {
+	n.live.Store(state)
 	if n.obs != nil {
 		n.obs.ListenerUp(state)
 	}
+}
+
+// Up reports whether the LISTEN connection is established right now.
+//
+// Distinct from Ready, and the distinction is the entire point: Ready means
+// "established at least once" and stays satisfied across a drop and a
+// reconnect, because its job is to let a publisher avoid racing startup. This
+// reports the live state, which is what a health probe and a status badge need
+// — a listener that dropped is a fleet that has silently fallen back to
+// poll-interval latency, and reporting it as up would hide exactly the failure
+// worth surfacing.
+//
+// False before Run is ever called, and false after it returns. Both readings
+// are correct: in either case nothing is being pushed.
+func (n *Notifier) Up() bool {
+	return n.live.Load()
 }
 
 // Ready blocks until the listener is established or ctx is done.
@@ -106,7 +130,6 @@ func (n *Notifier) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		n.up(false)
 		if err != nil {
 			n.log.Warn("epoch listener dropped, reconnecting",
 				"error", err, "retryIn", backoff)
@@ -123,6 +146,12 @@ func (n *Notifier) Run(ctx context.Context) error {
 }
 
 func (n *Notifier) listen(ctx context.Context) error {
+	// The down transition is paired with the up transition here rather than in
+	// Run, so that no exit from this function can leave the reported state
+	// stale. Run used to own it and missed one: a cancelled context returns
+	// before the call, so after shutdown Up would have kept saying yes.
+	defer n.up(false)
+
 	conn, err := n.pool.Acquire(ctx)
 	if err != nil {
 		return err

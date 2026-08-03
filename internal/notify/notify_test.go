@@ -1,12 +1,17 @@
 package notify
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // The fan-out is the one piece of shared mutable state on the hot path: every
@@ -160,4 +165,127 @@ func (o *recordingObserver) states() []bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return append([]bool(nil), o.seen...)
+}
+
+// TestUpTracksTheObservedState is the cheap half of Up: it runs without a
+// database, so the property holds in a checkout where Postgres is absent.
+func TestUpTracksTheObservedState(t *testing.T) {
+	n := New(nil, nil)
+
+	if n.Up() {
+		t.Error("a notifier that has never listened reports push as up")
+	}
+	n.up(true)
+	if !n.Up() {
+		t.Error("Up did not follow the transition the Observer saw")
+	}
+	n.up(false)
+	if n.Up() {
+		t.Error("Up stayed true after the listener went down")
+	}
+}
+
+// The rest exercise the real LISTEN connection, because the bug they exist to
+// pin lives in listen's exit paths and cannot be reached by calling up()
+// directly. They need nothing but a reachable Postgres — LISTEN requires no
+// privilege and touches no table — so they connect with the admin DSN rather
+// than standing up the schema.
+
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+
+	dsn := os.Getenv("ORBIT_TEST_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:orbit@localhost:5433/orbit?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("postgres unavailable, skipping listener state tests: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Skipf("postgres unavailable, skipping listener state tests: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func discardLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestUpFollowsTheRealListener(t *testing.T) {
+	n := New(testPool(t), discardLog())
+
+	if n.Up() {
+		t.Fatal("Up was true before Run was ever called")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = n.Run(ctx)
+	}()
+
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readyCancel()
+	if err := n.Ready(readyCtx); err != nil {
+		cancel()
+		t.Fatalf("listener never established: %v", err)
+	}
+	if !n.Up() {
+		t.Error("LISTEN is established and Up says push is down")
+	}
+
+	// The regression this pins: Run returns on a cancelled context before it
+	// reaches the code that reported the listener down, so Up kept answering
+	// true for a notifier that had stopped. The pairing now lives in listen's
+	// defer, where no exit can skip it.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return on a cancelled context")
+	}
+	if n.Up() {
+		t.Error("Up still reports push as working after the notifier stopped.\n" +
+			"A health probe would say push is fine while every agent is polling.")
+	}
+}
+
+// TestReadyAndUpAnswerDifferentQuestions. If these two ever agree in every
+// state, one of them is redundant and the wrong one will get deleted. Ready is
+// "established at least once" — a startup race guard, deliberately sticky. Up is
+// "connected right now" — an operational signal. Cancellation is where they part.
+func TestReadyAndUpAnswerDifferentQuestions(t *testing.T) {
+	n := New(testPool(t), discardLog())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = n.Run(ctx)
+	}()
+
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readyCancel()
+	if err := n.Ready(readyCtx); err != nil {
+		cancel()
+		t.Fatalf("listener never established: %v", err)
+	}
+
+	cancel()
+	<-done
+
+	if err := n.Ready(context.Background()); err != nil {
+		t.Errorf("Ready stopped being satisfied after shutdown: %v", err)
+	}
+	if n.Up() {
+		t.Error("Up agreed with Ready after shutdown; then Up reports nothing new")
+	}
 }

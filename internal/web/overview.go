@@ -312,14 +312,16 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 
 // pushStatus reports the epoch push path's state.
 //
-// Configured-ness, plus the live watcher count, and NOT "is the LISTEN
-// connection up right now" — internal/notify exposes Ready(), which means
-// "established at least once" and stays true across a drop and a reconnect,
-// which is precisely the case this would need to distinguish. internal/api's
-// pushUp() works around it by asking the metrics collector; this surface has no
-// metrics dependency and should not grow one to answer a boolean. A
-// notify.Notifier.Up(), fed by the same transitions Observer already receives,
-// would let both stop working around it.
+// Three states, not two, and the third is the one worth being here for: a
+// notifier that is configured but whose LISTEN connection is down right now.
+// Nothing else on this page changes when that happens — epochs still advance,
+// convergence still climbs — so an operator watching a revocation land sees
+// only that it is taking far longer than it should, with no indication why.
+//
+// This used to report configured-ness alone, because notify only exposed
+// Ready(), which means "established at least once" and stays true across a drop
+// and a reconnect. Notifier.Up() reports the live state, so the down case is
+// now sayable.
 func (s *Server) pushStatus(networkID uuid.UUID) pushView {
 	if s.cfg.Notifier == nil {
 		return pushView{
@@ -327,6 +329,19 @@ func (s *Server) pushStatus(networkID uuid.UUID) pushView {
 			Detail: "Push is not enabled on this replica, so agents learn about changes " +
 				"on their next poll. Correct, but roughly an order of magnitude slower " +
 				"to converge — which is felt most while watching a revocation land.",
+		}
+	}
+	if !s.cfg.Notifier.Up() {
+		// Configured is deliberately left false: the watcher count would still
+		// be non-zero, since agents stay parked on a notifier that cannot hear
+		// anything, and printing "12 agents waiting for a change" next to a
+		// listener that will never deliver one reads as reassurance.
+		return pushView{
+			Badge: badgeWarn("push down"),
+			Detail: "Push is enabled but the Postgres notification listener is not " +
+				"connected, so every agent has silently fallen back to its poll " +
+				"interval. It reconnects on its own; if this persists, the control " +
+				"plane cannot hold a connection to the database.",
 		}
 	}
 	return pushView{

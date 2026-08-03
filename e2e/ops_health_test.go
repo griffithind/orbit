@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/nebulacfg"
+	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -50,6 +52,36 @@ func (h *harness) servePublicWithHealth(t *testing.T, nebulaPort int) *httptest.
 	mux := http.NewServeMux()
 	srv.EnrollRoutes(mux)
 	srv.AdminRoutes(mux)
+	srv.HealthRoutes(mux)
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// servePublicWithNotifier is servePublicWithHealth carrying a notifier, so
+// /readyz has something real to report on.
+func (h *harness) servePublicWithNotifier(t *testing.T, nebulaPort int, notifier *notify.Notifier) *httptest.Server {
+	t.Helper()
+
+	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := ca.NewRegistry(ca.FileSignerFactory)
+	t.Cleanup(func() { registry.Close() })
+
+	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+		Paths:      nebulacfg.DefaultPaths(),
+		ListenPort: nebulaPort,
+	})
+	// No Metrics, deliberately: that is the configuration in which the old
+	// implementation had nowhere to read the live state from and answered with
+	// configured-ness instead.
+	srv := api.New(h.store, svc, api.Config{DisableEnrollLimit: true, Notifier: notifier},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	mux := http.NewServeMux()
 	srv.HealthRoutes(mux)
 
 	ts := httptest.NewServer(mux)
@@ -286,5 +318,63 @@ func TestHealthReportsPushState(t *testing.T) {
 	if body.Status != "ok" {
 		t.Errorf("status = %q with push disabled; a deployment that turned push off "+
 			"deliberately must not read as faulty forever", body.Status)
+	}
+}
+
+// TestHealthReportsPushDownRatherThanConfigured. A notifier that exists but is
+// not connected is the case worth getting right, and the case the previous
+// implementation got wrong: it read the live state out of the metrics
+// collector, so a server built without metrics fell back to reporting push as
+// up because push was configured. Configured is not connected. An operator
+// staring at a revocation that will not land needs /readyz to say which.
+func TestHealthReportsPushDownRatherThanConfigured(t *testing.T) {
+	h := setup(t)
+	notifier := notify.New(h.store.Pool(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := h.servePublicWithNotifier(t, freeUDPPort(t), notifier)
+
+	// Run has not been called. The notifier is wired but deaf.
+	code, body := probe(t, ts.URL+"/readyz")
+	if code != http.StatusOK {
+		t.Fatalf("/readyz = %d", code)
+	}
+	if body.Push {
+		t.Fatal("push reported up on a notifier that has never connected.\n" +
+			"Every agent is on its poll interval and the health endpoint says fine.")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = notifier.Run(ctx) }()
+
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readyCancel()
+	if err := notifier.Ready(readyCtx); err != nil {
+		t.Fatalf("listener never established: %v", err)
+	}
+
+	// The snapshot is cached, so poll rather than assuming the next request
+	// recomputes it.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, body := probe(t, ts.URL+"/readyz"); body.Push {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("push never reported up on a connected listener")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// And back down when it stops, which is the transition a stuck "up" hides.
+	cancel()
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		if _, body := probe(t, ts.URL+"/readyz"); !body.Push {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("push still reported up after the notifier stopped")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

@@ -592,25 +592,19 @@ func (s *Server) probeHealth(ctx context.Context) healthSnapshot {
 }
 
 // pushUp reports whether the Postgres LISTEN connection is currently up.
+//
+// Nil notifier is false: push is not configured on this server at all, so every
+// agent talking to it is polling. That is the operational truth even when it is
+// the intended configuration.
+//
+// This used to route the question through s.cfg.Metrics, because the metrics
+// collector was the only place the live state was readable from Go — and so a
+// server built without metrics reported push as up on the strength of it being
+// configured, which is the one answer a health probe must never give. The state
+// now lives on the notifier, where it belongs, and the metrics collector is
+// back to being only a metrics collector.
 func (s *Server) pushUp() bool {
-	if s.cfg.Notifier == nil {
-		// Push is not configured on this server at all, so every agent talking
-		// to it is polling. Reported as false because that is the operational
-		// truth, even when it is the intended configuration.
-		return false
-	}
-	if s.cfg.Metrics != nil {
-		// The live state. notify.Notifier pushes every transition to its
-		// Observer, and *metrics.Metrics is that observer in orbitd, so this is
-		// the same signal orbit_epoch_listener_up alerts on.
-		return s.cfg.Metrics.PushUp()
-	}
-	// Without metrics there is no accessor for the current state: Notifier.Ready
-	// reports "established at least once" and stays true across a drop and
-	// reconnect, which is precisely the case this boolean exists to expose.
-	// Reporting configured-ness is the honest fallback; a Notifier.Up() bool in
-	// internal/notify, fed by the same transitions, would close the gap.
-	return true
+	return s.cfg.Notifier != nil && s.cfg.Notifier.Up()
 }
 
 //------------------------------------------------------------------------------
