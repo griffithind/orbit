@@ -51,6 +51,10 @@ type Embedded struct {
 	// counter is both simpler and exact.
 	generation uint64
 	running    bool
+
+	// lastExit is why nebula stopped on its own, if it did. Kept so a caller
+	// that finds the engine down can say WHY rather than only that it is.
+	lastExit error
 }
 
 var (
@@ -69,6 +73,16 @@ const StopGrace = 15 * time.Second
 
 func (e *Embedded) Describe() string { return "nebula (embedded)" }
 
+// logger is the one accessor, because a nil Log is legitimate — tests build
+// this struct directly — and a nil dereference inside a recovery path is the
+// worst place to find that out.
+func (e *Embedded) logger() *slog.Logger {
+	if e.Log == nil {
+		return discardLogger()
+	}
+	return e.Log
+}
+
 // Start brings nebula up. Safe to call when it is already running, which is a
 // no-op rather than a second instance.
 func (e *Embedded) Start(ctx context.Context) error {
@@ -82,10 +96,7 @@ func (e *Embedded) startLocked(_ context.Context) error {
 		return nil
 	}
 
-	log := e.Log
-	if log == nil {
-		log = discardLogger()
-	}
+	log := e.logger()
 	nlog := log.With("component", "nebula")
 
 	c := config.NewC(nlog)
@@ -107,8 +118,57 @@ func (e *Embedded) startLocked(_ context.Context) error {
 
 	e.c, e.ctrl, e.running = c, ctrl, true
 	e.generation++
-	log.Info("nebula started", "generation", e.generation, "config", e.ConfigArg)
+	e.lastExit = nil
+	gen := e.generation
+	log.Info("nebula started", "generation", gen, "config", e.ConfigArg)
+
+	// Notice if nebula stops on its own.
+	//
+	// Control.Wait returns when nebula has fully stopped, by Stop or by a fatal
+	// reader error. Without this the engine keeps reporting Running for a
+	// nebula that has died — and Status is what the apply path uses to decide
+	// whether a restart took, so it would confirm restarts that never happened
+	// and leave a host with no data plane and nothing saying so.
+	go func() {
+		err := ctrl.Wait()
+
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		// Only if this is still the instance we started. A deliberate Restart
+		// stops the old one and starts a new one, and the old one's Wait
+		// returning must not mark the new one down.
+		if e.generation != gen {
+			return
+		}
+		e.running, e.ctrl, e.c = false, nil, nil
+		e.lastExit = err
+		if err != nil {
+			log.Error("nebula stopped", "generation", gen, "error", err)
+		} else {
+			log.Warn("nebula stopped", "generation", gen)
+		}
+	}()
 	return nil
+}
+
+// Ensure starts nebula if it is not running, and reports whether it had to.
+//
+// This is what makes a host self-healing rather than merely well-configured. A
+// nebula that failed to start at boot — a bad generation, a device that was not
+// ready, a port briefly held by something else — would otherwise stay down
+// until a NEW generation happened to arrive from the control plane, which on a
+// quiet network could be days and on a correct one is never.
+func (e *Embedded) Ensure(ctx context.Context) (started bool, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.running {
+		return false, nil
+	}
+	if e.lastExit != nil {
+		e.logger().Warn("nebula is not running; starting it", "previousError", e.lastExit)
+	}
+	return true, e.startLocked(ctx)
 }
 
 // Reload re-reads the configuration file, which is what the agent has just
@@ -151,6 +211,16 @@ func (e *Embedded) stopLocked() {
 
 	ctrl := e.ctrl
 	e.ctrl, e.c, e.running = nil, nil, false
+	// Past the generation the watcher is guarding, so its Wait returning
+	// cannot mark a later instance down.
+	e.generation++
+
+	// running without a control is not a state startLocked can produce, but
+	// this runs during shutdown and inside a goroutine, where a nil dereference
+	// takes the whole process — every network on this host — with it.
+	if ctrl == nil {
+		return
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -164,9 +234,7 @@ func (e *Embedded) stopLocked() {
 		// that is being replaced, and blocking here would stop the agent from
 		// ever applying anything again — which is worse than leaking them until
 		// the process exits.
-		if e.Log != nil {
-			e.Log.Warn("nebula did not finish stopping; continuing", "waited", StopGrace)
-		}
+		e.logger().Warn("nebula did not finish stopping; continuing", "waited", StopGrace)
 	}
 }
 

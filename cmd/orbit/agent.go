@@ -301,32 +301,60 @@ func runCmd(args []string) error {
 	}
 
 	var wg sync.WaitGroup
-	started := 0
 	for _, dir := range dirs {
-		nl, err := newNetworkLoop(ctx, dir, c, *verifyURL, *reuseKey, log)
-		if err != nil {
-			// One network failing must not stop the others. A host on three
-			// networks losing all three because one directory is unreadable is
-			// the failure this whole layout exists to prevent.
-			log.Error("skipping network", "dir", dir, "error", err)
-			continue
-		}
-		started++
-
 		wg.Add(1)
-		go func(nl *networkLoop) {
+		go func(dir string) {
 			defer wg.Done()
-			defer func() { _ = nl.engine.Close() }()
-			nl.run(ctx, *interval, *once)
-		}(nl)
+			serveNetwork(ctx, dir, c, *verifyURL, *reuseKey, *interval, *once, log)
+		}(dir)
 	}
-	if started == 0 {
-		return fmt.Errorf("none of the %d network(s) under %s could be started", len(dirs), *root)
-	}
-	log.Info("agent running", "networks", started)
+	log.Info("agent running", "networks", len(dirs), "root", *root)
 
 	wg.Wait()
 	return nil
+}
+
+// setupBackoff bounds how fast a network that cannot be set up is retried.
+//
+// Retried at all, which it was not: a network whose state file was unreadable
+// at startup used to be skipped for the life of the process, so a transient
+// problem — a disk not yet mounted, a directory being written by an install
+// running concurrently — became permanent until somebody noticed and restarted
+// the agent.
+const (
+	setupBackoffMin = 5 * time.Second
+	setupBackoffMax = 5 * time.Minute
+)
+
+// serveNetwork keeps one network running for as long as the process does.
+//
+// Setup is retried rather than attempted once, and the poll loop below heals
+// nebula on every tick. Between them, the states a host can get stuck in are
+// the ones where the control plane itself has nothing to offer.
+func serveNetwork(ctx context.Context, dir string, c cert.Curve, verifyURL string, reuseKey bool, interval time.Duration, once bool, log *slog.Logger) {
+	backoff := setupBackoffMin
+	for {
+		nl, err := newNetworkLoop(ctx, dir, c, verifyURL, reuseKey, log)
+		if err == nil {
+			defer func() { _ = nl.engine.Close() }()
+			nl.run(ctx, interval, once)
+			return
+		}
+
+		// One network failing must not stop the others: a host on three
+		// networks losing all three because one directory is unreadable is
+		// what the per-network layout exists to prevent.
+		log.Error("network not ready; retrying", "dir", dir, "error", err, "in", backoff)
+		if once {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, setupBackoffMax)
+	}
 }
 
 // networksToRun resolves which networks this process serves.
@@ -431,6 +459,20 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 
 func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool) {
 	tick := func() {
+		// Nebula first. It may have failed to start at boot, or died since —
+		// a fatal reader error stops it without stopping this process — and
+		// without this it would stay down until a NEW generation happened to
+		// arrive, which on a settled network is never.
+		//
+		// Before the poll rather than after, so that a host whose data plane is
+		// down spends the tick getting it back rather than talking to a control
+		// plane it may not be able to reach without it.
+		if started, err := n.engine.Ensure(ctx); err != nil {
+			n.log.Error("nebula is down and will not start", "error", err)
+		} else if started {
+			n.log.Info("nebula restarted")
+		}
+
 		if err := n.loop.Tick(ctx); err != nil {
 			n.log.Warn("tick failed, keeping current configuration", "error", err)
 		}
