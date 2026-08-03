@@ -522,6 +522,14 @@ func bootstrap(args []string) error {
 		certTTL  = fs.Duration("cert-ttl", 24*time.Hour, "host certificate lifetime; this is the revocation SLA for a partitioned host")
 		keyPath  = fs.String("ca-key", "ca.key", "where to write the CA signing key; encrypted automatically when a passphrase is available")
 		groupsCS = fs.String("groups", "default", "comma separated groups the CA may delegate")
+
+		// Writing the unit is opt-in rather than the default: bootstrap is also
+		// run inside a container and from a laptop against a remote database,
+		// where writing to /etc/systemd would be wrong and surprising.
+		writeUnit   = fs.Bool("write-unit", false, "write /etc/orbit/orbit.env and a systemd unit filled in from this bootstrap")
+		overlayAddr = fs.String("overlay-addr", "", "the control plane's own overlay address, written into -write-unit's -mesh flag")
+		lighthouse  = fs.String("lighthouse", "", "public host:port to advertise as a lighthouse, written into -write-unit")
+		enrollURL   = fs.String("enroll-url", "", "public enroll URL handed to agents, written into -write-unit")
 	)
 	_ = fs.Parse(args)
 
@@ -704,6 +712,28 @@ encrypt"), mode 0600, and rotate on a schedule you have rehearsed —
 docs/design.md section 6.
 `, *netName, networkID, slug, roleID, *caName, fingerprint[:16], absKey,
 		token, token, networkID, prefix, networkID)
+
+	if *writeUnit {
+		if *enrollURL == "" {
+			return fmt.Errorf("-write-unit needs -enroll-url: it is the address agents " +
+				"are told to enroll against, and a unit with an empty one enrolls nobody")
+		}
+		if *overlayAddr == "" {
+			// Not fatal, and worth saying rather than silently producing a unit
+			// with no -mesh: without it the agent API does not exist, so hosts
+			// can enroll and nothing more.
+			fmt.Fprintln(os.Stderr,
+				"\nwarning: no -overlay-addr, so the unit joins no network. Agents will be "+
+					"able to enroll but not poll, renew, or receive revocations.")
+		}
+		plan := planControlPlane(networkID.String(), *dsn, os.Getenv("ORBIT_ENROLL_PEPPER"),
+			*enrollURL, *overlayAddr, *lighthouse, absKey)
+		if err := plan.write(); err != nil {
+			return err
+		}
+		fmt.Println()
+		fmt.Println(plan.describe())
+	}
 	return nil
 }
 
