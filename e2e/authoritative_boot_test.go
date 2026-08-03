@@ -126,8 +126,5 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nebula started but the service did not: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = svc.Close()
-		_ = svc.Wait()
-	})
+	stopNebulaOnCleanup(t, svc)
 }

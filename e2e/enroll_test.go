@@ -37,6 +37,7 @@ import (
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/db"
 	"github.com/griffithind/orbit/internal/enroll"
+	"github.com/griffithind/orbit/internal/mesh"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/store"
@@ -618,11 +619,44 @@ func bootNebula(t *testing.T, dir string, addr netip.Addr) (*nebulaNode, error) 
 	if err != nil {
 		return nil, fmt.Errorf("start nebula service: %w", err)
 	}
+	stopNebulaOnCleanup(t, svc)
+	return &nebulaNode{cfg: c, svc: svc, ctrl: ctrl, addr: addr}, nil
+}
+
+// stopNebulaOnCleanup tears an in-process nebula down, and gives up if it does
+// not finish.
+//
+// The bound is the point. service.Wait blocks until every nebula reader
+// goroutine has exited and the interface has released its construction token,
+// and a shutdown race that leaves one of them parked makes it block forever.
+// In a t.Cleanup that does not fail one test — it hangs the whole package until
+// the go test timeout, and every other test's result is lost with it. That is
+// exactly what happened: one stalled teardown produced
+// "FAIL github.com/griffithind/orbit/e2e 600.017s" with every other package ok,
+// on a runner slow enough to lose the race a developer's machine wins.
+//
+// Leaking goroutines into a test binary that is about to exit costs nothing.
+// Losing the whole suite's result costs everything.
+func stopNebulaOnCleanup(t *testing.T, svc *service.Service) {
+	t.Helper()
 	t.Cleanup(func() {
 		_ = svc.Close()
-		_ = svc.Wait()
+
+		done := make(chan struct{})
+		go func() {
+			_ = svc.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(mesh.ShutdownGrace):
+			// Not t.Error: nebula's shutdown is not what any of these tests are
+			// about, and failing an unrelated assertion on it would make the
+			// suite lie about which thing broke. Visible in -v, and the
+			// production path logs the same thing.
+			t.Logf("nebula did not finish shutting down within %s; continuing", mesh.ShutdownGrace)
+		}
 	})
-	return &nebulaNode{cfg: c, svc: svc, ctrl: ctrl, addr: addr}, nil
 }
 
 // startNebula is bootNebula for callers that treat a failure as fatal.

@@ -375,9 +375,42 @@ func (n *Node) AgentEndpoint(port int) string {
 	return fmt.Sprintf("http://%s:%d", n.cfg.Addr, port)
 }
 
+// ShutdownGrace bounds how long Close waits for nebula's goroutines to finish
+// after it has been told to stop.
+//
+// Bounded because Wait is a wait on somebody else's shutdown completing. It
+// blocks until every reader goroutine has exited AND the interface has released
+// its construction token, and if any one of them does not come back — a
+// blocking device read that never returns, a tunnel close that stalls — Wait
+// never returns either. An unbounded wait there makes a control plane that
+// cannot finish shutting down, which turns a restart into a SIGKILL and a clean
+// stop into an operational surprise.
+//
+// Ten seconds is past any legitimate teardown: closing tunnels is the slow part
+// and is proportional to hostmap size, which on a control plane is small. Past
+// that the process is exiting anyway, and leaked goroutines in a dying process
+// cost nothing.
+const ShutdownGrace = 10 * time.Second
+
+// Close stops nebula and waits, briefly, for it to finish.
+//
+// The error is Close's, not Wait's: failing to stop is worth reporting, while
+// taking too long to finish stopping is worth logging and moving past.
 func (n *Node) Close() error {
 	err := n.svc.Close()
-	_ = n.svc.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		_ = n.svc.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(ShutdownGrace):
+		n.log.Warn("nebula did not finish shutting down; continuing anyway",
+			"waited", ShutdownGrace, "network", n.cfg.NetworkID)
+	}
 	return err
 }
 
