@@ -32,15 +32,62 @@ const (
 	// claim the method works. Adding one back is an ALTER and a handler, the
 	// same work it always was.
 	MethodCode = "code"
+
+	// Config layouts. These mirror the CHECK constraints in
+	// migrations/0008_instance_resources.sql.
+	//
+	// ConfigModeAuthoritative renders one complete nebula.yml that nebula is
+	// pointed at directly. ConfigModeFragment renders config.d/50-orbit.yml into
+	// a directory nebula merges, which is the escape hatch for a host that
+	// genuinely carries operator-authored nebula configuration.
+	//
+	// The difference is not cosmetic and is why the mode is stored rather than
+	// inferred: nebula merges a config DIRECTORY with mergo.WithAppendSlice, so
+	// firewall rules across files CONCATENATE. In fragment mode Orbit can
+	// neither see nor remove a rule an operator wrote, so any policy it reports
+	// is a lower bound. In authoritative mode the rendered file is the whole
+	// policy. A caller has to be able to tell which of those it is being handed.
+	ConfigModeAuthoritative = "authoritative"
+	ConfigModeFragment      = "fragment"
 )
 
 type Network struct {
-	ID             uuid.UUID
-	Name           string
-	CIDRs          []netip.Prefix
-	CertVer        int16
-	Curve          string
-	CertTTL        time.Duration
+	ID uuid.UUID
+
+	// Slug is the immutable, globally unique, machine-safe identifier. It is a
+	// directory name on every managed host in the network
+	// (/var/lib/orbit/<slug>/) and the stem tun.dev is derived from, which is
+	// why the database refuses to let it change.
+	//
+	// A network is addressed by ID or by Slug and by nothing else: both are
+	// immutable, so automation holding either survives a rename.
+	Slug string
+
+	// Name is the display label. Mutable, unique, and deliberately NOT an
+	// addressing key — resolving by a mutable string is how a rename silently
+	// retargets a script.
+	Name string
+
+	CIDRs   []netip.Prefix
+	CertVer int16
+	Curve   string
+	CertTTL time.Duration
+
+	// ListenPort is the nebula UDP port hosts of this network use. nil means
+	// the control plane's configured default, which is what keeps a deployment
+	// that has never thought about ports working exactly as before.
+	//
+	// Per network rather than per host because the collision this can actually
+	// prevent is between two networks sharing a machine; see the migration.
+	ListenPort *int
+
+	// ConfigMode is the layout new hosts of this network inherit.
+	ConfigMode string
+
+	// Overrides are nebula settings Orbit does not model, merged into the
+	// rendered configuration beneath any per-host overrides. Stored as jsonb.
+	Overrides []byte
+
 	ConfigEpoch    int64
 	BlocklistEpoch int64
 	CreatedAt      time.Time
@@ -92,6 +139,36 @@ type Host struct {
 	// took effect.
 	AppliedConfigEpoch    int64
 	AppliedBlocklistEpoch int64
+
+	// ListenPort, TunDev, ConfigMode, and Overrides are this instance's
+	// resources. A zero value inherits the network's, and the network's zero
+	// value inherits the control plane's default — one rule at three levels, so
+	// a deployment that sets none behaves exactly as it did before they existed.
+	//
+	// They are per (host, network) because orbit.host already is: a machine on
+	// two networks holds two rows, and two nebula processes on one kernel cannot
+	// share a UDP port or a tun device.
+	ListenPort *int
+	TunDev     string
+	ConfigMode string
+	Overrides  []byte
+
+	// RestartRequiredEpoch names a generation this host must RESTART for rather
+	// than reload, and 0 means none ever has been.
+	//
+	// Nebula refuses a certificate reload whose networks changed (pki.go
+	// reloadCert), so after an address change the host installs the new
+	// certificate, nebula declines it, and the old one keeps running until the
+	// process restarts. Waiting does not help; that is what makes this different
+	// from every other thing an agent is told to catch up on.
+	RestartRequiredEpoch int64
+
+	// AddrChangedAt is when this host's address set last changed, or nil if it
+	// never has. Compared against the active certificate's issued_at to pull
+	// renewal forward, exactly as role.groups_changed_at is — the addresses are
+	// inside the signed certificate, and a host whose address moved is holding
+	// one that no longer authorises the packets it is sending.
+	AddrChangedAt *time.Time
 
 	LastSeenAt    *time.Time
 	NebulaVersion string

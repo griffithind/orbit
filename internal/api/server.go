@@ -1,8 +1,8 @@
-// Package api serves Orbit's three HTTP surfaces.
+// Package api serves Orbit's HTTP surfaces.
 //
-// They are separate because they have different threat models and different
-// exposure requirements, and conflating them is how a management API ends up
-// on the public internet:
+// Three of them are separate because they have different threat models and
+// different exposure requirements, and conflating them is how a management API
+// ends up on the public internet:
 //
 //	/enroll/v1  public, unauthenticated except for the enrollment credential
 //	/agent/v1   overlay only, identity derived from the source address
@@ -10,6 +10,9 @@
 //
 // Mount them on separate listeners in production. Handler() returns one mux for
 // development convenience, and says so.
+//
+// A fourth, /healthz and /readyz, is unauthenticated on purpose and is mounted
+// alongside whichever of the above a given listener serves. See HealthRoutes.
 package api
 
 import (
@@ -24,6 +27,9 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -32,8 +38,13 @@ import (
 	"github.com/griffithind/orbit/internal/metrics"
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/store"
+	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/wire"
 )
+
+// Version is the build, from internal/version so every binary reports the same
+// string. See that package for why it is not declared here.
+var Version = version.Version
 
 // AgentListener describes the nebula network a given agent listener serves.
 //
@@ -91,6 +102,12 @@ type Server struct {
 	cfg     Config
 	log     *slog.Logger
 	limiter *Limiter
+
+	// health is the last probe result, replaced wholesale rather than mutated
+	// so /healthz can read it without ever taking a lock. healthProbe serializes
+	// the probes themselves; see probeHealth.
+	health      atomic.Pointer[healthSnapshot]
+	healthProbe sync.Mutex
 }
 
 func New(st *store.Store, es *enroll.Service, cfg Config, log *slog.Logger) *Server {
@@ -98,6 +115,16 @@ func New(st *store.Store, es *enroll.Service, cfg Config, log *slog.Logger) *Ser
 	if !cfg.DisableEnrollLimit {
 		s.limiter = NewLimiter(cfg.EnrollLimit)
 	}
+
+	// Seed the health snapshot rather than leaving it nil, so a /healthz that
+	// arrives before any readiness probe answers something true instead of
+	// "database: false" on a process that has never had a problem.
+	//
+	// A non-nil store means store.Open completed, and Open pings before it
+	// returns — so Postgres was reachable a few milliseconds ago. The zero
+	// timestamp marks it as stale, so the first readiness probe replaces it with
+	// a measurement rather than trusting this indefinitely.
+	s.health.Store(&healthSnapshot{database: st != nil, push: s.pushUp()})
 	return s
 }
 
@@ -111,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	s.EnrollRoutes(mux)
 	s.AgentRoutes(mux)
 	s.AdminRoutes(mux)
+	s.HealthRoutes(mux)
 	// The same wrapping production gets, so development and tests exercise the
 	// middleware rather than a path that only exists here.
 	return Observe(s.log, mux)
@@ -119,6 +147,48 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) EnrollRoutes(mux *http.ServeMux) { register(mux, s.enrollRoutes()) }
 func (s *Server) AgentRoutes(mux *http.ServeMux)  { register(mux, s.agentRoutes()) }
 func (s *Server) AdminRoutes(mux *http.ServeMux)  { register(mux, s.adminRoutes()) }
+
+// HealthRoutes mounts /healthz and /readyz.
+//
+// Separate from the other three registrations, and called in addition to them,
+// because health is the one thing a listener needs regardless of what else it
+// serves. Two listeners want it, for different reasons:
+//
+//   - The public listener, because that is where a load balancer, a reverse
+//     proxy, and a systemd or Kubernetes probe actually look. Without this the
+//     only unauthenticated request on that port is a POST to /enroll/v1, so a
+//     proxy's health signal is a TCP connect — which stays green straight
+//     through a total database outage.
+//   - Each overlay listener, because it is a different socket with a different
+//     way to fail. A replica can serve the public port perfectly while its
+//     overlay listener is dead, and agents will keep round-robining onto it:
+//     they discover replicas from EnrollResponse.AgentEndpoints, which is built
+//     from control-plane heartbeats and says nothing about whether the agent
+//     port answers. The exposure cost is nil — the overlay is reachable only by
+//     certificate-verified mesh peers.
+//
+// Not on the metrics listener. It already answers this question in more detail,
+// it is bound to localhost by default, and a third place to ask invites probing
+// the wrong one.
+//
+// Deliberately unauthenticated, and it is worth being explicit about what that
+// gives away. A stranger who can reach the port already knows the process is
+// listening; what they gain is whether it can reach its database, whether push
+// is up, and the build string. The first two are inferable from behaviour
+// anyway — a degraded control plane fails requests — and the third is the real
+// disclosure, which is why HealthResponse carries a version and nothing else
+// about the deployment: no hostname, no network names, no counts.
+func (s *Server) HealthRoutes(mux *http.ServeMux) { register(mux, s.healthRoutes()) }
+
+func (s *Server) healthRoutes() []route {
+	h := func(pattern string, fn http.HandlerFunc) route {
+		return route{pattern: pattern, surface: surfaceHealth, h: fn}
+	}
+	return []route{
+		h("GET /healthz", s.handleLive),
+		h("GET /readyz", s.handleReady),
+	}
+}
 
 func (s *Server) enrollRoutes() []route {
 	e := func(pattern string, h http.HandlerFunc) route {
@@ -167,6 +237,12 @@ func (s *Server) adminRoutes() []route {
 		// the stronger outcome through a different verb.
 		a("DELETE /v1/hosts/{id}", "hosts:block", s.handleDeleteHost),
 		a("POST /v1/hosts/{id}/enrollment-code", "hosts:enroll", s.handleCreateEnrollCode),
+		// Address changes take hosts:write, but the endpoint gates them behind a
+		// typed acknowledgement of its own: an address change forces a nebula
+		// restart, which drops every tunnel on that host and, for a relay, the
+		// traffic it forwards for others.
+		a("POST /v1/hosts/{id}/addresses", "hosts:write", s.handleAddHostAddress),
+		a("DELETE /v1/hosts/{id}/addresses/{addr}", "hosts:write", s.handleRemoveHostAddress),
 		a("POST /v1/hosts/{id}/block", "hosts:block", s.handleBlockHost),
 		a("POST /v1/hosts/{id}/unblock", "hosts:block", s.handleUnblockHost),
 		a("GET /v1/networks/{id}/convergence", "networks:read", s.handleConvergence),
@@ -336,6 +412,17 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 			"nowAt", req.ConfigEpoch,
 			"quarantined", req.QuarantinedConfigEpoch)
 	}
+
+	// A host whose agent is healthy but whose nebula is not carries no traffic
+	// at all, and is invisible in every other channel: it polls, it reports an
+	// applied epoch, and convergence counts it as converged. The agent
+	// deliberately does not restart nebula — systemd owns that, and two
+	// supervisors racing one process turns a crash loop into two — so saying so
+	// here is the only way anyone finds out.
+	if req.DataPlaneDown {
+		s.log.Error("host reports nebula is not running; it is converged on paper and carrying no traffic",
+			"host", id.HostID, "configEpoch", req.ConfigEpoch)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -362,6 +449,168 @@ func (s *Server) handleAgentRenew(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cfg.Metrics.CertificateIssued("renew")
 	writeJSON(w, http.StatusOK, resp)
+}
+
+//------------------------------------------------------------------------------
+// Health surface
+//------------------------------------------------------------------------------
+
+// healthSnapshot is one observation of this process's dependencies.
+type healthSnapshot struct {
+	database bool
+	push     bool
+	// at is when the probe ran. The zero value is the seed from New, which is
+	// always treated as stale.
+	at time.Time
+}
+
+const (
+	// healthCacheTTL bounds how often a probe reaches Postgres.
+	//
+	// Probes are the one caller that scales with the number of things watching
+	// rather than with the work being done: a load balancer, a Kubernetes
+	// readinessProbe, and an operator's curl loop all hit the same endpoint on
+	// their own schedules, and an unbounded /readyz turns "add another monitor"
+	// into "add another connection to the database". Two seconds pins that at
+	// half a query per second per replica no matter how many watchers there
+	// are, while staying under the shortest probe interval anyone configures in
+	// practice — so a probe still sees a change on its very next poll, and the
+	// answer is never more than one cycle behind the truth.
+	healthCacheTTL = 2 * time.Second
+
+	// healthProbeTimeout caps the probe itself. Shorter than any sane probe
+	// timeout, because a readiness check that hangs is reported as a failure
+	// with no detail, whereas one that answers "database: false" says what is
+	// wrong.
+	healthProbeTimeout = 2 * time.Second
+)
+
+// handleLive answers liveness: is this process running.
+//
+// Always 200, and it touches nothing. That is the entire point. A liveness
+// probe that consulted Postgres would turn a single database outage into every
+// replica being killed and restarted at once — which cannot fix the database,
+// and which destroys the in-process state (parked watchers, the LISTEN
+// connection) that would otherwise let the fleet recover the instant Postgres
+// comes back. Restart is the wrong remedy for a dependency failure, so the
+// dependency does not appear in this status code.
+//
+// The body still reports what the readiness path last observed, because it is
+// free — no lock, no I/O — and because `curl /healthz` is what someone reaches
+// for first. Status says "degraded" when that observation was bad, so the
+// distinction is visible without the status code carrying it.
+func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, healthResponse(*s.health.Load()))
+}
+
+// handleReady answers readiness: can this process serve a useful request.
+//
+// It cannot, without Postgres — every endpoint here reads or writes it — so a
+// database that is unreachable is a 503 and the load balancer takes this
+// replica out. That is the opposite disposition from liveness, and deliberately
+// so: taking one replica out of rotation is cheap and reversible, restarting it
+// is neither.
+//
+// Push being down does not fail readiness. Agents fall back to polling, which
+// is slower but entirely correct, and a replica that still serves every request
+// should keep serving them. It shows in the body instead.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	snap := s.probeHealth(r.Context())
+
+	status := http.StatusOK
+	if !snap.database {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, healthResponse(snap))
+}
+
+func healthResponse(snap healthSnapshot) wire.HealthResponse {
+	// "degraded" tracks the database only. Push has its own field, and a
+	// deployment running with -no-push has deliberately turned it off — folding
+	// that into the top-line status would report a deliberate configuration as
+	// a fault forever.
+	status := "degraded"
+	if snap.database {
+		status = "ok"
+	}
+	out := wire.HealthResponse{
+		Status:   status,
+		Database: snap.database,
+		Push:     snap.push,
+		Version:  Version,
+	}
+	// Omitted entirely when at is the zero value, which is the seed New stores:
+	// that reading is inferred from store.Open having pinged, not measured, and
+	// time.Since on a zero time is 292 years — a number that looks like a bug
+	// and tells a reader nothing. Absent says "unverified" without pretending to
+	// a precision that does not exist.
+	if !snap.at.IsZero() {
+		age := time.Since(snap.at).Round(time.Millisecond).Seconds()
+		out.ObservedAgeSeconds = &age
+	}
+	return out
+}
+
+// probeHealth returns a recent observation, measuring a new one if the cached
+// one has aged out.
+func (s *Server) probeHealth(ctx context.Context) healthSnapshot {
+	if snap := s.health.Load(); time.Since(snap.at) < healthCacheTTL {
+		return *snap
+	}
+
+	s.healthProbe.Lock()
+	defer s.healthProbe.Unlock()
+	// Re-check under the lock. Probes queued behind one that has just finished
+	// must read its result rather than each running their own, which is the
+	// thundering herd the cache exists to prevent — and it arrives exactly when
+	// the database is slow and every probe is waiting.
+	if snap := s.health.Load(); time.Since(snap.at) < healthCacheTTL {
+		return *snap
+	}
+
+	snap := healthSnapshot{at: time.Now(), push: s.pushUp()}
+	if s.store != nil {
+		// Not the caller's context. This result is cached and served to
+		// everyone, so a client that hangs up mid-probe must not record
+		// "database unreachable" on behalf of the next hundred probes.
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthProbeTimeout)
+		defer cancel()
+
+		// A real round trip, not a pool statistic. A pool happily reports idle
+		// connections to a Postgres that has been promoted away, is out of
+		// disk, or is refusing new transactions; the only honest test of "can I
+		// serve a request" is to do what serving a request does.
+		err := s.store.Read(probeCtx, func(context.Context, *store.Tx) error { return nil })
+		snap.database = err == nil
+		if err != nil {
+			s.log.Warn("readiness probe could not reach the database", "error", err)
+		}
+	}
+
+	s.health.Store(&snap)
+	return snap
+}
+
+// pushUp reports whether the Postgres LISTEN connection is currently up.
+func (s *Server) pushUp() bool {
+	if s.cfg.Notifier == nil {
+		// Push is not configured on this server at all, so every agent talking
+		// to it is polling. Reported as false because that is the operational
+		// truth, even when it is the intended configuration.
+		return false
+	}
+	if s.cfg.Metrics != nil {
+		// The live state. notify.Notifier pushes every transition to its
+		// Observer, and *metrics.Metrics is that observer in orbitd, so this is
+		// the same signal orbit_epoch_listener_up alerts on.
+		return s.cfg.Metrics.PushUp()
+	}
+	// Without metrics there is no accessor for the current state: Notifier.Ready
+	// reports "established at least once" and stays true across a drop and
+	// reconnect, which is precisely the case this boolean exists to expose.
+	// Reporting configured-ness is the honest fallback; a Notifier.Up() bool in
+	// internal/notify, fed by the same transitions, would close the gap.
+	return true
 }
 
 //------------------------------------------------------------------------------

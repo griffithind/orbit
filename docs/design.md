@@ -147,7 +147,7 @@ a load balancer.
 
 The agent does not embed Nebula. It:
 
-1. writes `/etc/nebula/config.d/50-orbit.yml`, `orbit-host.crt`, `orbit-ca.crt`
+1. writes `/var/lib/orbit/<slug>/nebula.yml`, `host.crt`, `ca.crt`
 2. sends `SIGHUP`, or restarts the service when §1.5 requires it
 3. reports applied config version and observed tunnel health back to Orbit
 
@@ -652,21 +652,41 @@ because that decision can strand hosts that have not renewed.
 
 ## 7. Config generation
 
-Orbit owns exactly one file:
+Orbit owns one directory per network, and every file in it:
 
 ```
-/etc/nebula/config.d/
-  00-base.yml      # operator's; Orbit never reads or writes this
-  50-orbit.yml     # Orbit's; fully regenerated each epoch
+/var/lib/orbit/<slug>/
+  nebula.yml     # Orbit's; the COMPLETE config, fully regenerated each epoch
+  ca.crt         # trust bundle, every non-retired CA
+  host.crt       # rotated by renewal
+  host.key       # written once at enrollment, never sent
+  agent.json     # agent state: control plane URL, epochs, guard state
+  .previous/     # one generation, for rollback
 ```
 
-`50-orbit.yml` carries the managed keys:
+`nebula -config` points at the **file**, not the directory. `config.go:resolve`
+stats the path and loads a non-directory verbatim, so the merge described in §1.4
+does not happen at all — that is what makes Orbit authoritative over this host,
+and it is the precondition for any policy view claiming to be complete rather
+than a lower bound.
+
+A host that genuinely needs operator configuration alongside Orbit's runs the
+agent with `-mode fragment`, which writes `config.d/50-orbit.yml` and points
+nebula at the directory. Rules concatenate again, and Orbit can no longer
+guarantee any rule is absent.
+
+`/var/lib` rather than `/etc` because every file here is runtime state the agent
+writes and replaces. On an image-based system (bootc, OSTree, Fedora CoreOS)
+`/etc` is an overlay the image reconciles on upgrade, and state written there can
+be reverted underneath a running host.
+
+`nebula.yml` carries the managed keys:
 
 ```yaml
 pki:
-  ca: /etc/nebula/orbit-ca.crt          # full bundle, all trusted CAs
-  cert: /etc/nebula/orbit-host.crt
-  key: /etc/nebula/orbit-host.key       # written once at enrollment, never sent
+  ca: /var/lib/orbit/<slug>/ca.crt      # full bundle, all trusted CAs
+  cert: /var/lib/orbit/<slug>/host.crt
+  key: /var/lib/orbit/<slug>/host.key   # written once at enrollment, never sent
   blocklist: [ …fingerprints… ]
   disconnect_invalid: true              # always; see §1.3
 

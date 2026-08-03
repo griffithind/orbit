@@ -367,6 +367,22 @@ func (s *Service) State(ctx context.Context, hostID uuid.UUID, knownConfig, know
 		resp.ConfigEpoch = net.ConfigEpoch
 		resp.BlocklistEpoch = net.BlocklistEpoch
 
+		// The one generation an agent must not merely reload.
+		//
+		// Sent on every poll rather than only while the agent is behind, for the
+		// same reason the certificate window is: a steady-state poll returns no
+		// config, and an agent that missed the one response carrying this would
+		// never learn it needs to restart. It is a small integer and it is
+		// idempotent — the agent compares it against the generation it last
+		// restarted for — so repeating it costs nothing and losing it costs a
+		// host that quietly runs the wrong certificate forever.
+		resp.RestartRequiredEpoch = host.RestartRequiredEpoch
+		resp.ConfigMode = host.ConfigMode
+		if resp.ConfigMode == "" {
+			resp.ConfigMode = net.ConfigMode
+		}
+		resp.NetworkSlug = net.Slug
+
 		certs, err := tx.ActiveCertificates(ctx, host.ID)
 		if err != nil {
 			return err
@@ -403,6 +419,20 @@ func (s *Service) State(ctx context.Context, hostID uuid.UUID, knownConfig, know
 				if changed != nil && c.IssuedAt.Before(*changed) {
 					resp.RenewAfter = s.clock()
 				}
+			}
+
+			// The same mechanism for an address change, and a stronger reason
+			// for it.
+			//
+			// Stale groups are a policy that has not taken effect yet. A stale
+			// ADDRESS is a certificate that no longer authorises the packets the
+			// host is sending: nebula's firewall verifies on every packet that a
+			// peer's source address appears in its certificate, so once the
+			// address moves the host is not merely behind, it is off the mesh
+			// until it reissues. Waiting out half a certificate lifetime for
+			// that is downtime, not latency.
+			if host.AddrChangedAt != nil && c.IssuedAt.Before(*host.AddrChangedAt) {
+				resp.RenewAfter = s.clock()
 			}
 		}
 
@@ -511,6 +541,11 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		return nil, err
 	}
 
+	inst, err := s.instanceFor(host, net)
+	if err != nil {
+		return nil, err
+	}
+
 	return &wire.EnrollResponse{
 		HostID:         host.ID.String(),
 		HostName:       host.Name,
@@ -521,10 +556,77 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		BlocklistEpoch: net.BlocklistEpoch,
 		RenewAfter:     rec.RenewAt(),
 		NotAfter:       notAfter,
+
+		// Where this configuration goes, and what shape it is. The agent's very
+		// first write happens here, before any state poll, so an agent that had
+		// to guess would create one layout now and discover the other later —
+		// leaving both on disk with nebula reading whichever the unit file
+		// happens to name.
+		ConfigMode:  inst.mode,
+		NetworkSlug: net.Slug,
 	}, nil
 }
 
-// renderFor assembles a host's configuration fragment and trust bundle.
+// instance resolves the per-(host, network) settings a rendered configuration
+// needs.
+//
+// Three levels with one rule: the host's value, then the network's, then the
+// control plane's. A deployment that has set none behaves exactly as it did
+// before any of these columns existed, which is what keeps this from re-porting
+// a running fleet on the next poll.
+type instance struct {
+	mode       string
+	paths      nebulacfg.Paths
+	listenPort int
+	tunDev     string
+	overrides  map[string]any
+}
+
+func (s *Service) instanceFor(host *store.Host, net *store.Network) (instance, error) {
+	in := instance{mode: host.ConfigMode}
+	if in.mode == "" {
+		in.mode = net.ConfigMode
+	}
+	if in.mode == "" {
+		in.mode = store.ConfigModeAuthoritative
+	}
+
+	// Fragment mode keeps the deployment-wide paths it always had, because in
+	// that mode the operator owns the directory and Orbit is a guest in it.
+	// Authoritative mode owns a directory per network, which is what lets one
+	// machine run two nebulas without their config directories overlapping.
+	in.paths = s.cfg.Paths
+	if in.mode == store.ConfigModeAuthoritative {
+		in.paths = nebulacfg.PathsFor(net.Slug)
+	}
+
+	switch {
+	case host.ListenPort != nil:
+		in.listenPort = *host.ListenPort
+	case net.ListenPort != nil:
+		in.listenPort = *net.ListenPort
+	default:
+		in.listenPort = s.cfg.ListenPort
+	}
+
+	in.tunDev = host.TunDev
+	if in.tunDev == "" {
+		in.tunDev = nebulacfg.TunDevSuggestion(net.Slug)
+	}
+
+	netOv, err := nebulacfg.ParseOverrides(net.Overrides)
+	if err != nil {
+		return instance{}, err
+	}
+	hostOv, err := nebulacfg.ParseOverrides(host.Overrides)
+	if err != nil {
+		return instance{}, err
+	}
+	in.overrides = nebulacfg.MergeOverrides(netOv, hostOv)
+	return in, nil
+}
+
+// renderFor assembles a host's configuration and trust bundle.
 func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Host, net *store.Network) ([]byte, string, error) {
 	topology, err := tx.NetworkTopology(ctx, net.ID)
 	if err != nil {
@@ -570,18 +672,34 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Host,
 		}
 	}
 
+	inst, err := s.instanceFor(host, net)
+	if err != nil {
+		return nil, "", err
+	}
+
+	tunDisabled := host.IsLighthouse && !host.IsRelay
+	tunDev := inst.tunDev
+	if tunDisabled {
+		// Naming a device nebula will not create is noise at best and a
+		// misleading answer to "which interface is this host on" at worst.
+		tunDev = ""
+	}
+
 	fragment, err := nebulacfg.Render(nebulacfg.Input{
-		Paths:        s.cfg.Paths,
+		Mode:         inst.mode,
+		Paths:        inst.paths,
 		AmLighthouse: host.IsLighthouse,
 		AmRelay:      host.IsRelay,
 		Lighthouses:  lighthouses,
 		Relays:       relays,
 		Blocklist:    blocklist,
 		Firewall:     fw,
-		ListenPort:   s.cfg.ListenPort,
+		ListenPort:   inst.listenPort,
+		TunDev:       tunDev,
 		// A lighthouse with no tun device needs no root. Only safe when it is
 		// not also a relay, since relaying is a data-plane role.
-		TunDisabled: host.IsLighthouse && !host.IsRelay,
+		TunDisabled: tunDisabled,
+		Overrides:   inst.overrides,
 	})
 	if err != nil {
 		return nil, "", err
@@ -716,7 +834,10 @@ func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip
 			return err
 		}
 		if !net.ContainsAddr(addr) {
-			return fmt.Errorf("%s is not within network %s (%v)", addr, net.Name, net.CIDRs)
+			// Named by slug rather than by name: the slug is what an operator
+			// passes back on the command line, and it is the one that will still
+			// be correct after someone edits the display name.
+			return fmt.Errorf("%s is not within network %s (%v)", addr, net.Slug, net.CIDRs)
 		}
 
 		host, err := tx.FindHostByAddr(ctx, networkID, addr)

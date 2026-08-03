@@ -1,0 +1,72 @@
+# Nebula, on a host managed by Orbit. One instance PER NETWORK.
+#
+# Install to /etc/systemd/system/nebula@.service, then:
+#   systemctl enable --now nebula@prod
+#
+# %i is the network's slug. A host on two networks runs nebula@prod and
+# nebula@staging side by side: two directories, two configs, two tun devices,
+# two listen ports, and — because a network belongs to whoever runs its control
+# plane — possibly two control planes that never learn of each other. Nothing in
+# this unit is shared between instances, which is the point of templating it.
+#
+# The slug is restricted to [a-z0-9-], 1-32 characters, so it is safe both as a
+# path component and as a systemd instance name.
+#
+# ONE FILE, not a directory. Nebula merges every .yml in a config DIRECTORY with
+# mergo.WithAppendSlice, so list values — firewall rules above all — are
+# CONCATENATED across files: an operator rule and an Orbit rule would both
+# apply, and Orbit could neither see nor remove the operator's. Pointing nebula
+# at a single file removes the merge entirely (config.C.resolve stats the path;
+# a non-directory is loaded as exactly that file), which is what makes Orbit
+# authoritative over this host's configuration.
+#
+# If a host genuinely needs operator configuration alongside Orbit's, run the
+# agent with -mode fragment and change ExecStart to the directory:
+#   ExecStart=/usr/local/bin/nebula -config /var/lib/orbit/%i/config.d
+# and understand that Orbit can no longer guarantee any rule is absent.
+#
+# /var/lib rather than /etc because every file in there is written at runtime by
+# the agent: the configuration, the certificate, the key, and the previous
+# generation kept for rollback. On an image-based system (bootc, OSTree, Fedora
+# CoreOS) /usr is read-only and /etc is an overlay the image reconciles on
+# upgrade, so state written there can be reverted underneath a running host.
+# StateDirectory= below creates /var/lib/orbit/%i with the right ownership and
+# works on a read-only /usr.
+
+[Unit]
+Description=Nebula overlay network (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+
+ExecStart=/usr/local/bin/nebula -config /var/lib/orbit/%i/nebula.yml
+
+# SIGHUP is nebula's reload: hot, and tunnels survive it. The agent sends this
+# for a certificate renewal or a configuration change. It CANNOT be used for a
+# changed overlay address or curve — nebula refuses a reload whose certificate
+# Networks differ (pki.go reloadCerts) and keeps running the old certificate.
+# The agent detects that case, asks systemd for a restart of this instance
+# instead, and then verifies the main process actually changed.
+ExecReload=/bin/kill -HUP $MAINPID
+
+# systemd owns process liveness, not the agent. The agent observes this unit and
+# reports a nebula that will not start; it never restarts one that merely died,
+# because two things restarting the same process turns one crash loop into two.
+Restart=always
+RestartSec=5s
+
+# Needs CAP_NET_ADMIN for the tun device, and nothing else.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Creates and owns /var/lib/orbit/%i, and implies write access to it. Shared
+# with orbit-agent@%i.service, which declares exactly the same directory.
+StateDirectory=orbit/%i
+
+[Install]
+WantedBy=multi-user.target

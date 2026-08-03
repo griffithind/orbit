@@ -1,8 +1,33 @@
-// Package nebulacfg renders the configuration fragment Orbit owns on a managed
+// Package nebulacfg renders the nebula configuration Orbit owns on a managed
 // host.
 //
-// Orbit writes exactly one file, /var/lib/nebula/config.d/50-orbit.yml, and
-// never touches the operator's own configuration.
+// TWO MODES, and the difference is about honesty rather than layout.
+//
+// ModeFragment is the original: Orbit writes /var/lib/nebula/config.d/50-orbit.yml
+// into a directory and never touches the operator's own files. Nebula merges
+// every .yml in a config DIRECTORY with mergo.WithAppendSlice, which means list
+// keys — most importantly firewall rules — are CONCATENATED across files. Orbit
+// therefore cannot see, cannot remove, and cannot report a rule an operator
+// wrote in another file. Any policy Orbit states about such a host is a lower
+// bound presented as an answer, which is tolerable while a human reads it and
+// not tolerable the moment anything computes on it.
+//
+// ModeAuthoritative writes ONE COMPLETE FILE and nebula is pointed at that file
+// rather than at a directory. That is not a nebula feature Orbit is bending:
+// config.C.resolve stats the path it is given and, when it is not a directory,
+// loads exactly that one file. There is no merge, so there is no second source
+// of rules, and what Orbit reports about the host's policy is the whole of it.
+//
+// Authoritative mode is also what makes one machine on two networks work. Each
+// network gets its own directory, its own complete file, its own tun.dev and its
+// own listen.port, so two nebula processes coexist without either one's config
+// directory bleeding into the other's.
+//
+// Nothing is deployed, so new hosts default to authoritative. Fragment stays
+// supported as the escape hatch for a host that genuinely carries
+// operator-authored nebula configuration, and the mode is stored on the host
+// rather than inferred from where a file happens to sit — a caller has to be
+// able to tell which of the two claims above it is being handed.
 //
 // /var/lib, not /etc, and the distinction is not cosmetic. Everything Orbit
 // writes on a managed host — the certificate, the private key, the rendered
@@ -36,29 +61,39 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path"
 	"sort"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
 
-// Paths locates the files the agent manages alongside the fragment. They are
-// absolute paths on the managed host, not on the control plane.
+// Render modes. These mirror store.ConfigMode* and the CHECK constraint in
+// migrations/0008_instance_resources.sql.
+const (
+	ModeAuthoritative = "authoritative"
+	ModeFragment      = "fragment"
+)
+
+// Paths locates the files the agent manages alongside the configuration. They
+// are absolute paths on the managed host, not on the control plane.
 type Paths struct {
 	CA   string // trust bundle, every non-retired CA
 	Cert string // this host's certificate
 	Key  string // this host's private key; written once at enrollment
 }
 
-// DefaultDir is where the agent keeps everything it owns on a managed host.
+// DefaultDir is where the agent keeps everything it owns on a managed host in
+// FRAGMENT mode.
 //
 // Under /var/lib so an image-based system leaves it alone; see the package
 // comment. systemd's StateDirectory=nebula creates exactly this path with the
 // right ownership and is the idiomatic way to get it.
 const DefaultDir = "/var/lib/nebula"
 
-// DefaultPaths are the conventional locations. The agent owns these files
-// entirely; the operator's own pki.* keys, if any, are overridden by ours
-// because 50-orbit.yml sorts after a conventional 00-base.yml.
+// DefaultPaths are the conventional fragment-mode locations. The agent owns
+// these files entirely; the operator's own pki.* keys, if any, are overridden by
+// ours because 50-orbit.yml sorts after a conventional 00-base.yml.
 //
 // The agent rewrites these to match its own -dir on receipt, so a control plane
 // rendering one layout and an agent running another is not a mismatch — see
@@ -71,6 +106,91 @@ func DefaultPaths() Paths {
 	}
 }
 
+// The authoritative-mode layout, one directory per network:
+//
+//	/var/lib/orbit/<slug>/
+//	    nebula.yml     the COMPLETE config; nebula -config points at this file
+//	    host.key       0600, written once at enrollment
+//	    host.crt       rotated by renewal
+//	    ca.crt         trust bundle, every non-retired CA
+//	    agent.json     agent state
+//	    .previous/     one generation, kept for rollback
+//
+// Keyed by SLUG rather than by network id, and that is the reason the slug had
+// to become immutable: this path is written to disk on every managed host in the
+// network, and a value that could change would not rename the directory, it
+// would strand it and make every agent create a second one alongside.
+//
+// The private key stays a SEPARATE 0600 file rather than being inlined in the
+// YAML. Nebula does accept inline PEM for pki.ca, pki.cert and pki.key — it
+// checks the value for "-----BEGIN" — and inlining would make the whole
+// configuration one atomic artifact, which is genuinely attractive. It is not
+// worth it: every routine firewall push would then rewrite a file containing the
+// host's private key, so the most frequent write on the box becomes the most
+// dangerous one, and a botched write, a stray backup, or a log of the config
+// body leaks the key. Separate files mean the key is written exactly once, at
+// enrollment.
+const (
+	// AuthoritativeRoot is the parent of the per-network directories.
+	AuthoritativeRoot = "/var/lib/orbit"
+
+	// ConfigFileName is the complete configuration nebula is pointed at.
+	ConfigFileName = "nebula.yml"
+)
+
+// DirFor is a network's directory on a managed host.
+func DirFor(slug string) string { return path.Join(AuthoritativeRoot, slug) }
+
+// ConfigPathFor is the file nebula's -config flag names.
+func ConfigPathFor(slug string) string { return path.Join(DirFor(slug), ConfigFileName) }
+
+// PathsFor are the authoritative-mode material locations for a network.
+func PathsFor(slug string) Paths {
+	dir := DirFor(slug)
+	return Paths{
+		CA:   path.Join(dir, "ca.crt"),
+		Cert: path.Join(dir, "host.crt"),
+		Key:  path.Join(dir, "host.key"),
+	}
+}
+
+// TunDevMaxLen is the longest interface name Linux will actually keep.
+//
+// overlay/tun_linux.go copies the configured name into a [16]byte with a bare
+// copy() and returns no error, so the sixteenth byte onward is discarded in
+// silence — and two names sharing the first fifteen characters become ONE
+// device. That failure reports itself as two hosts that are both unreachable,
+// with nothing anywhere naming the cause.
+const TunDevMaxLen = 15
+
+// TunDevSuggestion derives an interface name from a network slug.
+//
+// A suggestion: macOS requires utun[0-9]+ and warns "ignoring" for anything
+// else, so the agent overrides this where the platform forbids it. What matters
+// on the platform that DOES accept it is that two networks never derive the same
+// name.
+//
+// Plain truncation would not give that. Slugs are unique, but their first
+// fifteen characters are not — "production-cluster-eu" and
+// "production-cluster-us" truncate to the same device — so the long case keeps
+// ten characters of the slug for legibility and spends the remaining four on a
+// hash of the whole thing. Deterministic, because the name has to be the same on
+// every render or the agent sees a change on every poll.
+func TunDevSuggestion(slug string) string {
+	if len(slug) <= TunDevMaxLen {
+		return slug
+	}
+	// FNV-1a, inline: a non-cryptographic hash is exactly right here (this is a
+	// collision-avoidance tiebreak, not a security boundary) and it avoids
+	// importing a hash package for four hex digits.
+	var h uint32 = 2166136261
+	for i := 0; i < len(slug); i++ {
+		h ^= uint32(slug[i])
+		h *= 16777619
+	}
+	return fmt.Sprintf("%s-%04x", strings.TrimRight(slug[:10], "-"), h&0xffff)
+}
+
 // Lighthouse is a lighthouse a host should know about.
 type Lighthouse struct {
 	// VpnAddr is the lighthouse's overlay address.
@@ -80,8 +200,12 @@ type Lighthouse struct {
 	StaticAddrs []string
 }
 
-// Input is everything needed to render a host's fragment.
+// Input is everything needed to render a host's configuration.
 type Input struct {
+	// Mode selects the layout. Empty means ModeAuthoritative, which is the
+	// default for new hosts.
+	Mode string
+
 	Paths Paths
 
 	// AmLighthouse and AmRelay come from the host record.
@@ -113,6 +237,39 @@ type Input struct {
 
 	// TunDisabled produces a lighthouse that needs no tun device and no root.
 	TunDisabled bool
+
+	// TunDev is the interface name, allocated per (host, network) so that two
+	// nebula processes on one machine do not fight over one device.
+	//
+	// A SUGGESTION as far as the host is concerned, and the platforms are why.
+	// Linux copies this into a [16]byte with a bare copy() and no error, so
+	// anything over 15 characters is silently truncated and two long names
+	// collide into one device. macOS requires utun[0-9]+, warns "ignoring" for
+	// anything else, and lets the kernel choose. Orbit renders the field because
+	// the value has to come from somewhere the two networks can differ; the
+	// agent overrides it where the platform forbids it.
+	//
+	// Empty omits the key, leaving nebula's own default.
+	TunDev string
+
+	// TunMTU is the overlay MTU. Zero omits the key.
+	TunMTU int
+
+	// LighthouseInterval is how often a host reports to its lighthouses, in
+	// seconds. Zero omits the key.
+	LighthouseInterval int
+
+	// LogLevel and LogFormat are emitted in authoritative mode only. In fragment
+	// mode they are deliberately absent: 50-orbit.yml sorts after a conventional
+	// 00-base.yml, so a scalar Orbit emits WINS, and emitting a log level there
+	// would silently overwrite the operator's.
+	LogLevel  string
+	LogFormat string
+
+	// Overrides are nebula settings Orbit does not model, merged last.
+	//
+	// Refused for the keys Orbit owns; see ValidateOverrides for which and why.
+	Overrides map[string]any
 }
 
 // Firewall mirrors nebula's firewall configuration. Rules are appended to
@@ -193,6 +350,9 @@ type pkiSection struct {
 type lighthouseSection struct {
 	AmLighthouse bool     `yaml:"am_lighthouse"`
 	Hosts        []string `yaml:"hosts"`
+	// Interval is omitted in fragment mode so nebula's own default applies and
+	// an operator's 00-base.yml is not overridden by file order.
+	Interval int `yaml:"interval,omitempty"`
 }
 
 type listenSection struct {
@@ -213,6 +373,15 @@ type relaySection struct {
 
 type tunSection struct {
 	Disabled bool `yaml:"disabled"`
+	// Dev and MTU are omitted when unset so nebula's defaults apply. Dev is a
+	// suggestion the agent may override; see Input.TunDev.
+	Dev string `yaml:"dev,omitempty"`
+	MTU int    `yaml:"mtu,omitempty"`
+}
+
+type loggingSection struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
 }
 
 type document struct {
@@ -223,7 +392,9 @@ type document struct {
 	Punchy        punchySection     `yaml:"punchy"`
 	Relay         relaySection      `yaml:"relay"`
 	Tun           tunSection        `yaml:"tun"`
-	Firewall      *Firewall         `yaml:"firewall"`
+	// Logging is authoritative-mode only; nil omits the section entirely.
+	Logging  *loggingSection `yaml:"logging,omitempty"`
+	Firewall *Firewall       `yaml:"firewall"`
 }
 
 // staticHostMap marshals with sorted keys. Go map iteration order is random,
@@ -257,7 +428,7 @@ func (m staticHostMap) MarshalYAML() (any, error) {
 	return node, nil
 }
 
-const header = `# Managed by Orbit. Do not edit.
+const fragmentHeader = `# Managed by Orbit. Do not edit.
 #
 # This file is regenerated on every configuration change and overwritten
 # without warning. Put local settings in another file in this directory
@@ -267,15 +438,69 @@ const header = `# Managed by Orbit. Do not edit.
 # them, so firewall rules here are added to yours, not substituted for them.
 `
 
-// Render produces the managed fragment.
+const authoritativeHeader = `# Managed by Orbit. Do not edit.
+#
+# This is the COMPLETE nebula configuration for this network. Nebula is
+# pointed at this file, not at a directory, so nothing else is merged in:
+# what is here is everything that applies, and the firewall rules below are
+# the whole policy rather than an addition to somebody else's.
+#
+# It is regenerated on every configuration change and overwritten without
+# warning. Settings Orbit does not model are set through the control plane's
+# per-host overrides, which are merged into this file when it is rendered.
+`
+
+// Defaults for authoritative mode.
+//
+// These matter more than defaults usually do: in authoritative mode there is no
+// second file, so whatever an operator would have put in 00-base.yml either
+// appears here or does not appear at all. They are deliberately nebula's own
+// defaults, stated explicitly rather than left implicit — the value of writing
+// them down is that this file is the documentation of what the host is running,
+// and a key that is absent forces a reader to know nebula's source to answer
+// "what MTU is this host using".
+//
+// Authoritative does not mean Orbit restates every nebula default; it means
+// Orbit is the only FILE. Keys neither set here nor overridden still fall back
+// to nebula's built-ins, which is correct and is what keeps this list short
+// enough to review.
+const (
+	defaultLighthouseInterval = 60     // seconds; nebula's own default
+	defaultTunMTU             = 1300   // nebula's own default
+	defaultLogLevel           = "info" // the level an operator changes most often
+	defaultLogFormat          = "text"
+)
+
+// Render produces the managed configuration.
 func Render(in Input) ([]byte, error) {
 	if in.Paths.CA == "" || in.Paths.Cert == "" || in.Paths.Key == "" {
 		return nil, fmt.Errorf("incomplete paths: %+v", in.Paths)
+	}
+	if in.Mode == "" {
+		in.Mode = ModeAuthoritative
+	}
+	if in.Mode != ModeAuthoritative && in.Mode != ModeFragment {
+		return nil, fmt.Errorf("unknown config mode %q: want %q or %q",
+			in.Mode, ModeAuthoritative, ModeFragment)
 	}
 	if in.ListenHost == "" {
 		// "::" listens on both families where the platform supports it, which
 		// is what a v2-certificate mesh needs.
 		in.ListenHost = "::"
+	}
+	if in.Mode == ModeAuthoritative {
+		if in.LighthouseInterval == 0 {
+			in.LighthouseInterval = defaultLighthouseInterval
+		}
+		if in.TunMTU == 0 {
+			in.TunMTU = defaultTunMTU
+		}
+		if in.LogLevel == "" {
+			in.LogLevel = defaultLogLevel
+		}
+		if in.LogFormat == "" {
+			in.LogFormat = defaultLogFormat
+		}
 	}
 
 	fw := in.Firewall
@@ -332,6 +557,7 @@ func Render(in Input) ([]byte, error) {
 		Lighthouse: lighthouseSection{
 			AmLighthouse: in.AmLighthouse,
 			Hosts:        lhHosts,
+			Interval:     in.LighthouseInterval,
 		},
 		Listen: listenSection{Host: in.ListenHost, Port: in.ListenPort},
 		Punchy: punchySection{
@@ -346,16 +572,44 @@ func Render(in Input) ([]byte, error) {
 			UseRelays: !in.AmRelay,
 			Relays:    relays,
 		},
-		Tun:      tunSection{Disabled: in.TunDisabled},
+		Tun: tunSection{
+			Disabled: in.TunDisabled,
+			Dev:      in.TunDev,
+			MTU:      in.TunMTU,
+		},
 		Firewall: fw,
 	}
+	if in.LogLevel != "" || in.LogFormat != "" {
+		doc.Logging = &loggingSection{Level: in.LogLevel, Format: in.LogFormat}
+	}
 
-	var out []byte
-	out = append(out, header...)
+	// Marshal through a node tree rather than straight to bytes, so overrides
+	// can be merged into the structure instead of concatenated after it. The
+	// tree preserves the struct's field order, and every value the merge adds is
+	// emitted with sorted keys, so the output stays byte-identical for identical
+	// inputs — which is the property the agent's "has anything changed?" hash
+	// depends on.
+	var root yaml.Node
+	if err := root.Encode(doc); err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	if len(in.Overrides) > 0 {
+		if err := ValidateOverrides(in.Overrides); err != nil {
+			return nil, err
+		}
+		if err := applyOverrides(&root, in.Overrides); err != nil {
+			return nil, err
+		}
+	}
 
-	body, err := yaml.Marshal(doc)
+	body, err := yaml.Marshal(&root)
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	return append(out, body...), nil
+
+	header := authoritativeHeader
+	if in.Mode == ModeFragment {
+		header = fragmentHeader
+	}
+	return append([]byte(header), body...), nil
 }

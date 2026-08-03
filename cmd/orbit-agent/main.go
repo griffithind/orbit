@@ -1,9 +1,30 @@
-// Command orbit-agent enrolls a host and keeps its nebula configuration current.
+// Command orbit-agent enrolls a host into ONE network and keeps its nebula
+// configuration current.
 //
-// It supervises the stock nebula binary: it writes config.d/50-orbit.yml and
-// the certificate material, then signals a reload. It never starts, stops, or
-// embeds nebula itself, so the operator keeps control of the process and an
-// agent failure cannot take down the data plane.
+// One agent process per network. Everything the agent owns for that network
+// lives in one per-network directory — /var/lib/orbit/<slug> by convention —
+// and a host joined to two networks runs two agents over two directories with
+// nothing shared. See internal/agent/layout.go.
+//
+// It supervises the stock nebula binary: it writes the configuration and the
+// certificate material, then signals a reload, or restarts nebula and verifies
+// the restart took when the change is one nebula cannot hot-load. It never
+// embeds nebula, and it never restarts nebula merely because the process died —
+// the service manager owns that — so an agent failure cannot take down the data
+// plane.
+//
+// Why -dir and not -network:
+//
+// The directory is the single knob, and it is total: every path the agent
+// touches is under it. Deriving the directory from a slug and a compiled-in
+// root would put a filesystem policy inside the binary, where a test, a
+// container, a second stack on one box, or a distribution with different
+// conventions cannot change it — and the e2e suite alone enrolls into a
+// temporary directory hundreds of times. systemd's StateDirectory=orbit/%i
+// already creates the per-network directory with the right ownership, so the
+// unit file states the layout once and the flag agrees with it by construction.
+// -network below is a convenience that expands to the default root; it never
+// becomes a second source of truth.
 package main
 
 import (
@@ -14,16 +35,61 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
-	"github.com/griffithind/orbit/internal/nebulacfg"
 )
 
 const version = "0.1.0"
+
+// dirFlags registers the -dir/-network pair shared by every subcommand.
+//
+// Exactly one of them decides the directory. Accepting both would create two
+// ways to spell the same thing that can disagree, which on this particular knob
+// means an agent renewing certificates into a directory nebula is not reading.
+type dirFlags struct {
+	dir     *string
+	network *string
+	mode    *string
+}
+
+func addDirFlags(fs *flag.FlagSet) *dirFlags {
+	return &dirFlags{
+		dir:     fs.String("dir", "", "per-network directory the agent owns: config, certificate, key, state, rollback copy (default "+agent.DefaultRoot+"/<network>)"),
+		network: fs.String("network", "", "network slug; shorthand for -dir "+agent.DefaultRoot+"/<slug>"),
+		mode: fs.String("mode", "authoritative",
+			`"authoritative" writes one complete nebula.yml that nebula is pointed at directly; `+
+				`"fragment" writes config.d/50-orbit.yml for nebula to merge with operator files`),
+	}
+}
+
+func (d *dirFlags) layout() (agent.Layout, error) {
+	mode, err := agent.ParseConfigMode(*d.mode)
+	if err != nil {
+		return agent.Layout{}, err
+	}
+	switch {
+	case *d.dir != "" && *d.network != "":
+		// Only an error when they disagree: a unit that passes both for
+		// readability is fine, one that passes two different things is not.
+		if filepath.Clean(*d.dir) != agent.DirFor(*d.network) {
+			return agent.Layout{}, fmt.Errorf("-dir %q and -network %q disagree; pass one or the other", *d.dir, *d.network)
+		}
+	case *d.network != "":
+		if err := agent.ValidateNetwork(*d.network); err != nil {
+			return agent.Layout{}, err
+		}
+		*d.dir = agent.DirFor(*d.network)
+	case *d.dir == "":
+		return agent.Layout{}, errors.New("one of -dir or -network is required; " +
+			"an agent manages exactly one network and has no default")
+	}
+	return agent.LayoutFor(filepath.Clean(*d.dir), mode), nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -60,8 +126,19 @@ func usage() {
   run      poll for updates and apply them
   recover  re-obtain a certificate after this host's expired while offline
 
+Every command manages exactly ONE network and needs -dir (or -network, which is
+shorthand for `+agent.DefaultRoot+`/<slug>). A host on two networks runs two
+agents over two directories.
+
 Run "orbit-agent <command> -h" for flags.
 `)
+}
+
+func describeSupervisor(s agent.Supervisor) string {
+	if s == nil {
+		return "none"
+	}
+	return s.Describe()
 }
 
 func newLogger() *slog.Logger {
@@ -77,11 +154,17 @@ func enrollCmd(args []string) error {
 	var (
 		url    = fs.String("url", "", "control plane base URL")
 		code   = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-		dir    = fs.String("dir", nebulacfg.DefaultDir, "directory the agent owns: certificate, key, rendered config, rollback copy")
 		reload = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty for none`)
 		curve  = fs.String("curve", "CURVE25519", "key curve; must match the network")
 	)
+	df := addDirFlags(fs)
 	_ = fs.Parse(args)
+
+	layout, err := df.layout()
+	if err != nil {
+		return err
+	}
+	dir := &layout.Dir
 
 	if *code == "" {
 		*code = os.Getenv("ORBIT_ENROLL_CODE")
@@ -119,7 +202,7 @@ func enrollCmd(args []string) error {
 	}
 
 	applier := &agent.Applier{
-		Layout:   agent.DefaultLayout(*dir),
+		Layout:   layout,
 		Reloader: agent.ParseReloader(*reload),
 		Log:      log,
 	}
@@ -128,7 +211,7 @@ func enrollCmd(args []string) error {
 	}
 
 	log.Info("enrolled",
-		"host", resp.HostName, "hostId", resp.HostID,
+		"host", resp.HostName, "hostId", resp.HostID, "layout", layout.Describe(),
 		"configEpoch", resp.ConfigEpoch, "renewAfter", resp.RenewAfter)
 
 	if len(resp.AgentEndpoints) > 0 {
@@ -159,22 +242,29 @@ func enrollCmd(args []string) error {
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var (
-		dirFlag   = fs.String("dir", nebulacfg.DefaultDir, "directory the agent owns: certificate, key, rendered config, rollback copy")
-		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
-		restart   = fs.String("restart", "", "how to restart nebula; required to apply a changed overlay address")
+		reload  = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
+		restart = fs.String("restart", "",
+			`how to restart nebula: "unit:nebula@<network>", a command, or empty. `+
+				`Required to apply a changed overlay address, and the only way the agent can `+
+				`tell whether nebula is running at all`)
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		interval  = fs.Duration("interval", time.Minute, "poll interval")
 		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
 		reuseKey  = fs.Bool("reuse-key", false, "keep the existing private key across renewals (for hardware-backed keys)")
 		once      = fs.Bool("once", false, "run one iteration and exit")
 	)
+	df := addDirFlags(fs)
 	_ = fs.Parse(args)
 
 	log := newLogger()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	st, err := agent.ReadState(*dirFlag)
+	layout, err := df.layout()
+	if err != nil {
+		return err
+	}
+	st, err := agent.ReadState(layout.Dir)
 	if err != nil {
 		return fmt.Errorf("read agent state (has this host enrolled?): %w", err)
 	}
@@ -183,14 +273,22 @@ func runCmd(args []string) error {
 		return err
 	}
 
-	layout := agent.DefaultLayout(*dirFlag)
 	applier := &agent.Applier{
 		Layout:   layout,
 		Reloader: agent.ParseReloader(*reload),
 		Log:      log,
 	}
-	if *restart != "" {
-		applier.Restarter = agent.ParseReloader(*restart)
+	// The pidfile comes from -reload rather than a flag of its own: a host that
+	// reloads by pidfile has exactly one, and naming it twice is one more thing
+	// to get out of step.
+	applier.Supervisor = agent.ParseSupervisor(*restart, agent.PidFileFromReloadSpec(*reload))
+	if applier.Supervisor == nil {
+		// Two distinct losses, both silent, so name both. Without a supervisor
+		// an address change is refused outright rather than applied, and a
+		// nebula that is not running is invisible to this host and to the
+		// control plane.
+		log.Warn("no -restart configured: a changed overlay address will be REFUSED rather " +
+			"than applied, and the agent cannot tell whether nebula is running")
 	}
 	if *verifyURL != "" {
 		applier.Verifier = agent.NewReachabilityVerifier(*verifyURL)
@@ -215,12 +313,21 @@ func runCmd(args []string) error {
 	if nb, na, err := loop.CurrentWindow(); err == nil {
 		log.Info("agent started",
 			"host", st.HostID,
+			"network", layout.Network,
+			"layout", layout.Describe(),
 			"controlPlane", st.ControlURL(),
 			"replicas", len(st.AgentURLs),
 			"notAfter", na,
 			"renewAt", loop.Policy.RenewAt(nb, na, st.HostID),
-			"reload", applier.Reloader.Describe())
+			"reload", applier.Reloader.Describe(),
+			"restart", describeSupervisor(applier.Supervisor))
 	}
+
+	// A host on several networks renders listen.port and tun.dev per network,
+	// and no control plane can see what another one chose. Say so once at
+	// startup rather than leaving it as an intermittent bind failure inside
+	// nebula's logs.
+	agent.WarnInstanceCollisions(layout, log)
 
 	run := func() {
 		if err := loop.Tick(ctx); err != nil {
@@ -266,16 +373,23 @@ func parseCurve(name string) (cert.Curve, error) {
 func recoverCmd(args []string) error {
 	fs := flag.NewFlagSet("recover", flag.ExitOnError)
 	var (
-		dir    = fs.String("dir", nebulacfg.DefaultDir, "directory the agent owns: certificate, key, rendered config, rollback copy")
-		url    = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
-		reload = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
-		curve  = fs.String("curve", "CURVE25519", "key curve; must match the network")
+		url     = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
+		reload  = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
+		restart = fs.String("restart", "", `how to restart nebula: "unit:nebula@<network>", a command, or empty`)
+		curve   = fs.String("curve", "CURVE25519", "key curve; must match the network")
 	)
+	df := addDirFlags(fs)
 	_ = fs.Parse(args)
 
 	log := newLogger()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	layout, err := df.layout()
+	if err != nil {
+		return err
+	}
+	dir := &layout.Dir
 
 	st, err := agent.ReadState(*dir)
 	if err != nil {
@@ -297,7 +411,6 @@ func recoverCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	layout := agent.DefaultLayout(*dir)
 
 	ch, err := client.RecoveryChallenge(ctx, st.HostID)
 	if err != nil {
@@ -325,7 +438,11 @@ func recoverCmd(args []string) error {
 	applier := &agent.Applier{
 		Layout:   layout,
 		Reloader: agent.ParseReloader(*reload),
-		Log:      log,
+		// Recovery re-keys the host, and a recovered certificate can carry a
+		// different overlay address than the expired one. That is a restart, not
+		// a reload, so this path needs a supervisor as much as `run` does.
+		Supervisor: agent.ParseSupervisor(*restart, agent.PidFileFromReloadSpec(*reload)),
+		Log:        log,
 	}
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		return err

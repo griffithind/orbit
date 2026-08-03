@@ -295,7 +295,14 @@ func serve(args []string) error {
 		// must already be enrolled to get here.
 		nodeCfg := apiCfg
 		nodeCfg.Agent = &api.AgentListener{NetworkID: node.NetworkID()}
-		api.New(st, svc, nodeCfg, log).AgentRoutes(mux)
+		nodeSrv := api.New(st, svc, nodeCfg, log)
+		nodeSrv.AgentRoutes(mux)
+		// Health on the overlay too, and not redundantly: this is a separate
+		// socket that fails separately. A replica can serve the public port
+		// perfectly while its agent port is a black hole, and agents keep
+		// rotating onto it from AgentEndpoints. Exposure costs nothing here —
+		// only certificate-verified peers can reach it.
+		nodeSrv.HealthRoutes(mux)
 
 		// Advertise this replica so agents can discover and fail over to it.
 		if err := node.Announce(ctx, st); err != nil {
@@ -391,6 +398,11 @@ func serve(args []string) error {
 	publicMux := http.NewServeMux()
 	server.EnrollRoutes(publicMux)
 	server.AdminRoutes(publicMux)
+	// Where a proxy, systemd, or a container orchestrator looks. Without it the
+	// only unauthenticated request here is a POST to /enroll/v1, so a probe's
+	// signal is a TCP connect — which stays green through a total database
+	// outage.
+	server.HealthRoutes(publicMux)
 
 	// Full timeouts, which this listener can afford because nothing it serves is
 	// long-lived: enrollment and admin are request/response, and the request
@@ -429,7 +441,8 @@ func bootstrap(args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	var (
 		dsn      = fs.String("dsn", "", "postgres DSN for the orbit_app role (or ORBIT_DSN)")
-		netName  = fs.String("network", "default", "network name")
+		netName  = fs.String("network", "default", "network display name; may be renamed later")
+		netSlug  = fs.String("slug", "", "immutable network identifier: the directory name on every managed host and what `orbit -network` takes (default: derived from -network)")
 		cidr     = fs.String("cidr", "10.42.0.0/16", "overlay network prefix")
 		caName   = fs.String("ca-name", "", "CA name (defaults to the network name)")
 		caDays   = fs.Int("ca-days", 90, "CA lifetime in days")
@@ -523,9 +536,15 @@ func bootstrap(args []string) error {
 		networkID uuid.UUID
 		roleID    uuid.UUID
 	)
+	slug := *netSlug
+	if slug == "" {
+		slug = store.Slugify(*netName)
+	}
+
 	err = st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		net := store.Network{
 			Name:    *netName,
+			Slug:    slug,
 			CIDRs:   []netip.Prefix{prefix},
 			CertVer: int16(cert.Version2),
 			Curve:   cert.Curve_CURVE25519.String(),
@@ -586,6 +605,7 @@ func bootstrap(args []string) error {
 	log.Info("bootstrap complete")
 	fmt.Printf(`
 network    %s  (%s)
+slug       %s  ← the directory name on every managed host; immutable
 role       %s  (default)
 ca         %s  fingerprint %s
 ca key     %s
@@ -609,7 +629,7 @@ mesh: nebula has no intermediate CAs, so anyone who reads it can mint any
 identity this CA's constraints allow. Keep it encrypted (see "orbitd ca
 encrypt"), mode 0600, and rotate on a schedule you have rehearsed —
 docs/design.md section 6.
-`, *netName, networkID, roleID, *caName, fingerprint[:16], absKey,
+`, *netName, networkID, slug, roleID, *caName, fingerprint[:16], absKey,
 		token, token, networkID, prefix, networkID)
 	return nil
 }

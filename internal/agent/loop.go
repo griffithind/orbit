@@ -13,6 +13,7 @@ import (
 
 	"github.com/slackhq/nebula/cert"
 
+	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -97,6 +98,29 @@ type State struct {
 	// revert entirely.
 	PendingRevertFromConfigEpoch    int64 `json:"pending_revert_from_config_epoch,omitempty"`
 	PendingRevertFromBlocklistEpoch int64 `json:"pending_revert_from_blocklist_epoch,omitempty"`
+
+	// DataPlaneDownSince is when the agent first observed that nebula was not
+	// running on this network, or zero when it is running (or unobservable).
+	//
+	// Persisted so the outage is not forgotten by an agent restart, and so the
+	// duration reported to the control plane is the real one rather than "since
+	// the last time the agent started". Held on the agent, not inferred by the
+	// server from missing reports, because the two are different facts: an agent
+	// that stops reporting may have lost its own connectivity, while this says
+	// the agent is fine and the data plane is not.
+	DataPlaneDownSince time.Time `json:"data_plane_down_since,omitempty"`
+
+	// RestartedForEpoch is the control plane's restart-required epoch that this
+	// host has already restarted for.
+	//
+	// This is what stops a restart from repeating. The server sends the epoch on
+	// EVERY poll, not only while the agent is behind — a steady-state poll
+	// carries no configuration, and an agent that missed the one response naming
+	// it would never learn it must restart. That makes the flag durable and
+	// therefore repeatable, so the agent has to remember which one it acted on.
+	// Without this the agent would drop every tunnel on the network once per
+	// poll interval, forever, and each drop would look like progress.
+	RestartedForEpoch int64 `json:"restarted_for_epoch,omitempty"`
 }
 
 // ControlURL is the endpoint the agent should talk to for steady-state work.
@@ -160,7 +184,8 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-func StatePath(dir string) string { return filepath.Join(dir, "orbit-agent.json") }
+// StatePath is the agent's state file inside a per-network directory.
+func StatePath(dir string) string { return filepath.Join(dir, StateFileName) }
 
 func WriteState(dir string, s State) error {
 	b, err := json.MarshalIndent(s, "", "  ")
@@ -396,6 +421,166 @@ func (l *Loop) checkGuard(ctx context.Context) {
 	l.report(ctx)
 }
 
+// quarantineEpoch refuses a generation this host has already failed to deliver.
+//
+// The same reasoning as the unreachable-guard's quarantine, applied to a
+// different failure. A generation that needs a restart this host cannot perform,
+// or a restart that did not take, will be offered again by the control plane on
+// the very next poll — it has no way to know the host cannot take it. Without a
+// quarantine the agent tries again every interval, forever, and in the
+// restart-failed case each attempt drops every tunnel on this network. That is
+// not a retry loop, it is a rolling outage.
+func (l *Loop) quarantineEpoch(epoch int64, cause error) {
+	if epoch == 0 {
+		return
+	}
+	g := l.guard()
+	l.State.QuarantinedConfigEpoch = epoch
+	l.State.QuarantinedUntil = l.clock().Add(g.Quarantine)
+	l.Log.Error("refusing this generation until an operator investigates",
+		"network", l.Layout.Network, "configEpoch", epoch,
+		"until", l.State.QuarantinedUntil, "error", cause)
+	if err := WriteState(l.Layout.Dir, l.State); err != nil {
+		l.Log.Error("persist agent state failed", "error", err)
+	}
+}
+
+// undeliverable reports whether an apply failed in a way that will fail
+// identically every time it is retried.
+func undeliverable(err error) bool {
+	return errors.Is(err, ErrRestartRequired) || errors.Is(err, ErrRestartFailed)
+}
+
+// checkDataPlane notices that nebula is not running.
+//
+// It deliberately does NOT restart it. The service manager owns process
+// liveness — nebula.service has Restart=always — and an agent that also
+// restarted would race it, turning one crash loop into two racing ones and
+// making the logs unreadable. The agent's job here is the one systemd cannot
+// do: tell the control plane, so a host that cannot start its data plane looks
+// different from a host that is merely slow to converge.
+//
+// Only the restart path in the applier ever starts a process, and only because
+// a specific generation requires it.
+func (l *Loop) checkDataPlane(ctx context.Context) {
+	sup := l.Applier.Supervisor
+	if sup == nil {
+		return
+	}
+	st, err := sup.Status(ctx)
+	if err != nil {
+		l.Log.Warn("could not read nebula status", "network", l.Layout.Network, "error", err)
+		return
+	}
+	if !st.Known {
+		return // nothing observable; not the same as "down"
+	}
+
+	if st.Running {
+		if !l.State.DataPlaneDownSince.IsZero() {
+			l.Log.Info("nebula is running again",
+				"network", l.Layout.Network,
+				"downFor", l.clock().Sub(l.State.DataPlaneDownSince).Round(time.Second),
+				"status", st.Detail)
+			l.State.DataPlaneDownSince = time.Time{}
+			if err := WriteState(l.Layout.Dir, l.State); err != nil {
+				l.Log.Error("persist agent state failed", "error", err)
+			}
+		}
+		return
+	}
+
+	if l.State.DataPlaneDownSince.IsZero() {
+		l.State.DataPlaneDownSince = l.clock()
+		if err := WriteState(l.Layout.Dir, l.State); err != nil {
+			l.Log.Error("persist agent state failed", "error", err)
+		}
+	}
+	l.Log.Error("nebula is not running; this host has no data plane on this network",
+		"network", l.Layout.Network,
+		"downFor", l.clock().Sub(l.State.DataPlaneDownSince).Round(time.Second),
+		"status", st.Detail, "supervisor", sup.Describe())
+}
+
+// restartRequiredEpoch is the control plane's "this generation cannot be
+// hot-loaded" marker, or zero.
+//
+// One line once wire.StateResponse carries the field:
+//
+//	return resp.RestartRequiredEpoch
+//
+// An epoch rather than a boolean, and the difference is the whole idempotence
+// story: the server repeats the value on every poll so a host that missed one
+// response still learns of it, which means a boolean would be indistinguishable
+// from "restart again now" on the very next tick.
+func restartRequiredEpoch(resp *wire.StateResponse) int64 {
+	_ = resp
+	return 0
+}
+
+// restartRequired reports whether the control plane is asking for a restart
+// this host has not already performed.
+//
+// The comparison, not the flag, is what makes a restart happen once. Everything
+// else about a restart — that it drops every tunnel on the network, that it is
+// the only way an address change takes effect — argues for doing it exactly as
+// often as the control plane asks and no more.
+func (l *Loop) restartRequired(resp *wire.StateResponse) bool {
+	e := restartRequiredEpoch(resp)
+	return e != 0 && e > l.State.RestartedForEpoch
+}
+
+// noteRestarted records that this host has satisfied a restart request.
+//
+// Called only after a successful apply, so a restart that failed and rolled
+// back is asked for again rather than being counted as done.
+func (l *Loop) noteRestarted(resp *wire.StateResponse) {
+	if e := restartRequiredEpoch(resp); e > l.State.RestartedForEpoch {
+		l.State.RestartedForEpoch = e
+		l.Log.Info("restarted for the generation the control plane flagged",
+			"network", l.Layout.Network, "restartRequiredEpoch", e)
+	}
+}
+
+// responseConfigMode is the mode the control plane RENDERED this generation in.
+//
+// One line once wire.StateResponse carries the field:
+//
+//	return resp.ConfigMode
+func responseConfigMode(resp *wire.StateResponse) string {
+	_ = resp
+	return ""
+}
+
+// noteConfigMode warns when the control plane and this host disagree about how
+// configuration reaches nebula.
+//
+// It warns rather than adopting, and that is not timidity. The mode is a pair of
+// decisions that must move together: what the agent WRITES (one nebula.yml, or a
+// fragment in config.d) and what nebula READS (-config pointing at that file, or
+// at the directory). The second lives in the systemd unit, which the agent
+// cannot edit. An agent that switched modes on its own would write a correct
+// file to a path nebula is not reading and report success — the exact class of
+// silent mismatch this whole change exists to remove. A mismatch is an operator
+// action on two files; the agent's job is to make sure nobody has to discover it
+// from a stale certificate weeks later.
+//
+// Worth noticing which direction actually breaks. A fragment-rendered (partial)
+// config loaded as an authoritative whole fails validation immediately, so it is
+// caught. An authoritative-rendered (complete) config dropped into config.d
+// loads fine and merges, so it does NOT fail — it just quietly restores the
+// firewall-rule concatenation that authoritative mode exists to eliminate.
+func (l *Loop) noteConfigMode(resp *wire.StateResponse) {
+	server := responseConfigMode(resp)
+	if server == "" || server == l.Layout.Mode.String() {
+		return
+	}
+	l.Log.Error("the control plane renders this network in a different config mode than this host runs; "+
+		"change the agent's -mode and nebula's -config together, or Orbit is not authoritative here",
+		"network", l.Layout.Network, "serverMode", server, "hostMode", l.Layout.Mode.String(),
+		"writing", l.Layout.ConfigPath(), "nebulaReads", l.Layout.NebulaConfigArg())
+}
+
 // quarantinedEpoch is the generation this host is currently refusing, or zero.
 //
 // Read-only, unlike quarantined(), which expires the quarantine as a side
@@ -464,6 +649,7 @@ func (l *Loop) adoptEndpoints(urls []string) {
 // already validated, and rolls back one that fails verification.
 func (l *Loop) Tick(ctx context.Context) error {
 	l.checkGuard(ctx)
+	l.checkDataPlane(ctx)
 
 	if err := l.maybeRenew(ctx); err != nil {
 		// Renewal failure is not fatal to the tick. The existing certificate is
@@ -633,6 +819,7 @@ func (l *Loop) poll(ctx context.Context) error {
 
 	l.markReachable()
 	l.noteRenewHint(resp)
+	l.noteConfigMode(resp)
 	l.retryPendingRevert(ctx)
 
 	if resp.Config == "" {
@@ -651,13 +838,18 @@ func (l *Loop) poll(ctx context.Context) error {
 		"configEpoch", resp.ConfigEpoch, "blocklistEpoch", resp.BlocklistEpoch)
 
 	if err := l.Applier.Apply(ctx, Material{
-		Config:      resp.Config,
-		CABundle:    resp.CABundle,
-		Certificate: resp.Certificate,
+		Config:          resp.Config,
+		CABundle:        resp.CABundle,
+		Certificate:     resp.Certificate,
+		RequiresRestart: l.restartRequired(resp),
 	}); err != nil {
+		if undeliverable(err) {
+			l.quarantineEpoch(resp.ConfigEpoch, err)
+		}
 		return fmt.Errorf("apply configuration: %w", err)
 	}
 
+	l.noteRestarted(resp)
 	l.State.ConfigEpoch = resp.ConfigEpoch
 	l.State.BlocklistEpoch = resp.BlocklistEpoch
 	l.markApplied(prevConfig, prevBlock)
@@ -718,6 +910,28 @@ func (l *Loop) report(ctx context.Context) {
 // report cannot lower anything a second time, and a report that merely carries a
 // smaller number cannot lower anything at all.
 func (l *Loop) reportRequest() wire.ReportRequest {
+	req := l.baseReportRequest()
+	// A host whose nebula is not running is converged on paper and off the mesh
+	// in fact. Reporting it is what stops the two from looking the same.
+	reportDataPlaneDown(&req, !l.State.DataPlaneDownSince.IsZero())
+	return req
+}
+
+// reportDataPlaneDown marks a report as coming from a host whose data plane is
+// down.
+//
+// Split out so wiring the wire field is a one-line change: it becomes
+//
+//	req.DataPlaneDown = down
+//
+// once wire.ReportRequest carries it. Until then the condition is logged at
+// Error on every tick and is not visible to the control plane, which is the gap
+// this names.
+func reportDataPlaneDown(req *wire.ReportRequest, down bool) {
+	req.DataPlaneDown = down
+}
+
+func (l *Loop) baseReportRequest() wire.ReportRequest {
 	return wire.ReportRequest{
 		ConfigEpoch:                l.State.ConfigEpoch,
 		BlocklistEpoch:             l.State.BlocklistEpoch,
@@ -745,8 +959,10 @@ func (l *Loop) retryPendingRevert(ctx context.Context) {
 	l.report(ctx)
 }
 
-// Version identifies the agent to the control plane.
-const Version = "0.1.0"
+// Version identifies the agent to the control plane. Aliased from
+// internal/version so a build stamps every binary with one value; two version
+// strings in one repo is the number that guarantees they disagree.
+var Version = version.Version
 
 // RunOptions configures the long-running agent.
 type RunOptions struct {
@@ -787,6 +1003,7 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 	push := opts.Push
 	for ctx.Err() == nil {
 		l.checkGuard(ctx)
+		l.checkDataPlane(ctx)
 
 		if err := l.maybeRenew(ctx); err != nil {
 			l.Log.Warn("renewal failed", "error", err)
@@ -866,6 +1083,7 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 	}
 	l.markReachable()
 	l.noteRenewHint(resp)
+	l.noteConfigMode(resp)
 	l.retryPendingRevert(ctx)
 
 	if resp.Config == "" {
@@ -882,13 +1100,22 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 		"configEpoch", resp.ConfigEpoch, "blocklistEpoch", resp.BlocklistEpoch)
 
 	if err := l.Applier.Apply(ctx, Material{
-		Config:      resp.Config,
-		CABundle:    resp.CABundle,
-		Certificate: resp.Certificate,
+		Config:          resp.Config,
+		CABundle:        resp.CABundle,
+		Certificate:     resp.Certificate,
+		RequiresRestart: l.restartRequired(resp),
 	}); err != nil {
+		if undeliverable(err) {
+			// Quarantined, so the next watch is refused rather than retried —
+			// and refused is what paces the loop. Returning watchIdle here would
+			// reconnect immediately against a server that answers immediately.
+			l.quarantineEpoch(resp.ConfigEpoch, err)
+			return watchRefused, nil
+		}
 		return watchIdle, fmt.Errorf("apply pushed update: %w", err)
 	}
 
+	l.noteRestarted(resp)
 	l.State.ConfigEpoch = resp.ConfigEpoch
 	l.State.BlocklistEpoch = resp.BlocklistEpoch
 	l.markApplied(prevConfig, prevBlock)

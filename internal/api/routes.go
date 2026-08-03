@@ -24,14 +24,35 @@ import "net/http"
 // so it fails in milliseconds during development rather than at the end of a
 // 25-second e2e run.
 
-// surface is which listener a route belongs on. The three have different threat
-// models (see the package doc) and must never be mixed.
+// surface is which listener a route belongs on. The three authenticated ones
+// have different threat models (see the package doc) and must never be mixed;
+// surfaceHealth is separate again and explains itself below.
 type surface string
 
 const (
 	surfaceEnroll surface = "enroll" // public, unauthenticated but credential-gated
 	surfaceAgent  surface = "agent"  // overlay only, identity from source address
 	surfaceAdmin  surface = "admin"  // scoped bearer tokens
+
+	// surfaceHealth is the probe surface: /healthz and /readyz, no credential of
+	// any kind.
+	//
+	// A fourth surface rather than a corner of an existing one, for two reasons.
+	// Its threat model is the only one that is literally "anyone who can open
+	// the socket" — the other three each authenticate something, and a route
+	// that authenticates nothing does not belong in a list whose invariant is
+	// that they all do. And it is the only surface mounted on more than one
+	// listener: the same two paths go on the public listener and on each overlay
+	// listener (Server.HealthRoutes says why), which the per-surface path prefix
+	// rule cannot express.
+	//
+	// The tradeoff: routes_test.go does not walk this surface, because the two
+	// rules it enforces — declare a known scope, live under the surface's prefix
+	// — are exactly the two rules that do not apply here. The properties that do
+	// apply are asserted over live HTTP in e2e/ops_health_test.go: neither path
+	// takes a token, both are absent from nothing, and readiness fails while
+	// liveness passes when Postgres is gone.
+	surfaceHealth surface = "health"
 )
 
 // route is one endpoint.

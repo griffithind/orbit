@@ -21,6 +21,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,6 +42,12 @@ type Metrics struct {
 	applyReverted prometheus.Counter
 	epochNotifies *prometheus.CounterVec
 	listenerUp    prometheus.Gauge
+
+	// listenerLive mirrors listenerUp somewhere Go can read it. A
+	// prometheus.Gauge is write-only short of rendering the exposition format,
+	// and /healthz has to answer this question on the request path, where no
+	// scrape is happening. See PushUp.
+	listenerLive atomic.Bool
 }
 
 // New builds a registry and the event counters.
@@ -159,11 +166,27 @@ func (m *Metrics) ListenerUp(up bool) {
 	if m == nil {
 		return
 	}
+	m.listenerLive.Store(up)
 	if up {
 		m.listenerUp.Set(1)
 		return
 	}
 	m.listenerUp.Set(0)
+}
+
+// PushUp reports the last listener state notify pushed here.
+//
+// The same observation orbit_epoch_listener_up exports, readable from Go, for
+// callers that answer on a request rather than on a scrape — /healthz is the
+// one that needs it.
+//
+// False before LISTEN is ever established, which is the correct reading: until
+// it is, every agent is polling.
+func (m *Metrics) PushUp() bool {
+	if m == nil {
+		return false
+	}
+	return m.listenerLive.Load()
 }
 
 // Handler serves the exposition endpoint.

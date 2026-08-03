@@ -60,7 +60,7 @@ func recover_(t *testing.T, ts string, host *enrolledHost, hostID string) (*wire
 	if err != nil {
 		t.Fatal(err)
 	}
-	return client.Recover(ctx, hostID, filepath.Join(host.dir, "orbit-host.key"), ch, kp)
+	return client.Recover(ctx, hostID, filepath.Join(host.dir, "host.key"), ch, kp)
 }
 
 // TestRecoveryAfterExpiry is the headline case.
@@ -70,7 +70,7 @@ func TestRecoveryAfterExpiry(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "came-back", "10.42.50.5", false, false, nil)
 	hostID := host.id
-	oldCert := readFile(t, filepath.Join(host.dir, "orbit-host.crt"))
+	oldCert := readFile(t, filepath.Join(host.dir, "host.crt"))
 
 	// Expired yesterday: inside the grace window.
 	expireCertificate(t, h, uuid.MustParse(hostID), time.Now().Add(-24*time.Hour))
@@ -179,7 +179,7 @@ func TestRecoveryProofBindsTheNewKey(t *testing.T) {
 
 	// Compute a legitimate proof for one key...
 	honest, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
-	resp, err := client.Recover(ctx, host.id, filepath.Join(host.dir, "orbit-host.key"), ch, honest)
+	resp, err := client.Recover(ctx, host.id, filepath.Join(host.dir, "host.key"), ch, honest)
 	if err != nil {
 		t.Fatalf("honest recovery: %v", err)
 	}

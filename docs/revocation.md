@@ -178,7 +178,7 @@ POST /v1/hosts/:id/block
   │    NOTIFY orbit_epoch, '<network_id>'
   │
   ├─ every replica wakes its watchers for that network
-  ├─ agents fetch, write config.d/50-orbit.yml, SIGHUP
+  ├─ agents fetch, write nebula.yml, SIGHUP
   └─ nebula reloads the CA pool; within ≤5 s the connection manager
      tears down any tunnel to the blocked certificate
 ```

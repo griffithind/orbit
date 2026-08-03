@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +23,7 @@ import (
 	// the number would then be wrong in the direction that matters.
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
@@ -40,6 +42,12 @@ func (s *Server) resourceRoutes() []route {
 	return []route{
 		a("POST /v1/networks", "networks:write", s.handleCreateNetwork),
 		a("GET /v1/networks", "networks:read", s.handleListNetworks),
+		a("PATCH /v1/networks/{ref}", "networks:write", s.handleUpdateNetwork),
+		// The CIDR to remove is a query parameter, not a path segment: a CIDR
+		// contains a slash, and an encoded slash in a path is a long-standing
+		// source of proxy-specific 404s.
+		a("POST /v1/networks/{ref}/cidrs", "networks:write", s.handleAddNetworkCIDR),
+		a("DELETE /v1/networks/{ref}/cidrs", "networks:write", s.handleRemoveNetworkCIDR),
 		// {ref} is a uuid OR a name. Network names are globally unique, which
 		// hosts' and roles' are not, so this is the one resource where a name
 		// is an unambiguous identifier — and it removes a full listing from
@@ -63,10 +71,443 @@ func (s *Server) resourceRoutes() []route {
 
 		a("GET /v1/audit-logs", "audit:read", s.handleListAudit),
 
+		// Operational reads. Four questions an operator asks during an incident,
+		// each backed by a store method that already existed and was reachable
+		// from nowhere — so the answers lived in psql.
+		//
+		// networks:read. The live blocklist is network state, in the same sense
+		// convergence is, and it carries nothing a mesh member does not already
+		// hold: these exact fingerprints are rendered into every host's
+		// configuration on this network.
+		a("GET /v1/networks/{id}/blocklist", "networks:read", s.handleBlocklist),
+		// cas:read, not networks:read. This hands back CA certificates, and a
+		// token trusted to read network metadata should not reach certificate
+		// material through a different path — the same reasoning that keeps
+		// GET /v1/cas behind cas:read.
+		a("GET /v1/networks/{id}/trust-bundle", "cas:read", s.handleTrustBundle),
+		// hosts:read, for the reason GET /v1/hosts/{id}/certificates uses it:
+		// the response names hosts and certificates but carries no PEM and no
+		// key material.
+		a("GET /v1/networks/{id}/certificates/expiring", "hosts:read", s.handleExpiringCertificates),
+		a("GET /v1/networks/{id}/replicas", "networks:read", s.handleReplicas),
+
 		// No scope, and the only route allowed one. routes.go documents why,
 		// and routes_test.go refuses any other scopeless admin route.
 		a("GET /v1/whoami", "", s.handleWhoAmI),
 	}
+}
+
+//------------------------------------------------------------------------------
+// Operational reads
+//------------------------------------------------------------------------------
+
+// handleBlocklist lists what is revoked and currently being distributed.
+//
+// The only view of the blocklist there is. Blocking a host reports an epoch and
+// nothing else, the host listing shows a state rather than a fingerprint, and
+// DeleteHost removes the host row while deliberately leaving its blocklist
+// entries behind — so the fingerprints belonging to decommissioned machines are
+// invisible through every other endpoint, and those are the ones nobody can
+// reconstruct from memory at 3am.
+//
+// Entries whose certificate has already expired are absent, because they are
+// absent from what hosts are given: nebula rejects an expired certificate
+// before it consults the blocklist, so distributing the fingerprint buys
+// nothing. This endpoint answers "what is in force", not "what has ever been
+// revoked" — the audit log answers that one.
+func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
+	networkID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var out []wire.BlocklistEntryResponse
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		// Resolve the network first purely so a mistyped id is a 404. Without
+		// it an unknown network returns an empty blocklist, which reads as
+		// "nothing is revoked" — the single most dangerous wrong answer this
+		// endpoint could give.
+		if _, err := tx.GetNetwork(ctx, networkID); err != nil {
+			return err
+		}
+
+		// Fingerprints only, which is all store.LiveBlocklist returns: it exists
+		// to build the agent configuration, where a fingerprint is the entire
+		// payload. The reason, the epoch that introduced the entry, the expiry,
+		// and the best-effort host name are columns of orbit.blocklist_entry
+		// that no store method surfaces, so they are absent here rather than
+		// invented. See the note in the handover: this wants a
+		// LiveBlocklistEntries returning the row with a LEFT JOIN for the name.
+		fps, err := tx.LiveBlocklist(ctx, networkID, time.Now())
+		if err != nil {
+			return err
+		}
+		out = make([]wire.BlocklistEntryResponse, 0, len(fps))
+		for _, fp := range fps {
+			out = append(out, wire.BlocklistEntryResponse{Fingerprint: fp})
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "network")
+		return
+	}
+
+	// Text, for the same reason convergence has it: this is read at a terminal
+	// during a revocation, and requiring jq to answer "did it land" is a tax
+	// paid at the worst moment.
+	if wantsPlainText(r) {
+		writePlain(w, http.StatusOK, renderBlocklist(networkID.String(), out))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleTrustBundle re-exports every CA a host on this network must trust.
+//
+// It exists because caResponse includes the PEM only when called from the
+// create handler, so a CA certificate is fetchable exactly once — and the moment
+// it is wanted again is a rotation that has gone wrong, long after that response
+// scrolled out of a terminal. Recovering it otherwise means psql or the signing
+// host's disk.
+//
+// Same rule as the bundle agents receive: everything except retired. A retired
+// CA is one hosts have stopped trusting, and including it here would describe a
+// trust set that no host on the network actually has.
+func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
+	networkID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var out wire.TrustBundleResponse
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if _, err := tx.GetNetwork(ctx, networkID); err != nil {
+			return err
+		}
+
+		pem, err := tx.TrustBundlePEM(ctx, networkID)
+		if err != nil {
+			return err
+		}
+		cas, err := tx.ListCAs(ctx, networkID)
+		if err != nil {
+			return err
+		}
+
+		out = wire.TrustBundleResponse{NetworkID: networkID.String(), PEM: pem}
+		for i := range cas {
+			if cas[i].State == store.CARetired {
+				continue
+			}
+			// Live certificate counts, for the reason GET /v1/cas carries them:
+			// a retiring CA can be retired once this reaches zero, and that is
+			// the number that says a rotation is finished. Bounded by the number
+			// of CAs on a network, which is two or three even mid-rotation.
+			n, err := tx.ActiveCertificateCount(ctx, cas[i].ID)
+			if err != nil {
+				return err
+			}
+			// With the PEM. Withholding the per-CA copy would protect nothing —
+			// the concatenated bundle above already contains every one of them —
+			// while forcing a reader who wants just the new CA to split the
+			// bundle and match it back by fingerprint by hand.
+			out.CAs = append(out.CAs, caResponse(&cas[i], true, n))
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "network")
+		return
+	}
+
+	// CAs is newest first, as it is everywhere else; PEM is oldest first, as
+	// hosts receive it. They are not positionally aligned and nothing should
+	// index one by the other — match on fingerprint.
+	writeJSON(w, http.StatusOK, out)
+}
+
+// expiringDefaultLimit and expiringMaxLimit bound the certificate scan.
+//
+// A cap rather than a cursor, because this list is a work queue and not a
+// history: a network with a thousand overdue certificates has one problem, not
+// a thousand, and paging through them changes no decision. The number is
+// returned honestly — a response holding exactly limit rows may be truncated,
+// and the text rendering says so.
+const (
+	expiringDefaultLimit = 100
+	expiringMaxLimit     = 500
+)
+
+// handleExpiringCertificates names the certificates approaching expiry.
+//
+// The metrics endpoint reports how many; this reports which, and that is the
+// whole difference. orbit_certificates_expiring_soon rising says renewal is
+// failing somewhere, and an operator cannot act on a count.
+//
+// The signal is RenewAt, not NotAfter. Every host is supposed to renew at the
+// midpoint of its certificate's lifetime, so a RenewAt already in the past means
+// renewal has failed at least once for that host, while it still holds a
+// perfectly valid certificate — hours of warning that NotAfter does not give,
+// because by the time NotAfter is close the host is about to fall off the mesh.
+//
+// ?window shifts the horizon forward: the default of zero asks "which hosts
+// should have renewed by now", and 24h asks "which will be due within a day",
+// which is the shape of a report run from cron.
+func (s *Server) handleExpiringCertificates(w http.ResponseWriter, r *http.Request) {
+	networkID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+
+	window, ok := expiringWindowParam(w, q)
+	if !ok {
+		return
+	}
+	limit, ok := expiringLimitParam(w, q)
+	if !ok {
+		return
+	}
+
+	var out []wire.ExpiringCertificateResponse
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if _, err := tx.GetNetwork(ctx, networkID); err != nil {
+			return err
+		}
+
+		// Shifting "now" forward is what turns "already due" into "due within
+		// window": the store's predicate is now >= the midpoint, so a horizon
+		// in the future selects everything that will have crossed it by then.
+		certs, err := tx.CertificatesDueForRenewal(ctx, networkID, time.Now().Add(window), limit)
+		if err != nil {
+			return err
+		}
+
+		out = make([]wire.ExpiringCertificateResponse, 0, len(certs))
+		for _, c := range certs {
+			e := wire.ExpiringCertificateResponse{
+				HostID:      c.HostID.String(),
+				Fingerprint: c.Fingerprint,
+				NotAfter:    c.NotAfter.Format(time.RFC3339),
+				RenewAt:     c.RenewAt().Format(time.RFC3339),
+			}
+
+			// One lookup per certificate. Acceptable only because limit bounds
+			// it: a name and a last-seen are the two things that make this list
+			// actionable, and a host id alone sends the reader back to another
+			// endpoint for every row. The right fix is for the store query to
+			// return them — it already joins orbit.host to filter on state.
+			host, err := tx.GetHost(ctx, c.HostID)
+			if err != nil {
+				return err
+			}
+			e.HostName = host.Name
+			if host.LastSeenAt != nil {
+				e.LastSeenAt = host.LastSeenAt.Format(time.RFC3339)
+			}
+			out = append(out, e)
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "network")
+		return
+	}
+
+	if wantsPlainText(r) {
+		writePlain(w, http.StatusOK, renderExpiring(out, window, limit, time.Now()))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// expiringWindowParam parses ?window, defaulting to zero: due now.
+func expiringWindowParam(w http.ResponseWriter, q url.Values) (time.Duration, bool) {
+	v := q.Get("window")
+	if v == "" {
+		return 0, true
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest,
+			"window must be a duration, e.g. \"24h\"; omit it to list certificates already due")
+		return 0, false
+	}
+	if d < 0 {
+		// Refused rather than quietly reinterpreted. A negative window would
+		// narrow to "overdue by at least this long", which is a different
+		// question with a different answer, and guessing which one was meant is
+		// how a reader concludes a fleet is healthy.
+		writeErr(w, http.StatusBadRequest,
+			"window cannot be negative: it extends the horizon forward from now. "+
+				"Omit it to list certificates that are already due")
+		return 0, false
+	}
+	return d, true
+}
+
+// expiringLimitParam parses ?limit.
+func expiringLimitParam(w http.ResponseWriter, q url.Values) (int, bool) {
+	v := q.Get("limit")
+	if v == "" {
+		return expiringDefaultLimit, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		writeErr(w, http.StatusBadRequest, "limit must be a positive integer")
+		return 0, false
+	}
+	if n > expiringMaxLimit {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+			"limit must be %d or fewer; this list is a work queue, and a network with "+
+				"more overdue certificates than that has one problem rather than %d",
+			expiringMaxLimit, n))
+		return 0, false
+	}
+	return n, true
+}
+
+// handleReplicas lists the control planes currently serving this network.
+//
+// Answers "who is actually up", which nothing else does. A replica appears here
+// by heartbeating (store.RegisterControlPlane) and disappears by going quiet, so
+// this is measured rather than configured — the same list, built the same way
+// from the same staleness bound, that agents are handed as
+// EnrollResponse.AgentEndpoints. Reusing enroll.DefaultControlPlaneStaleAfter
+// rather than picking a number here is the point: an operator asking which
+// replicas are live must get the answer the fleet is acting on, not a second
+// opinion that disagrees at the margin.
+func (s *Server) handleReplicas(w http.ResponseWriter, r *http.Request) {
+	networkID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var out []wire.ControlPlaneResponse
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if _, err := tx.GetNetwork(ctx, networkID); err != nil {
+			return err
+		}
+
+		live, err := tx.LiveControlPlanes(ctx, networkID,
+			time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
+		if err != nil {
+			return err
+		}
+		out = make([]wire.ControlPlaneResponse, 0, len(live))
+		for _, cp := range live {
+			out = append(out, wire.ControlPlaneResponse{
+				HostID:     cp.HostID.String(),
+				Addr:       cp.Addr.String(),
+				AgentPort:  cp.AgentPort,
+				LastSeenAt: cp.LastSeenAt.Format(time.RFC3339),
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "network")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// renderBlocklist formats the live blocklist for a terminal.
+//
+// An empty list is stated in words rather than left as blank output, because
+// "nothing is revoked on this network" and "the command produced no output" are
+// the same thing on a terminal and mean opposite things during an incident.
+func renderBlocklist(networkID string, entries []wire.BlocklistEntryResponse) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "network  %s\n", networkID)
+
+	if len(entries) == 0 {
+		b.WriteString("\nnothing is revoked on this network\n")
+		return b.String()
+	}
+
+	fmt.Fprintf(&b, "revoked  %d fingerprint(s) distributed to every host\n\n", len(entries))
+	for _, e := range entries {
+		fmt.Fprintf(&b, "  %s", e.Fingerprint)
+		if e.HostName != "" {
+			fmt.Fprintf(&b, "  %s", e.HostName)
+		}
+		b.WriteString("\n")
+	}
+
+	// Say what the list does not cover. An entry drops off here the moment its
+	// certificate expires, which is correct — nebula rejects an expired
+	// certificate before consulting the blocklist — but a reader who does not
+	// know that will read a shrinking list as revocations being undone.
+	b.WriteString("\nentries disappear once the revoked certificate expires; " +
+		"the audit log holds the full history\n")
+	return b.String()
+}
+
+// renderExpiring formats the renewal backlog for a terminal.
+func renderExpiring(certs []wire.ExpiringCertificateResponse, window time.Duration, limit int, now time.Time) string {
+	var b strings.Builder
+
+	horizon := "now"
+	if window > 0 {
+		horizon = "within " + window.String()
+	}
+	fmt.Fprintf(&b, "due %s\n", horizon)
+
+	if len(certs) == 0 {
+		b.WriteString("\nevery certificate on this network is renewing on schedule\n")
+		return b.String()
+	}
+
+	fmt.Fprintf(&b, "\n%d certificate(s):\n", len(certs))
+	fmt.Fprintf(&b, "  %-28s %-14s %-22s %s\n", "HOST", "RENEW", "EXPIRES", "LAST SEEN")
+
+	overdue := 0
+	for _, c := range certs {
+		renew := c.RenewAt
+		if at, err := time.Parse(time.RFC3339, c.RenewAt); err == nil {
+			if at.Before(now) {
+				overdue++
+				renew = ago(now.Sub(at)) + " ago"
+			} else {
+				renew = "in " + now.Sub(at).Abs().Round(time.Minute).String()
+			}
+		}
+		// "never" rather than a blank column: a host that has never reported has
+		// a different problem from one that reported an hour ago, and an empty
+		// cell reads as a rendering glitch.
+		seen := "never"
+		if c.LastSeenAt != "" {
+			if at, err := time.Parse(time.RFC3339, c.LastSeenAt); err == nil {
+				seen = ago(now.Sub(at)) + " ago"
+			}
+		}
+		fmt.Fprintf(&b, "  %-28s %-14s %-22s %s\n",
+			truncate(c.HostName, 28), renew, c.NotAfter, seen)
+	}
+
+	if overdue > 0 {
+		// The consequence, not just the count. A host past its renewal point is
+		// one whose agent is already failing to renew, and it loses the mesh at
+		// NotAfter unless something changes before then.
+		fmt.Fprintf(&b, "\n%d host(s) are past their renewal point: their agents have already "+
+			"failed to renew at least once, and each falls off the mesh at its expiry\n", overdue)
+	}
+	if len(certs) == limit {
+		fmt.Fprintf(&b, "\nexactly %d rows, the current limit — there may be more; "+
+			"raise it with ?limit= (max %d)\n", limit, expiringMaxLimit)
+	}
+	return b.String()
+}
+
+// ago renders a duration for a terminal, rounded to something a human reads at
+// a glance rather than to the second.
+func ago(d time.Duration) string {
+	if d >= time.Hour {
+		return d.Round(time.Minute).String()
+	}
+	return d.Round(time.Second).String()
 }
 
 // handleWhoAmI reports which credential is being used, and never its value.
@@ -186,7 +627,10 @@ func (s *Server) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
 		if id, perr := uuid.Parse(ref); perr == nil {
 			net, err = tx.GetNetwork(ctx, id)
 		} else {
-			net, err = tx.GetNetworkByName(ctx, ref)
+			// By slug, not by name. A network is addressed by id or slug and by
+			// nothing else, both immutable — resolving a mutable string is how a
+			// rename silently retargets a script at a different network.
+			net, err = tx.GetNetworkBySlug(ctx, ref)
 		}
 		if err != nil {
 			return err
@@ -1111,16 +1555,25 @@ func auditLimitParam(w http.ResponseWriter, q url.Values) (int, bool) {
 
 //------------------------------------------------------------------------------
 
+// networkResponse is the ONLY renderer for a network. A second one briefly
+// existed in admin.go while two people worked on this file in parallel, and two
+// renderers for one type is precisely the drift internal/wire exists to prevent
+// — a field added to one is silently absent from half the API.
 func networkResponse(n *store.Network) wire.NetworkResponse {
 	cidrs := make([]string, 0, len(n.CIDRs))
 	for _, c := range n.CIDRs {
 		cidrs = append(cidrs, c.String())
 	}
-	return wire.NetworkResponse{
-		ID: n.ID.String(), Name: n.Name, CIDRs: cidrs,
+	out := wire.NetworkResponse{
+		ID: n.ID.String(), Slug: n.Slug, Name: n.Name, CIDRs: cidrs,
 		Curve: n.Curve, CertVersion: int(n.CertVer), CertTTL: n.CertTTL.String(),
+		ConfigMode:  n.ConfigMode,
 		ConfigEpoch: n.ConfigEpoch, BlocklistEpoch: n.BlocklistEpoch,
 	}
+	if n.ListenPort != nil {
+		out.ListenPort = *n.ListenPort
+	}
+	return out
 }
 
 func roleResponse(r *store.Role) wire.RoleResponse {

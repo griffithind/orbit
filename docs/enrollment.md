@@ -159,9 +159,9 @@ Orbit over Nebula, and holds no bearer credential at all.
 ### 3.3 Agent side
 
 ```
-1. generate keypair                      → orbit-host.key (0600), never sent
+1. generate keypair                      → host.key (0600), never sent
 2. POST /enroll/v1/enroll with public key
-3. write orbit-host.crt, orbit-ca.crt, config.d/50-orbit.yml
+3. write host.crt, ca.crt, nebula.yml
 4. start / SIGHUP nebula
 5. verify: tunnel to a lighthouse establishes
 6. on failure, roll back and exit non-zero — do not leave a half-enrolled host
@@ -306,7 +306,7 @@ Nebula holds v1 and v2 certificates simultaneously and rehandshakes on mismatch
 it, but still make the swap atomic:
 
 ```
-write orbit-host.crt.new, orbit-host.key.new   → fsync
+write host.crt.new, host.key.new              → fsync
 rename over the live paths                     → atomic
 SIGHUP
 verify: certificate.ttl_seconds gauge advanced AND a tunnel re-established
@@ -379,7 +379,7 @@ carrying the previous expiry, and logged at warning level — routine recovery
 means renewal is broken for that host, and that is the thing worth fixing.
 
 ```bash
-orbit-agent recover -dir /etc/nebula -reload pid:/run/nebula.pid
+orbit-agent recover -network prod -reload "systemctl reload nebula@prod"
 ```
 
 The command needs the old key still on disk, which is why the agent never

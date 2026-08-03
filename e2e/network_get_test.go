@@ -51,40 +51,50 @@ func TestGetNetworkUnknownRefIs404(t *testing.T) {
 	}
 }
 
-// TestNetworkNameCannotLookLikeAUUID is what makes the dual-form route safe.
+// TestNetworkSlugAndNameAreDifferentThings covers the identity split.
 //
-// Without it, a network named after a uuid would parse as an id, be looked up
-// as one, and either miss or — worse — resolve to a different network that
-// genuinely holds that id. Whichever branch the resolver tries first is wrong
-// for somebody, so the overlap is refused instead of disambiguated.
+// Migration 0005 once refused a network name shaped like a uuid, because
+// GET /v1/networks/{ref} resolved names and a uuid-shaped one would either miss
+// or resolve to a different network. That rule is gone, and BOTH halves of why
+// are worth asserting:
 //
-// Enforced by the database (migration 0005) rather than by the handler, because
-// `orbitd bootstrap` creates networks too and an invariant enforced in one
-// handler is enforced in whichever handler someone remembers.
-func TestNetworkNameCannotLookLikeAUUID(t *testing.T) {
+//   - The slug, which is what a script addresses, cannot collide with a uuid at
+//     all. The charset caps it at 32 characters and a uuid's canonical form is
+//     36, so the two are disjoint by length before a character is compared —
+//     there is nothing left for a constraint to enforce.
+//   - The name addresses nothing any more, so a uuid-shaped name is merely an
+//     unreadable label rather than an ambiguity, and refusing it would be a rule
+//     with no failure behind it.
+//
+// The slug's own rules — the charset, the uniqueness, and the immutability
+// trigger — are asserted in internal/store/address_test.go, where they can be
+// exercised against the database directly. They belong there rather than here
+// because they are database constraints: `orbitd bootstrap` writes networks too,
+// so a test that only went through this handler would be testing the handler
+// rather than the rule.
+func TestNetworkSlugAndNameAreDifferentThings(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	code := h.adminReq(t, http.MethodPost, ts.URL+"/v1/networks", wire.CreateNetworkRequest{
-		Name: uuid.NewString(), CIDRs: []string{"10.55.0.0/16"},
-	}, nil)
-	if code == http.StatusCreated {
-		t.Fatal("a network was created with a uuid-shaped name; GET /v1/networks/{ref} " +
-			"can no longer tell an id from a name")
-	}
-	// 400, not 500. The request will never succeed as sent, and an operator who
-	// gets "internal error" retries it.
-	if code != http.StatusBadRequest {
-		t.Errorf("uuid-shaped name rejected with %d, want 400 — a CHECK violation "+
-			"is the caller's problem and must say so", code)
+	// A uuid-shaped display name is now legal, and that is the visible half of
+	// the change: the name addresses nothing, so there is nothing for it to
+	// shadow.
+	var net wire.NetworkResponse
+	if code := h.adminPost(t, ts.URL+"/v1/networks", wire.CreateNetworkRequest{
+		Name: uuid.NewString(), CIDRs: []string{"10.58.0.0/16"},
+	}, &net); code != http.StatusCreated {
+		t.Fatalf("uuid-shaped display name refused with %d; the name is not an "+
+			"addressing key any more", code)
 	}
 
-	// Something uuid-adjacent but not a uuid stays legal — the constraint must
-	// not reject ordinary names that merely contain hex and dashes.
-	if code := h.adminReq(t, http.MethodPost, ts.URL+"/v1/networks", wire.CreateNetworkRequest{
-		Name: "prod-2026-08-03-" + uuid.NewString()[:8], CIDRs: []string{"10.56.0.0/16"},
-	}, nil); code != http.StatusCreated {
-		t.Errorf("a legitimate hyphenated name was refused: %d", code)
+	// And the network is still reachable by its id, which is what a caller
+	// holding a uuid uses.
+	var byID wire.NetworkResponse
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/networks/"+net.ID, nil, &byID); code != http.StatusOK {
+		t.Fatalf("get by id after a uuid-shaped name: %d", code)
+	}
+	if byID.ID != net.ID {
+		t.Errorf("a uuid-shaped name shadowed an id: asked for %s, got %s", net.ID, byID.ID)
 	}
 }
 

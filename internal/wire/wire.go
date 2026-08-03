@@ -63,6 +63,14 @@ type EnrollResponse struct {
 	// leaves the remaining half to recover from failure before expiry.
 	RenewAfter time.Time `json:"renew_after"`
 	NotAfter   time.Time `json:"not_after"`
+
+	// ConfigMode and NetworkSlug tell the agent which layout Config is and which
+	// directory it belongs in — see StateResponse for both. They are on the
+	// enrollment response as well because the very first write happens here,
+	// before any state poll, and an agent that guessed would create the wrong
+	// layout once and then keep both.
+	ConfigMode  string `json:"config_mode,omitempty"`
+	NetworkSlug string `json:"network_slug,omitempty"`
 }
 
 // StateResponse is what the agent polls for.
@@ -88,6 +96,56 @@ type StateResponse struct {
 	// scheduling purely from the certificate on disk.
 	RenewAfter time.Time `json:"renew_after,omitempty"`
 	NotAfter   time.Time `json:"not_after,omitempty"`
+
+	// RestartRequiredEpoch names a generation this host must RESTART nebula for
+	// rather than reload. Zero means none ever has been.
+	//
+	// It exists because one change genuinely cannot be applied hot. Nebula
+	// compares the networks in a reloaded certificate against the running one
+	// and refuses the whole reload if they differ (pki.go reloadCert, "Networks
+	// in new cert was different from old"), so after an address change the agent
+	// installs a valid new certificate, nebula declines it, and the process
+	// keeps running the OLD one — indefinitely, while reporting a healthy
+	// applied epoch. Nothing about that looks wrong from here.
+	//
+	// AN EPOCH RATHER THAN A FLAG, and the difference is the whole design:
+	//
+	//   - A flag has to be cleared by somebody. If the agent clears it, a lost
+	//     acknowledgement either leaves it set — a host that restarts on every
+	//     poll — or clears it early, and the restart never happens. Both are
+	//     silent, and both are worse than not having the signal.
+	//   - An epoch is compared against what the agent has already done, exactly
+	//     as applied_config_epoch is. Nothing is cleared, a replayed response is
+	//     a no-op, and an agent that was offline for the change catches up by
+	//     arithmetic rather than by being told twice.
+	//
+	// NOT the network's config epoch, and not a second network-wide counter: an
+	// address change on one host requires that ONE host to restart. Every other
+	// host in the network re-renders a static_host_map, which is an ordinary hot
+	// reload, and a network-wide restart signal would turn a one-host change
+	// into a fleet-wide outage.
+	//
+	// THE AGENT'S CONTRACT. Persist the last value restarted for. After
+	// successfully applying a generation, restart nebula when
+	// RestartRequiredEpoch is greater than that persisted value AND the applied
+	// config epoch has reached RestartRequiredEpoch, then persist the new value.
+	// The second condition is what keeps an agent that is still catching up from
+	// restarting into a configuration it has not installed yet.
+	RestartRequiredEpoch int64 `json:"restart_required_epoch,omitempty"`
+
+	// ConfigMode is "authoritative" (Config is a complete nebula.yml, and nebula
+	// is pointed at that file) or "fragment" (Config is a 50-orbit.yml merged
+	// with whatever else is in the config directory).
+	//
+	// On the wire rather than inferred from the file's shape, because the agent
+	// has to decide WHERE to write it and what to point nebula at, and guessing
+	// from content is how a host ends up with both layouts on disk.
+	ConfigMode string `json:"config_mode,omitempty"`
+
+	// NetworkSlug is the immutable per-network directory name under
+	// /var/lib/orbit. Sent so the agent never has to derive a path from a value
+	// that could change; see nebulacfg for the layout.
+	NetworkSlug string `json:"network_slug,omitempty"`
 }
 
 // ReportRequest is what an agent sends after successfully applying a config.
@@ -101,6 +159,15 @@ type ReportRequest struct {
 	BlocklistEpoch int64  `json:"blocklist_epoch"`
 	NebulaVersion  string `json:"nebula_version,omitempty"`
 	AgentVersion   string `json:"agent_version,omitempty"`
+
+	// DataPlaneDown reports that nebula is not running on this host.
+	//
+	// The agent does NOT restart it — systemd owns that, and two supervisors
+	// restarting one process turns a crash loop into two racing ones. But
+	// without this the condition is invisible to the control plane: the agent
+	// itself is fine, keeps polling, keeps reporting an applied epoch, and
+	// convergence shows a healthy host that is carrying no traffic at all.
+	DataPlaneDown bool `json:"data_plane_down,omitempty"`
 
 	// RevertedFromConfigEpoch and RevertedFromBlocklistEpoch name the generation
 	// this host was running immediately before its unreachable-guard put the
@@ -169,14 +236,150 @@ type RecoverRequest struct {
 
 // CreateHostRequest is the admin API's host creation payload.
 type CreateHostRequest struct {
-	NetworkID    string   `json:"network_id"`
-	Name         string   `json:"name"`
-	OverlayAddr  string   `json:"overlay_addr"`
+	NetworkID string `json:"network_id"`
+	Name      string `json:"name"`
+
+	// OverlayAddr is optional. Omit it and the control plane allocates one,
+	// which is the normal case: an operator naming addresses by hand is
+	// maintaining a spreadsheet the database could maintain for them, and every
+	// address chosen that way is one that might already be taken.
+	//
+	// Supplying one is still supported for the cases that need it — a lighthouse
+	// whose address is baked into somebody's runbook, a machine being migrated
+	// onto Orbit with an address it already has.
+	OverlayAddr string `json:"overlay_addr,omitempty"`
+
+	// OverlayPrefix names which of the network's CIDRs to allocate from. Ignored
+	// when OverlayAddr is supplied; empty means the first.
+	//
+	// Allocation produces ONE address, not one per address family. Dual-stacking
+	// by default would double what a later address change disrupts and would
+	// silently convert a fleet the moment an IPv6 prefix is added to the
+	// network. A host that wants both asks for the second explicitly, and that
+	// request is a line in the audit log.
+	OverlayPrefix string `json:"overlay_prefix,omitempty"`
+
 	RoleID       string   `json:"role_id,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
 	IsLighthouse bool     `json:"is_lighthouse,omitempty"`
 	IsRelay      bool     `json:"is_relay,omitempty"`
 	StaticAddrs  []string `json:"static_addrs,omitempty"`
+}
+
+// AddHostAddressRequest claims an additional overlay address.
+//
+// Either an explicit Addr or an allocation from Prefix; supplying neither
+// allocates from the network's first prefix.
+type AddHostAddressRequest struct {
+	Addr   string `json:"addr,omitempty"`
+	Prefix string `json:"prefix,omitempty"`
+
+	// AcknowledgeRestart proceeds past the disruption gate.
+	//
+	// A typed field rather than a query flag, exactly as ActivateCARequest's
+	// acknowledge_cutoff is, and for the same reason: this is the deliberate
+	// path, it should be impossible to take by accident, and it is audited as a
+	// distinct action rather than as the ordinary one with a flag in metadata.
+	AcknowledgeRestart bool `json:"acknowledge_restart,omitempty"`
+}
+
+// RemoveHostAddressRequest releases one of a host's addresses.
+//
+// A body on a DELETE, which is unusual and is the right trade here: the
+// acknowledgement must be typed, and a proxy that strips the body fails SAFE —
+// the request is refused with the gate's 409 rather than silently performing the
+// disruptive change.
+type RemoveHostAddressRequest struct {
+	AcknowledgeRestart bool `json:"acknowledge_restart,omitempty"`
+}
+
+// RestartRequiredError is the 409 body from an address change.
+//
+// NOT a convergence gate, and the difference is the whole message. CA activation
+// refuses because hosts have not caught up, and waiting fixes it. This refuses
+// because nebula will not accept a certificate whose networks changed on a
+// reload (pki.go reloadCert), so the host must restart — and no amount of
+// waiting changes that. Telling an operator to retry later would be advice that
+// can never come true.
+type RestartRequiredError struct {
+	Error string `json:"error"`
+
+	// Detail spells out the consequence in words, worst first.
+	Detail string `json:"detail,omitempty"`
+
+	Impact *AddressImpact `json:"impact,omitempty"`
+}
+
+// AddressImpact is who else is affected when one host's nebula restarts.
+//
+// It is a declared type rather than an inline map because the useful half of the
+// answer lives here: a client that decodes only Error tells an operator "this
+// requires a restart" without saying that the host in question is the only relay
+// on the network, which is the entire question.
+type AddressImpact struct {
+	HostID   string `json:"host_id"`
+	HostName string `json:"host_name"`
+
+	IsLighthouse   bool `json:"is_lighthouse,omitempty"`
+	IsRelay        bool `json:"is_relay,omitempty"`
+	IsControlPlane bool `json:"is_control_plane,omitempty"`
+
+	// The "only" flags are separate fields rather than left to the reader to
+	// derive from the counts, because they are the ones that change the
+	// decision: one lighthouse of four going away is a blip, the only lighthouse
+	// going away stops discovery for the network.
+	OnlyLighthouse   bool `json:"only_lighthouse,omitempty"`
+	OnlyRelay        bool `json:"only_relay,omitempty"`
+	OnlyControlPlane bool `json:"only_control_plane,omitempty"`
+
+	// HostsUsingRelays is how many hosts have use_relays set and could therefore
+	// be carrying traffic through this one. Present only when this host relays.
+	HostsUsingRelays int `json:"hosts_using_relays,omitempty"`
+
+	HostsInNetwork    int `json:"hosts_in_network"`
+	Lighthouses       int `json:"lighthouses,omitempty"`
+	Relays            int `json:"relays,omitempty"`
+	LiveControlPlanes int `json:"live_control_planes,omitempty"`
+
+	// Consequences are ordered worst first. The relay line leads when this host
+	// relays, because that is the one whose damage lands on machines nobody
+	// making the change was thinking about.
+	Consequences []string `json:"consequences,omitempty"`
+}
+
+// HostAddressesResponse is the address set after a change.
+type HostAddressesResponse struct {
+	HostID       string   `json:"host_id"`
+	OverlayAddrs []string `json:"overlay_addrs"`
+
+	// RestartRequiredEpoch is the generation the host must restart for, echoed
+	// so a caller can watch for it landing rather than guess.
+	RestartRequiredEpoch int64 `json:"restart_required_epoch,omitempty"`
+	ConfigEpoch          int64 `json:"config_epoch,omitempty"`
+
+	// Detail says what happens next, in words.
+	Detail string `json:"detail,omitempty"`
+}
+
+// NetworkCIDRRequest adds a prefix to a network.
+type NetworkCIDRRequest struct {
+	CIDR string `json:"cidr"`
+}
+
+// CIDRInUseError is the 409 body from removing a prefix hosts have addresses in.
+//
+// Same shape and same reasoning as RoleInUseError: the refusal is not the useful
+// part of the answer, the list of who is blocking it is.
+type CIDRInUseError struct {
+	Error string          `json:"error"`
+	Hosts []AddressHolder `json:"hosts,omitempty"`
+}
+
+// AddressHolder is a host holding an address inside a prefix.
+type AddressHolder struct {
+	HostID string `json:"host_id"`
+	Name   string `json:"name"`
+	Addr   string `json:"addr"`
 }
 
 // UpdateHostRequest changes a host's roles and metadata.
@@ -224,6 +427,20 @@ type HostResponse struct {
 	AppliedConfigEpoch    int64      `json:"applied_config_epoch"`
 	AppliedBlocklistEpoch int64      `json:"applied_blocklist_epoch"`
 	LastSeenAt            *time.Time `json:"last_seen_at,omitempty"`
+
+	// The instance's own resources, reported as the EFFECTIVE values rather than
+	// as the raw columns: a caller asking "what port is this host listening on"
+	// wants the answer, not "nothing is set here, go read the network". Which
+	// level supplied the value is visible from the network response.
+	ListenPort int    `json:"listen_port,omitempty"`
+	TunDev     string `json:"tun_dev,omitempty"`
+	ConfigMode string `json:"config_mode,omitempty"`
+
+	// RestartRequiredEpoch is the generation this host must restart nebula for,
+	// and 0 means none ever has been. A value greater than
+	// applied_config_epoch is a host that has not yet taken an address change —
+	// the one change that cannot be applied hot.
+	RestartRequiredEpoch int64 `json:"restart_required_epoch,omitempty"`
 
 	// NebulaVersion and AgentVersion are what the host reported on its last
 	// successful apply. They are the first question asked of a host that has
@@ -422,6 +639,24 @@ type HealthResponse struct {
 	// slower, and invisible without this.
 	Push    bool   `json:"push"`
 	Version string `json:"version,omitempty"`
+
+	// ObservedAgeSeconds is how old the Database reading is.
+	//
+	// /healthz performs no I/O — restarting a process cannot fix a database, so
+	// a liveness probe wired to Postgres would turn one outage into every
+	// replica dying at once. It reports the last observation readiness took,
+	// which can be arbitrarily old if nothing probes readiness.
+	//
+	// Without this, that staleness is invisible: a human curling /healthz during
+	// an incident reads "database": true off a value taken before the outage
+	// began. The status code is still right; the body is not, which is worse
+	// than useless when someone is trying to work out what broke.
+	//
+	// ABSENT means no readiness probe has run yet. The Database value is then
+	// inferred from store.Open having succeeded at startup — true a few
+	// milliseconds into the process's life and not measured since. Treat an
+	// absent age as "unverified", not as "fresh".
+	ObservedAgeSeconds *float64 `json:"observed_age_seconds,omitempty"`
 }
 
 // Error is the uniform error body. Message is safe to show a user; it never
@@ -434,9 +669,26 @@ type Error struct {
 // --- Admin: networks, roles, CAs, tokens, audit ---
 
 type CreateNetworkRequest struct {
+	// Slug is the immutable, machine-safe identifier: lowercase alphanumerics
+	// and hyphens, 1-32, no leading or trailing hyphen. It becomes a directory
+	// name on every managed host in the network and the stem of their tun device
+	// names, which is why it can never change.
+	//
+	// Optional. Left empty it is derived from Name, so a caller with no opinion
+	// gets a reasonable one — but a caller that intends to script against this
+	// network should choose it, because the derivation follows the name and the
+	// name is free to be edited afterwards.
+	Slug string `json:"slug,omitempty"`
+
+	// Name is the display label: mutable, unique, and not an addressing key.
 	Name string `json:"name"`
+
 	// CIDRs are the overlay prefixes. Two networks may overlap: they are
 	// separate meshes and never exchange traffic.
+	//
+	// An IPv6 prefix requires cert_version 2. Nebula's v1 format cannot carry an
+	// IPv6 address at all, so the combination is refused here rather than
+	// accepted and then failed at the first issuance.
 	CIDRs []string `json:"cidrs"`
 	// CertTTL is the host certificate lifetime. This is the revocation SLA for
 	// a partitioned host, not merely a rotation cadence, so the API states it
@@ -444,15 +696,53 @@ type CreateNetworkRequest struct {
 	CertTTL     string `json:"cert_ttl,omitempty"`
 	Curve       string `json:"curve,omitempty"`
 	CertVersion int    `json:"cert_version,omitempty"`
+
+	// ListenPort is the nebula UDP port hosts of this network use. Omitted means
+	// the control plane's default. Two networks sharing a machine need different
+	// ones, which is the entire reason this is per network rather than a
+	// process-wide flag.
+	ListenPort int `json:"listen_port,omitempty"`
+
+	// ConfigMode is "authoritative" (default) or "fragment"; see NetworkResponse.
+	ConfigMode string `json:"config_mode,omitempty"`
+}
+
+// UpdateNetworkRequest edits a network in place.
+//
+// There is no slug field, and its absence is the design: the slug is immutable
+// and the database refuses to change it. Pointer fields for the same reason
+// UpdateHostRequest uses them — "not supplied" must be distinguishable from
+// "set to empty".
+type UpdateNetworkRequest struct {
+	// Name is the display label, and the only identifier that may be edited.
+	Name *string `json:"name,omitempty"`
+
+	ListenPort *int    `json:"listen_port,omitempty"`
+	ConfigMode *string `json:"config_mode,omitempty"`
 }
 
 type NetworkResponse struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
+	ID string `json:"id"`
+
+	// Slug is how this network should be addressed in a script: immutable, so a
+	// rename cannot retarget it. Name is for people.
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+
 	CIDRs       []string `json:"cidrs"`
 	Curve       string   `json:"curve"`
 	CertVersion int      `json:"cert_version"`
 	CertTTL     string   `json:"cert_ttl"`
+
+	// ListenPort is 0 when the network defers to the control plane's default.
+	ListenPort int `json:"listen_port,omitempty"`
+
+	// ConfigMode is what hosts of this network get by default. "authoritative"
+	// means Orbit renders the complete nebula configuration and what it reports
+	// about a host's policy is the whole of it; "fragment" means Orbit renders
+	// one file into a directory nebula merges, so any policy it reports is a
+	// lower bound.
+	ConfigMode string `json:"config_mode,omitempty"`
 
 	ConfigEpoch    int64 `json:"config_epoch"`
 	BlocklistEpoch int64 `json:"blocklist_epoch"`

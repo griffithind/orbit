@@ -5,12 +5,17 @@
 // down the data plane, and nebula's own signed releases and platform packaging
 // are inherited rather than reimplemented.
 //
+// Everything the agent owns for one network lives in one per-network directory
+// (see layout.go). A host on two networks runs two agents over two directories
+// and shares nothing between them.
+//
 // The apply sequence is the part that matters. Configuration is validated in a
 // staging directory using nebula's own loader before anything live is touched,
 // so the common failure (a config nebula rejects) never reaches the running
 // node at all. Only after validation passes are files moved into place, and
-// only then is a reload signalled. A failure after that point restores the
-// previous generation and reloads again.
+// only then is the change delivered — as a hot reload where nebula can take one,
+// and as a verified process restart where it cannot. A failure after that point
+// restores the previous generation and delivers it the same way.
 package agent
 
 import (
@@ -22,48 +27,34 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/slackhq/nebula"
 	"github.com/slackhq/nebula/config"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-// FragmentName is the single file Orbit owns.
+// ErrRestartRequired means this generation cannot be hot-loaded and this host
+// has no way to restart nebula.
 //
-// The numeric prefix places it after a conventional 00-base.yml so Orbit's
-// scalar settings win, while list values (firewall rules) are appended by
-// nebula regardless of order.
-const FragmentName = "50-orbit.yml"
+// A distinct error because the caller must treat it as permanent for this
+// generation: the control plane will keep offering it, and retrying every poll
+// interval only produces the same refusal forever.
+var ErrRestartRequired = errors.New("generation requires a nebula restart")
 
-// Layout describes where things live on the managed host.
-type Layout struct {
-	// Dir is the directory the agent owns on this host, e.g. /var/lib/nebula.
-	// Under /var rather than /etc because everything in it is runtime state the
-	// agent writes and replaces; see the internal/nebulacfg package comment.
-	Dir string
-	// ConfigD is the merge directory nebula is pointed at, e.g.
-	// /var/lib/nebula/config.d.
-	ConfigD string
-	// Paths are the certificate and key locations referenced by the rendered
-	// fragment. They must match what the control plane rendered.
-	Paths nebulacfg.Paths
-}
+// ErrRestartFailed means the restart was attempted and did not take: the
+// command failed, nebula did not come back, or the process that came back is
+// the same one that was running before.
+//
+// Also distinct, and for the sharper reason: a restart drops every tunnel on
+// the host. Retrying one every poll interval is not a slow loop, it is a
+// permanent outage delivered a minute at a time.
+var ErrRestartFailed = errors.New("nebula restart did not take effect")
 
-func DefaultLayout(dir string) Layout {
-	return Layout{
-		Dir:     dir,
-		ConfigD: filepath.Join(dir, "config.d"),
-		Paths: nebulacfg.Paths{
-			CA:   filepath.Join(dir, "orbit-ca.crt"),
-			Cert: filepath.Join(dir, "orbit-host.crt"),
-			Key:  filepath.Join(dir, "orbit-host.key"),
-		},
-	}
-}
-
-// Reloader makes a running nebula pick up new configuration.
+// Reloader makes a running nebula pick up new configuration without restarting.
 type Reloader interface {
 	Reload(ctx context.Context) error
 	// Describe is used in logs so an operator can see what the agent will
@@ -71,21 +62,29 @@ type Reloader interface {
 	Describe() string
 }
 
-// Applier writes control-plane state to disk and reloads nebula.
+// Applier writes control-plane state to disk and delivers it to nebula.
 type Applier struct {
 	Layout   Layout
 	Reloader Reloader
 
-	// Restarter is used when a generation cannot be hot-loaded, which in
-	// practice means the host's overlay address changed: nebula rejects a
-	// reload whose certificate networks differ. Nil means such a generation is
-	// refused rather than applied in a way that would silently leave the old
-	// certificate running until it expires.
-	Restarter Reloader
+	// Supervisor restarts nebula and reports whether it is running.
+	//
+	// Needed whenever a generation cannot be hot-loaded, which in practice means
+	// the host's overlay address or curve changed: nebula rejects a reload whose
+	// certificate networks differ. Nil means such a generation is REFUSED rather
+	// than applied in a way that would silently leave the old certificate
+	// running until it expires.
+	Supervisor Supervisor
 
-	// Verifier confirms the host still works after the reload. Nil means no
-	// verification, which also means the rollback path is never exercised.
+	// Verifier confirms the host still works after the change is delivered. Nil
+	// means no verification, which also means the rollback path is never
+	// exercised.
 	Verifier Verifier
+
+	// RestartSettle and RestartPoll bound the wait for a restart to show up as a
+	// new process. Zero uses the defaults.
+	RestartSettle time.Duration
+	RestartPoll   time.Duration
 
 	Log *slog.Logger
 }
@@ -99,6 +98,17 @@ type Material struct {
 	// generate a new key, in which case this is set again; otherwise it is
 	// empty and the existing key file is left alone.
 	PrivateKey string
+
+	// RequiresRestart is the control plane saying this generation cannot be
+	// hot-loaded, for a reason the agent cannot infer from the certificate: a
+	// changed tun device, a changed listen port, anything nebula only reads at
+	// startup.
+	//
+	// It can only ESCALATE. The agent's own certificate comparison still runs,
+	// and a control plane that says "reload" about a certificate whose networks
+	// changed does not get one — nebula would refuse it, and the host would keep
+	// running the old certificate until it expired.
+	RequiresRestart bool
 }
 
 // Apply installs a generation.
@@ -107,27 +117,31 @@ type Material struct {
 //
 //  1. stage everything in a sibling directory
 //  2. validate the staged config with nebula's own loader
-//  3. back up the live generation
-//  4. move staged files into place
-//  5. reload
-//  6. on any failure after step 4, restore the backup and reload again
+//  3. decide how this generation must be delivered, and refuse now if it cannot be
+//  4. back up the live generation
+//  5. move staged files into place
+//  6. deliver: reload, or restart and prove the restart took
+//  7. verify
+//  8. on any failure after step 5, restore the backup and deliver it the same way
 //
-// Validating before step 4 is what keeps a rejected config from ever reaching
-// the running node. Rollback covers what validation cannot: a config that is
-// structurally valid but that the running nebula refuses, or a reload that
-// fails for an unrelated reason.
+// Validating before step 5 is what keeps a rejected config from ever reaching
+// the running node. Deciding at step 3 is what keeps a generation this host
+// cannot deliver from displacing one it is successfully running. Rollback covers
+// what neither can: a config that is structurally valid but that the running
+// nebula refuses, a restart that does not come back, or a change that severs
+// connectivity.
 func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 	if m.Config == "" {
 		return errors.New("refusing to apply an empty configuration")
 	}
-	if err := os.MkdirAll(a.Layout.ConfigD, 0o755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
+	if err := a.ensureDirs(); err != nil {
+		return err
 	}
 
 	// The control plane renders canonical paths because it cannot know where
 	// this host keeps its files. The agent does, so it rewrites them. This is
-	// what makes a non-standard -dir work rather than silently producing a
-	// config that points at files nobody wrote.
+	// what makes a per-network -dir work rather than silently producing a config
+	// that points at files nobody wrote.
 	m.Config = a.localize(m.Config)
 
 	staging, err := os.MkdirTemp(a.Layout.Dir, ".orbit-staging-")
@@ -151,16 +165,16 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 		return nil
 	}
 
-	if err := stage("ca.crt", m.CABundle, 0o644); err != nil {
+	if err := stage(CAName, m.CABundle, 0o644); err != nil {
 		return err
 	}
-	if err := stage("host.crt", m.Certificate, 0o644); err != nil {
+	if err := stage(CertName, m.Certificate, 0o644); err != nil {
 		return err
 	}
-	if err := stage("host.key", m.PrivateKey, 0o600); err != nil {
+	if err := stage(KeyName, m.PrivateKey, 0o600); err != nil {
 		return err
 	}
-	if err := stage(FragmentName, m.Config, 0o644); err != nil {
+	if err := stage(a.Layout.ConfigName(), m.Config, 0o644); err != nil {
 		return err
 	}
 
@@ -168,79 +182,80 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 	// config references absolute production paths, so validation uses a copy
 	// with those paths rewritten to the staging directory; otherwise we would be
 	// validating the new config against the old certificates.
-	if err := a.validateStaged(staging, staged, m); err != nil {
+	if err := a.validateStaged(staged, m); err != nil {
 		return fmt.Errorf("refusing to apply: %w", err)
 	}
 
 	// Decide how this generation has to be delivered before installing
-	// anything, so a generation that cannot be applied at all is refused while
-	// the previous one is still intact.
+	// anything, so a generation that cannot be delivered at all is refused while
+	// the previous one is still intact and running.
 	mode, err := a.modeFor(m)
 	if err != nil {
 		return err
 	}
-	deliver := a.Reloader
 	if mode == ModeRestart {
-		if a.Restarter == nil {
-			return fmt.Errorf(
-				"this generation changes the host's overlay address or curve, which nebula " +
-					"cannot hot-load (pki.go reloadCerts); a process restart is required but no " +
-					"restarter is configured. Configure one, or restart nebula manually after " +
-					"applying. Refusing to install a certificate that would be silently ignored")
+		if a.Supervisor == nil {
+			return fmt.Errorf("%w, but no supervisor is configured: this generation changes "+
+				"something nebula only reads at startup (overlay address, curve, or a "+
+				"control-plane restart flag), which nebula cannot hot-load (pki.go reloadCerts). "+
+				"Configure -restart, or restart nebula manually after applying. Refusing to "+
+				"install a certificate that would be silently ignored", ErrRestartRequired)
 		}
-		deliver = a.Restarter
-		a.Log.Warn("generation requires a restart, tunnels will drop",
-			"reason", "certificate networks or curve changed")
+		a.Log.Warn("generation requires a nebula restart, tunnels on this network will drop",
+			"network", a.Layout.Network, "supervisor", a.Supervisor.Describe())
 	}
 
-	targets := map[string]string{
-		"ca.crt":     a.Layout.Paths.CA,
-		"host.crt":   a.Layout.Paths.Cert,
-		"host.key":   a.Layout.Paths.Key,
-		FragmentName: filepath.Join(a.Layout.ConfigD, FragmentName),
-	}
-
+	targets := a.Layout.targets()
 	backup, err := a.backup(targets)
 	if err != nil {
 		return fmt.Errorf("back up current generation: %w", err)
 	}
 
 	rollback := func(cause error) error {
-		a.Log.Error("apply failed, rolling back", "error", cause)
+		a.Log.Error("apply failed, rolling back", "network", a.Layout.Network, "error", cause)
 		if rerr := a.restore(backup, targets); rerr != nil {
 			// Both the apply and the rollback failed. Say so explicitly: this
 			// host needs a human, and a generic error would bury that.
 			return fmt.Errorf("apply failed (%w) AND rollback failed (%v); host may be in an inconsistent state", cause, rerr)
 		}
 		// Deliver the restored generation the same way it was delivered
-		// originally, or the rollback installs files nobody reads.
-		if rerr := deliver.Reload(ctx); rerr != nil {
+		// originally, or the rollback installs files nobody reads. A restart-mode
+		// rollback restarts again: the tunnels are already down, and the process
+		// that is up — if any — is the one that just failed.
+		if rerr := a.deliver(ctx, mode); rerr != nil {
 			return fmt.Errorf("apply failed (%w); rolled back but %s failed (%v)", cause, mode, rerr)
 		}
-		a.Log.Info("rolled back to the previous generation")
+		a.Log.Info("rolled back to the previous generation", "network", a.Layout.Network)
 		return cause
 	}
 
-	for name, dst := range targets {
-		src, ok := staged[name]
+	// Install in generation() order: certificate material first, configuration
+	// last, so a crash mid-install leaves nebula reading an old config that
+	// still points at files that exist.
+	for _, f := range a.Layout.generation() {
+		src, ok := staged[f.Name]
 		if !ok {
 			continue // not part of this generation, e.g. an unchanged key
 		}
-		if err := os.Rename(src, dst); err != nil {
-			return rollback(fmt.Errorf("install %s: %w", name, err))
+		if err := os.Rename(src, f.Path); err != nil {
+			return rollback(fmt.Errorf("install %s: %w", f.Name, err))
 		}
 	}
 	// fsync the directories so the renames survive a crash.
-	_ = syncDir(a.Layout.Dir)
-	_ = syncDir(a.Layout.ConfigD)
+	a.syncDirs()
 
-	if err := deliver.Reload(ctx); err != nil {
-		return rollback(fmt.Errorf("%s: %w", mode, err))
+	if err := a.deliver(ctx, mode); err != nil {
+		return rollback(err)
 	}
 
 	// Verification is what makes rollback meaningful. Without it "applied" only
 	// means the files were written and a signal was sent, which is not the same
 	// as the host still being on the mesh.
+	//
+	// It does not replace the restart proof in deliver(). A host that refused the
+	// new certificate is still reachable at its OLD address on its OLD, valid
+	// certificate, so this check passes for exactly the failure it looks like it
+	// would catch.
 	if a.Verifier != nil {
 		if err := a.Verifier.Verify(ctx); err != nil {
 			return rollback(fmt.Errorf("post-apply verification (%s): %w", a.Verifier.Describe(), err))
@@ -248,24 +263,132 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 	}
 
 	a.Log.Info("applied configuration",
-		"configD", a.Layout.ConfigD, "mode", mode.String(),
-		"deliver", deliver.Describe(), "verify", describeVerifier(a.Verifier))
+		"network", a.Layout.Network, "config", a.Layout.ConfigPath(),
+		"mode", a.Layout.Mode.String(), "delivery", mode.String(),
+		"verify", describeVerifier(a.Verifier))
 	return nil
 }
 
-// modeFor compares the incoming certificate with the one currently installed.
-func (a *Applier) modeFor(m Material) (ApplyMode, error) {
-	if m.Certificate == "" {
-		return ModeReload, nil
-	}
-	current, err := os.ReadFile(a.Layout.Paths.Cert)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ModeReload, nil // first enrollment
+// deliver hands the installed generation to the running nebula.
+func (a *Applier) deliver(ctx context.Context, mode ApplyMode) error {
+	if mode == ModeReload {
+		if err := a.Reloader.Reload(ctx); err != nil {
+			return fmt.Errorf("reload: %w", err)
 		}
-		return ModeReload, fmt.Errorf("read current certificate: %w", err)
+		return nil
 	}
-	return ModeFor(string(current), m.Certificate)
+	return a.restart(ctx)
+}
+
+// restart replaces the nebula process and proves it was replaced.
+//
+// The proof is the whole point. Without it, "restart" means "a command exited
+// zero", and every way a restart can fail to take — a unit that is masked, a
+// unit that points at another network's directory, a nebula that failed to bind
+// and was left in the old process, a service manager that reloaded instead of
+// restarting — reports success and leaves the host running the previous
+// certificate until it expires.
+func (a *Applier) restart(ctx context.Context) error {
+	before, err := a.Supervisor.Status(ctx)
+	if err != nil {
+		// Not fatal on its own: the restart may still work. But it does mean
+		// the "did the process change" comparison has nothing to compare against.
+		a.Log.Warn("could not read nebula status before restarting",
+			"network", a.Layout.Network, "error", err)
+	}
+
+	if err := a.Supervisor.Restart(ctx); err != nil {
+		return fmt.Errorf("%w: %v", ErrRestartFailed, err)
+	}
+
+	if !before.Known {
+		// Say it every time, and say what is actually lost. A restart that did
+		// not happen looks identical to one that did, and the reachability
+		// verifier cannot tell them apart because the old certificate still
+		// works. This is a degraded configuration, not a neutral one.
+		a.Log.Warn("restart delivered but NOT verified: this supervisor cannot observe the "+
+			"nebula process, so the agent cannot tell a restart that took effect from one that "+
+			"silently did not. Use -restart unit:<systemd unit>, or give -reload a pidfile",
+			"network", a.Layout.Network, "supervisor", a.Supervisor.Describe())
+		return nil
+	}
+	return a.confirmRestarted(ctx, before)
+}
+
+// confirmRestarted waits for nebula to come back as a different process.
+func (a *Applier) confirmRestarted(ctx context.Context, before Status) error {
+	settle := a.RestartSettle
+	if settle <= 0 {
+		settle = restartSettleDefault
+	}
+	poll := a.RestartPoll
+	if poll <= 0 {
+		poll = restartPollDefault
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, settle)
+	defer cancel()
+
+	var last Status
+	for {
+		st, err := a.Supervisor.Status(ctx)
+		if err == nil {
+			last = st
+			switch {
+			case !st.Known:
+				// It was observable a moment ago and is not now. Treat that as
+				// unproven rather than as success.
+			case st.Running && st.Instance != "" && st.Instance != before.Instance:
+				a.Log.Info("nebula restarted", "network", a.Layout.Network, "status", st.Detail)
+				return nil
+			case st.Running && st.Instance == "" && before.Instance == "":
+				// Observable, running, but with no way to distinguish runs. The
+				// same degraded case as an unknown supervisor; do not pretend.
+				a.Log.Warn("nebula is running but the restart could not be verified",
+					"network", a.Layout.Network, "status", st.Detail)
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			if last.Known && !last.Running {
+				return fmt.Errorf("%w: nebula is not running after the restart (%s)", ErrRestartFailed, last.Detail)
+			}
+			return fmt.Errorf("%w: nebula did not come back as a new process within %s; "+
+				"it is still running the configuration it had before, which means the new "+
+				"certificate is installed but not in effect (%s)", ErrRestartFailed, settle, last.Detail)
+		case <-time.After(poll):
+		}
+	}
+}
+
+// modeFor decides how this generation must reach nebula.
+//
+// Two independent sources, and the stricter one wins. The agent compares the
+// incoming certificate with the installed one, which catches every case nebula
+// itself would refuse. The control plane can escalate on top of that for changes
+// no certificate reveals. Neither can de-escalate the other.
+func (a *Applier) modeFor(m Material) (ApplyMode, error) {
+	mode := ModeReload
+	if m.Certificate != "" {
+		current, err := os.ReadFile(a.Layout.Paths.Cert)
+		switch {
+		case err == nil:
+			mode, err = ModeFor(string(current), m.Certificate)
+			if err != nil {
+				return ModeRestart, err
+			}
+		case os.IsNotExist(err):
+			// First enrollment: nothing is running to reload or restart.
+		default:
+			return ModeReload, fmt.Errorf("read current certificate: %w", err)
+		}
+	}
+	if m.RequiresRestart {
+		mode = ModeRestart
+	}
+	return mode, nil
 }
 
 func describeVerifier(v Verifier) string {
@@ -275,16 +398,66 @@ func describeVerifier(v Verifier) string {
 	return v.Describe()
 }
 
-// localize rewrites the canonical paths the control plane rendered into this
-// host's actual layout. A no-op for a host using the default locations.
+func (a *Applier) ensureDirs() error {
+	if err := os.MkdirAll(a.Layout.Dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", a.Layout.Dir, err)
+	}
+	if d := a.Layout.ConfigDir(); d != "" {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return fmt.Errorf("create config directory: %w", err)
+		}
+	}
+	return nil
+}
+
+func (a *Applier) syncDirs() {
+	_ = syncDir(a.Layout.Dir)
+	if d := a.Layout.ConfigDir(); d != "" {
+		_ = syncDir(d)
+	}
+}
+
+// localize rewrites the paths the control plane rendered into this host's
+// actual layout.
+//
+// It reads pki.ca / pki.cert / pki.key out of the incoming configuration and
+// replaces those exact strings, rather than searching for a hard-coded default.
+// The difference matters now that the directory is per network: the control
+// plane may render /var/lib/orbit/<slug>/… for a slug this agent's -dir does not
+// spell the same way, and a rewrite keyed on one fixed default would quietly
+// leave the config pointing at files nobody wrote. Substituting the values the
+// config actually carries cannot miss.
+//
+// Textual substitution rather than re-serialising the YAML, because the rendered
+// output is deterministic by design and re-emitting it would destroy that.
 func (a *Applier) localize(cfg string) string {
-	def := nebulacfg.DefaultPaths()
-	for _, r := range [][2]string{
-		{def.CA, a.Layout.Paths.CA},
-		{def.Cert, a.Layout.Paths.Cert},
-		{def.Key, a.Layout.Paths.Key},
-	} {
-		if r[0] != r[1] {
+	var doc struct {
+		PKI struct {
+			CA   string `yaml:"ca"`
+			Cert string `yaml:"cert"`
+			Key  string `yaml:"key"`
+		} `yaml:"pki"`
+	}
+	replacements := [][2]string{}
+	if err := yaml.Unmarshal([]byte(cfg), &doc); err == nil {
+		replacements = [][2]string{
+			{doc.PKI.CA, a.Layout.Paths.CA},
+			{doc.PKI.Cert, a.Layout.Paths.Cert},
+			{doc.PKI.Key, a.Layout.Paths.Key},
+		}
+	} else {
+		// Unparseable: validateStaged will reject it in a moment with a far
+		// better message. Fall back to the defaults so the error it reports is
+		// about the config rather than about missing files.
+		def := nebulacfg.DefaultPaths()
+		replacements = [][2]string{
+			{def.CA, a.Layout.Paths.CA},
+			{def.Cert, a.Layout.Paths.Cert},
+			{def.Key, a.Layout.Paths.Key},
+		}
+	}
+	for _, r := range replacements {
+		if r[0] != "" && r[0] != r[1] {
 			cfg = strings.ReplaceAll(cfg, r[0], r[1])
 		}
 	}
@@ -295,7 +468,7 @@ func (a *Applier) localize(cfg string) string {
 // config-test path, which loads the PKI and builds the firewall exactly as a
 // running node would.
 //
-// This is the agent's strongest guard. It catches a malformed fragment, a
+// This is the agent's strongest guard. It catches a malformed config, a
 // certificate that does not match its CA, an expired certificate, and an
 // unparseable firewall rule, all before the live configuration is touched.
 //
@@ -305,15 +478,12 @@ func (a *Applier) localize(cfg string) string {
 // brings one and at the live copy otherwise — pointing at a staged path that
 // was never written makes every config-only push fail validation, which is
 // exactly the shape of bug that only shows up once push is wired end to end.
-func (a *Applier) validateStaged(staging string, staged map[string]string, m Material) error {
+func (a *Applier) validateStaged(staged map[string]string, m Material) error {
 	cfg := m.Config
-	for _, f := range []struct {
-		live string
-		name string
-	}{
-		{a.Layout.Paths.CA, "ca.crt"},
-		{a.Layout.Paths.Cert, "host.crt"},
-		{a.Layout.Paths.Key, "host.key"},
+	for _, f := range []struct{ live, name string }{
+		{a.Layout.Paths.CA, CAName},
+		{a.Layout.Paths.Cert, CertName},
+		{a.Layout.Paths.Key, KeyName},
 	} {
 		if p, ok := staged[f.name]; ok {
 			cfg = strings.ReplaceAll(cfg, f.live, p)
@@ -332,19 +502,8 @@ func (a *Applier) validateStaged(staging string, staged map[string]string, m Mat
 	return nil
 }
 
-// PreviousDirName holds the last known-good generation.
-//
-// A stable directory, not a fresh temp one per apply. The temp-per-apply
-// version leaked: nothing removed them, so the directory accumulated a
-// .orbit-backup-* directory for every configuration change the host ever
-// received. It also meant there was no single place to revert *to* later,
-// which the unreachable-guard needs.
-const PreviousDirName = ".orbit-previous"
-
 // PreviousDir is where the last known-good generation lives.
-func (a *Applier) PreviousDir() string {
-	return filepath.Join(a.Layout.Dir, PreviousDirName)
-}
+func (a *Applier) PreviousDir() string { return a.Layout.PreviousDir() }
 
 // backup copies the current generation into the previous-generation directory,
 // returning the mapping of logical name to backup path. A target that does not
@@ -413,13 +572,20 @@ func (a *Applier) restore(backup, targets map[string]string) error {
 	return errors.Join(errs...)
 }
 
-// Revert restores the previous generation and reloads.
+// Revert restores the previous generation and delivers it.
 //
 // Used by the unreachable-guard: a configuration can be structurally valid,
 // install cleanly, and still sever this host's path back to the control plane
 // (a firewall rule that drops the agent port, a lighthouse list that no longer
 // resolves). Nothing local can detect that at apply time, so the only defence
 // is noticing sustained loss of contact afterwards and undoing the change.
+//
+// The delivery decision is made here too, and for the same reason it is made in
+// Apply: going BACK across an address change is as un-hot-loadable as going
+// forward. A revert that only sent SIGHUP would be refused by nebula exactly as
+// the original apply would have been, leaving a host that has restored the old
+// certificate on disk, reported itself as reverted, and is still running the
+// generation that broke it.
 //
 // Returns an error if there is no previous generation to return to, which is
 // the first-enrollment case: there is nothing better to fall back to, and
@@ -430,13 +596,7 @@ func (a *Applier) Revert(ctx context.Context) error {
 		return fmt.Errorf("no previous generation to revert to: %w", err)
 	}
 
-	targets := map[string]string{
-		"ca.crt":     a.Layout.Paths.CA,
-		"host.crt":   a.Layout.Paths.Cert,
-		"host.key":   a.Layout.Paths.Key,
-		FragmentName: filepath.Join(a.Layout.ConfigD, FragmentName),
-	}
-
+	targets := a.Layout.targets()
 	backup := map[string]string{}
 	for name := range targets {
 		p := filepath.Join(dir, name)
@@ -448,18 +608,49 @@ func (a *Applier) Revert(ctx context.Context) error {
 		return fmt.Errorf("previous generation at %s is empty", dir)
 	}
 
+	mode, err := a.revertMode(backup)
+	if err != nil {
+		return err
+	}
+	if mode == ModeRestart && a.Supervisor == nil {
+		return fmt.Errorf("%w: reverting crosses an overlay address or curve change, which "+
+			"nebula cannot hot-load. Configure -restart, or restart nebula by hand after "+
+			"reverting. Refusing to restore a certificate that would be silently ignored",
+			ErrRestartRequired)
+	}
+
 	if err := a.restore(backup, targets); err != nil {
 		return fmt.Errorf("restore previous generation: %w", err)
 	}
-	_ = syncDir(a.Layout.Dir)
-	_ = syncDir(a.Layout.ConfigD)
+	a.syncDirs()
 
-	if err := a.Reloader.Reload(ctx); err != nil {
-		return fmt.Errorf("reverted on disk but reload failed: %w", err)
+	if err := a.deliver(ctx, mode); err != nil {
+		return fmt.Errorf("reverted on disk but %s failed: %w", mode, err)
 	}
 
-	a.Log.Warn("reverted to the previous generation", "from", dir)
+	a.Log.Warn("reverted to the previous generation",
+		"network", a.Layout.Network, "from", dir, "delivery", mode.String())
 	return nil
+}
+
+// revertMode compares the certificate about to be restored with the one running.
+func (a *Applier) revertMode(backup map[string]string) (ApplyMode, error) {
+	prev, ok := backup[CertName]
+	if !ok {
+		return ModeReload, nil
+	}
+	prevPEM, err := os.ReadFile(prev)
+	if err != nil {
+		return ModeReload, fmt.Errorf("read previous certificate: %w", err)
+	}
+	current, err := os.ReadFile(a.Layout.Paths.Cert)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ModeReload, nil
+		}
+		return ModeReload, fmt.Errorf("read current certificate: %w", err)
+	}
+	return ModeFor(string(current), string(prevPEM))
 }
 
 // writeFileSync writes and fsyncs a file. The fsync matters: a rename is only

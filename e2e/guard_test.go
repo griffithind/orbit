@@ -89,8 +89,8 @@ func TestGuardRevertsUnconfirmedGeneration(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "guarded", "10.42.4.5", false, false, nil)
 
-	certPath := filepath.Join(host.dir, "orbit-host.crt")
-	cfgPath := filepath.Join(host.dir, "config.d", agent.FragmentName)
+	certPath := agent.DefaultLayout(host.dir).Paths.Cert
+	cfgPath := agent.DefaultLayout(host.dir).ConfigPath()
 	goodCert := readFile(t, certPath)
 	goodCfg := readFile(t, cfgPath)
 
@@ -136,7 +136,7 @@ func TestGuardQuarantinesTheBadGeneration(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "quarantine", "10.42.4.9", false, false, nil)
 
-	certPath := filepath.Join(host.dir, "orbit-host.crt")
+	certPath := agent.DefaultLayout(host.dir).Paths.Cert
 	goodCert := readFile(t, certPath)
 
 	loop := newLoopWithGuard(t, host, ts.URL, agent.GuardPolicy{
@@ -173,7 +173,7 @@ func TestGuardDoesNotRevertAConfirmedGeneration(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "confirmed", "10.42.4.11", false, false, nil)
 
-	certPath := filepath.Join(host.dir, "orbit-host.crt")
+	certPath := agent.DefaultLayout(host.dir).Paths.Cert
 
 	// Driven, not slept. With a real clock this test asserts that a tick
 	// completes within ConfirmWithin, which is a statement about the machine
@@ -213,7 +213,7 @@ func TestGuardDisabled(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "unguarded", "10.42.4.13", false, false, nil)
 
-	certPath := filepath.Join(host.dir, "orbit-host.crt")
+	certPath := agent.DefaultLayout(host.dir).Paths.Cert
 
 	loop := newLoopWithGuard(t, host, ts.URL, agent.GuardPolicy{
 		ConfirmWithin: 10 * time.Millisecond,

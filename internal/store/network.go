@@ -6,13 +6,56 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
+// ErrSlugRequired is returned when a network's slug can be neither supplied nor
+// derived. It names the parameter because the caller can fix exactly one thing.
+var ErrSlugRequired = errors.New("slug is required and could not be derived from the name")
+
+// Slugify derives a machine-safe slug from a display name.
+//
+// A SUGGESTION, applied only when a caller supplies no slug of its own. The two
+// values are deliberately independent afterwards: the slug never changes and
+// the name is free to, so deriving one from the other on every write would
+// quietly reintroduce the coupling that splitting them removed.
+//
+// Anything outside [a-z0-9] becomes a hyphen, runs collapse, and the ends are
+// trimmed — so "Prod (EU)" yields "prod-eu" and "Zürich" yields "z-rich", which
+// is ugly enough to make an operator supply a better one and still valid enough
+// to not fail a bootstrap at three in the morning. Truncation is to 32 with a
+// second trim, because cutting mid-word can leave a trailing hyphen the charset
+// constraint would then refuse.
+func Slugify(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			if b.Len() > 0 && b.String()[b.Len()-1] != '-' {
+				b.WriteByte('-')
+			}
+		}
+	}
+	s := strings.Trim(b.String(), "-")
+	if len(s) > 32 {
+		s = strings.TrimRight(s[:32], "-")
+	}
+	return s
+}
+
 // CreateNetwork inserts a network.
+//
+// The slug is derived from the name when the caller leaves it empty, so that
+// every existing creation path — POST /v1/networks, `orbitd bootstrap`, the
+// test fixtures — keeps working without restating a value it has no opinion
+// about. A caller that does have an opinion passes one, and it is stored
+// verbatim; the database refuses anything the charset forbids.
 func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 	if n.CertVer == 0 {
 		n.CertVer = 2
@@ -23,12 +66,26 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 	if n.CertTTL == 0 {
 		n.CertTTL = 24 * time.Hour
 	}
+	if n.ConfigMode == "" {
+		n.ConfigMode = ConfigModeAuthoritative
+	}
+	if len(n.Overrides) == 0 {
+		n.Overrides = []byte(`{}`)
+	}
+	if n.Slug == "" {
+		n.Slug = Slugify(n.Name)
+	}
+	if n.Slug == "" {
+		return fmt.Errorf("create network: %w", ErrSlugRequired)
+	}
 
 	err := t.tx.QueryRow(ctx, `
-		INSERT INTO orbit.network (name, cidrs, cert_version, curve, cert_ttl)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO orbit.network (slug, name, cidrs, cert_version, curve, cert_ttl,
+		                           listen_port, config_mode, config_overrides)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, config_epoch, blocklist_epoch, created_at`,
-		n.Name, nonNil(n.CIDRs), n.CertVer, n.Curve, n.CertTTL,
+		n.Slug, n.Name, nonNil(n.CIDRs), n.CertVer, n.Curve, n.CertTTL,
+		n.ListenPort, n.ConfigMode, n.Overrides,
 	).Scan(&n.ID, &n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
 	if err != nil {
 		return mapErr(err, "create network")
@@ -36,38 +93,50 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 	return nil
 }
 
-const networkCols = `id, name, cidrs, cert_version, curve, cert_ttl,
+const networkCols = `id, slug, name, cidrs, cert_version, curve, cert_ttl,
+	listen_port, config_mode, config_overrides,
 	config_epoch, blocklist_epoch, created_at`
 
-func (t *Tx) GetNetwork(ctx context.Context, id uuid.UUID) (*Network, error) {
+func scanNetwork(row interface{ Scan(...any) error }) (*Network, error) {
 	var n Network
-	err := t.tx.QueryRow(ctx,
-		`SELECT `+networkCols+` FROM orbit.network WHERE id = $1`, id,
-	).Scan(&n.ID, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve, &n.CertTTL,
+	err := row.Scan(&n.ID, &n.Slug, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve, &n.CertTTL,
+		&n.ListenPort, &n.ConfigMode, &n.Overrides,
 		&n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
 	if err != nil {
-		return nil, mapErr(err, "get network")
+		return nil, err
 	}
 	return &n, nil
 }
 
-// GetNetworkByName resolves a network by its name.
-//
-// Names are globally unique for networks — UNIQUE (name), not UNIQUE
-// (something, name) as for hosts and roles — so this cannot be ambiguous, and a
-// name is therefore a first-class way to address one. Migration 0005 keeps a
-// name from ever looking like a uuid, so a caller holding either can resolve it
-// in one query instead of listing every network and filtering.
-func (t *Tx) GetNetworkByName(ctx context.Context, name string) (*Network, error) {
-	var n Network
-	err := t.tx.QueryRow(ctx,
-		`SELECT `+networkCols+` FROM orbit.network WHERE name = $1`, name,
-	).Scan(&n.ID, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve, &n.CertTTL,
-		&n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
+func (t *Tx) GetNetwork(ctx context.Context, id uuid.UUID) (*Network, error) {
+	n, err := scanNetwork(t.tx.QueryRow(ctx,
+		`SELECT `+networkCols+` FROM orbit.network WHERE id = $1`, id))
 	if err != nil {
-		return nil, mapErr(err, "get network by name")
+		return nil, mapErr(err, "get network")
 	}
-	return &n, nil
+	return n, nil
+}
+
+// GetNetworkBySlug resolves a network by its slug.
+//
+// The slug is the only string a network may be addressed by, and it is safe to
+// address by because it is immutable: a script that memorised one still names
+// the same network after a rename. Its predecessor, GetNetworkByName, resolved a
+// MUTABLE string — which meant renaming a network for readability silently
+// retargeted every caller that had memorised the old label, with no error
+// anywhere.
+//
+// A slug can never be confused with a uuid: the charset caps it at 32
+// characters and a uuid's canonical form is 36, so the two are disjoint by
+// length before a character is compared. That is why the shared
+// /v1/networks/{ref} route needs no constraint to keep them apart.
+func (t *Tx) GetNetworkBySlug(ctx context.Context, slug string) (*Network, error) {
+	n, err := scanNetwork(t.tx.QueryRow(ctx,
+		`SELECT `+networkCols+` FROM orbit.network WHERE slug = $1`, slug))
+	if err != nil {
+		return nil, mapErr(err, "get network by slug")
+	}
+	return n, nil
 }
 
 func (t *Tx) ListNetworks(ctx context.Context) ([]Network, error) {
@@ -79,14 +148,85 @@ func (t *Tx) ListNetworks(ctx context.Context) ([]Network, error) {
 
 	var out []Network
 	for rows.Next() {
-		var n Network
-		if err := rows.Scan(&n.ID, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve,
-			&n.CertTTL, &n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt); err != nil {
+		n, err := scanNetwork(rows)
+		if err != nil {
 			return nil, mapErr(err, "scan network")
 		}
-		out = append(out, n)
+		out = append(out, *n)
 	}
 	return out, rows.Err()
+}
+
+// UpdateNetworkName changes the display label and nothing else.
+//
+// Safe precisely because the label addresses nothing: the id and the slug are
+// what resolve, both are immutable, and neither moves here. That is the whole
+// point of having three columns instead of two.
+func (t *Tx) UpdateNetworkName(ctx context.Context, id uuid.UUID, name string) (*Network, error) {
+	n, err := scanNetwork(t.tx.QueryRow(ctx,
+		`UPDATE orbit.network SET name = $2 WHERE id = $1 RETURNING `+networkCols, id, name))
+	if err != nil {
+		return nil, mapErr(err, "rename network")
+	}
+	// No epoch bump. The name appears in no rendered configuration — renderFor
+	// never reads it — so waking every agent in the network to re-fetch a
+	// byte-identical fragment would make renaming a network fleet-wide work.
+	return n, nil
+}
+
+// UpdateNetworkInstanceDefaults changes the per-network listen port and config
+// mode. A nil field is left alone.
+//
+// BOTH REQUIRE A RESTART, on every host in the network, which is why this does
+// more than write two columns. Nebula binds its UDP listener at startup and
+// points at its config path at startup; neither moves on a reload. So a host
+// handed a new port would render it, reload, and go on listening where it always
+// did — with the control plane reporting a port nothing is bound to. Marking
+// every live host restart-required is the same mechanism an address change uses,
+// and for the same reason: the alternative is a change that silently does not
+// take effect.
+//
+// Nothing is marked when nothing changed. A PATCH that restates the current
+// values must not restart a fleet, which is the same argument RoleChange.Changed
+// makes about waking one.
+func (t *Tx) UpdateNetworkInstanceDefaults(ctx context.Context, id uuid.UUID, listenPort *int, configMode *string) (*Network, error) {
+	before, err := t.GetNetwork(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	port := before.ListenPort
+	if listenPort != nil {
+		port = listenPort
+	}
+	mode := before.ConfigMode
+	if configMode != nil {
+		mode = *configMode
+	}
+
+	after, err := scanNetwork(t.tx.QueryRow(ctx, `
+		UPDATE orbit.network SET listen_port = $2, config_mode = $3
+		 WHERE id = $1
+		   AND (listen_port, config_mode) IS DISTINCT FROM ($2::int, $3::text)
+		RETURNING `+networkCols, id, port, mode))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return before, nil // unchanged; no epoch bump, no fleet-wide restart
+	}
+	if err != nil {
+		return nil, mapErr(err, "update network instance defaults")
+	}
+
+	epoch, err := t.BumpEpoch(ctx, id, EpochConfig)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := t.tx.Exec(ctx, `
+		UPDATE orbit.host SET restart_required_epoch = $2
+		 WHERE network_id = $1 AND state IN ('enrolled', 'active')`, id, epoch); err != nil {
+		return nil, mapErr(err, "mark hosts restart required")
+	}
+	after.ConfigEpoch = epoch
+	return after, nil
 }
 
 // ContainsAddr reports whether addr falls inside one of the network's prefixes.
@@ -98,6 +238,154 @@ func (n *Network) ContainsAddr(addr netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// PrefixFor returns the network prefix containing addr.
+//
+// The FIRST match, which is the same rule enroll.certNetworks applies when it
+// decides the prefix length to embed in a certificate. The two must agree: the
+// prefix length is what tells nebula whether a host can reach the overlay
+// directly or treats every peer as off-net, so a disagreement here produces a
+// host that enrolls and then cannot route.
+func (n *Network) PrefixFor(addr netip.Addr) (netip.Prefix, bool) {
+	for _, p := range n.CIDRs {
+		if p.Contains(addr) {
+			return p, true
+		}
+	}
+	return netip.Prefix{}, false
+}
+
+//------------------------------------------------------------------------------
+// Network prefixes
+//------------------------------------------------------------------------------
+
+// ErrCIDRInUse is returned when a prefix cannot be removed because hosts hold
+// addresses inside it.
+var ErrCIDRInUse = errors.New("hosts hold addresses in this prefix")
+
+// ErrCIDROverlap is returned when a prefix would overlap one the network
+// already has.
+var ErrCIDROverlap = errors.New("prefix overlaps one this network already has")
+
+// ErrLastCIDR is returned when removing a prefix would leave a network with
+// none.
+var ErrLastCIDR = errors.New("a network must keep at least one prefix")
+
+// AddNetworkCIDR appends a prefix.
+//
+// Overlap is refused. enroll.certNetworks pairs each host address with the
+// FIRST network prefix that contains it, so two overlapping prefixes make the
+// certificate a host is issued depend on array order — 10.42.0.7/16 and
+// 10.42.0.7/24 are materially different certificates, and the difference
+// decides whether the host routes to the rest of the overlay or treats every
+// peer as off-net. Nothing about that would fail loudly; it would surface as
+// one host that enrolled fine and cannot reach anything.
+//
+// NO CONFIG EPOCH BUMP, and this was checked rather than assumed: renderFor
+// builds nebulacfg.Input out of the topology, the blocklist, the trust bundle
+// and the host's role, and the network's prefixes appear in none of them. They
+// reach a host only through the certificate, and only at issuance. Bumping
+// would wake every agent in the network to re-render a byte-identical file.
+func (t *Tx) AddNetworkCIDR(ctx context.Context, id uuid.UUID, p netip.Prefix) (*Network, error) {
+	net, err := t.GetNetwork(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, existing := range net.CIDRs {
+		if existing == p {
+			return net, nil // idempotent
+		}
+		if existing.Overlaps(p) {
+			return nil, fmt.Errorf("%w: %s overlaps %s", ErrCIDROverlap, p, existing)
+		}
+	}
+
+	out, err := scanNetwork(t.tx.QueryRow(ctx,
+		`UPDATE orbit.network SET cidrs = cidrs || $2::cidr WHERE id = $1
+		 RETURNING `+networkCols, id, p))
+	if err != nil {
+		return nil, mapErr(err, "add network cidr")
+	}
+	return out, nil
+}
+
+// AddressHolder is a host holding an address inside some prefix.
+type AddressHolder struct {
+	HostID uuid.UUID
+	Name   string
+	Addr   netip.Addr
+}
+
+// CIDRHolders lists the hosts with an address inside a prefix.
+//
+// Answers the only question an operator has when a removal is refused. Deleted
+// hosts are included for the same reason RoleHosts includes them: their
+// host_address rows still exist and still block the removal, so a blocker list
+// that omitted them would report an empty set for a refusal.
+func (t *Tx) CIDRHolders(ctx context.Context, networkID uuid.UUID, p netip.Prefix) ([]AddressHolder, error) {
+	rows, err := t.tx.Query(ctx, `
+		SELECT a.host_id, h.name, a.addr
+		  FROM orbit.host_address a
+		  JOIN orbit.host h ON (h.network_id, h.id) = (a.network_id, a.host_id)
+		 WHERE a.network_id = $1 AND a.addr <<= $2::cidr
+		 ORDER BY h.name, a.addr`, networkID, p)
+	if err != nil {
+		return nil, mapErr(err, "cidr holders")
+	}
+	defer rows.Close()
+
+	var out []AddressHolder
+	for rows.Next() {
+		var h AddressHolder
+		if err := rows.Scan(&h.HostID, &h.Name, &h.Addr); err != nil {
+			return nil, mapErr(err, "scan cidr holder")
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// RemoveNetworkCIDR drops a prefix no host has an address in.
+//
+// Refused while any host holds one, because removing it does not take the
+// address away — the host_address row survives, the host keeps answering on it,
+// and the damage appears at the host's NEXT RENEWAL, when certNetworks can no
+// longer pair the address with a prefix and issuance fails. That is hours after
+// the request that caused it, on a host nobody is looking at.
+//
+// Also refused when it is the last prefix: a network with no address space can
+// hold no host that can be issued a certificate.
+func (t *Tx) RemoveNetworkCIDR(ctx context.Context, id uuid.UUID, p netip.Prefix) (*Network, error) {
+	net, err := t.GetNetwork(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(net.CIDRs, p) {
+		return nil, fmt.Errorf("remove network cidr: %w: %s", ErrNotFound, p)
+	}
+	if len(net.CIDRs) == 1 {
+		return nil, fmt.Errorf("%w: %s is the only prefix of network %s", ErrLastCIDR, p, net.Slug)
+	}
+
+	holders, err := t.CIDRHolders(ctx, id, p)
+	if err != nil {
+		return nil, err
+	}
+	if len(holders) > 0 {
+		return nil, fmt.Errorf("%w: %d host(s) inside %s", ErrCIDRInUse, len(holders), p)
+	}
+
+	out, err := scanNetwork(t.tx.QueryRow(ctx,
+		`UPDATE orbit.network SET cidrs = array_remove(cidrs, $2::cidr) WHERE id = $1
+		 RETURNING `+networkCols, id, p))
+	if err != nil {
+		return nil, mapErr(err, "remove network cidr")
+	}
+	// No epoch bump, for the same reason AddNetworkCIDR does not bump: prefixes
+	// reach a host through its certificate and nowhere else, and by the check
+	// above no host has one issued out of this prefix.
+	return out, nil
 }
 
 //------------------------------------------------------------------------------

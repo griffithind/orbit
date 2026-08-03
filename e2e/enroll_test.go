@@ -484,8 +484,8 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 	// The agent wrote real files. Confirm the shape before booting anything.
 	for _, hst := range []*enrolledHost{lh, client} {
 		for _, f := range []string{
-			"orbit-ca.crt", "orbit-host.crt", "orbit-host.key",
-			filepath.Join("config.d", agent.FragmentName),
+			"ca.crt", "host.crt", "host.key",
+			"nebula.yml",
 		} {
 			p := filepath.Join(hst.dir, f)
 			info, err := os.Stat(p)
@@ -500,7 +500,7 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 
 	// The client's config must point at the lighthouse; the lighthouse's must
 	// not point at itself.
-	clientCfg := readFile(t, filepath.Join(client.dir, "config.d", agent.FragmentName))
+	clientCfg := readFile(t, agent.DefaultLayout(client.dir).ConfigPath())
 	if !strings.Contains(clientCfg, "10.42.0.1") {
 		t.Fatalf("client config does not reference the lighthouse:\n%s", clientCfg)
 	}
@@ -508,7 +508,7 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 		t.Fatalf("client config lacks the lighthouse underlay address:\n%s", clientCfg)
 	}
 
-	lhCfg := readFile(t, filepath.Join(lh.dir, "config.d", agent.FragmentName))
+	lhCfg := readFile(t, agent.DefaultLayout(lh.dir).ConfigPath())
 	if strings.Contains(lhCfg, "hosts:\n        - ") {
 		t.Errorf("lighthouse was told to query a lighthouse:\n%s", lhCfg)
 	}
@@ -604,7 +604,7 @@ func bootNebula(t *testing.T, dir string, addr netip.Addr) (*nebulaNode, error) 
 	t.Helper()
 
 	c := config.NewC(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := c.Load(filepath.Join(dir, "config.d")); err != nil {
+	if err := c.Load(agent.DefaultLayout(dir).NebulaConfigArg()); err != nil {
 		return nil, fmt.Errorf("load config from %s: %w", dir, err)
 	}
 
@@ -743,7 +743,7 @@ func TestApplyRejectsBadConfig(t *testing.T) {
 	}
 
 	// Nothing may have been installed.
-	if _, err := os.Stat(filepath.Join(dir, "config.d", agent.FragmentName)); !os.IsNotExist(err) {
+	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); !os.IsNotExist(err) {
 		t.Error("a rejected configuration was installed anyway")
 	}
 }

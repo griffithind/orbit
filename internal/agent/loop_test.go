@@ -100,9 +100,6 @@ func testLoop(t *testing.T, baseURL string) *Loop {
 	t.Helper()
 	dir := t.TempDir()
 	layout := DefaultLayout(dir)
-	if err := os.MkdirAll(layout.ConfigD, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &Loop{
 		Client:  NewClient(baseURL),
@@ -122,7 +119,7 @@ func writePreviousGeneration(t *testing.T, l *Loop) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"ca.crt", "host.crt", "host.key", FragmentName} {
+	for _, name := range []string{CAName, CertName, KeyName, l.Layout.ConfigName()} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("previous "+name), 0o600); err != nil {
 			t.Fatal(err)
 		}

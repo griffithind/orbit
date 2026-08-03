@@ -145,10 +145,11 @@ curl -H "Authorization: Bearer $ORBIT_TOKEN" -XPOST \
      localhost:8080/v1/hosts/$ID/enrollment-code
 
 go run ./cmd/orbit-agent enroll -url http://localhost:8080 -code orb_1_… \
-     -dir /etc/nebula -reload pid:/run/nebula.pid
+     -network prod -reload "systemctl reload nebula@prod"
 ```
 
-The agent writes `config.d/50-orbit.yml` plus certificate material and signals a
+The agent writes one complete `/var/lib/orbit/<slug>/nebula.yml` plus certificate
+material and signals a
 reload. It never starts, stops, or embeds nebula.
 
 **Validate before touching anything live.** The applier stages a generation in a
@@ -162,7 +163,7 @@ restores the previous generation and reloads again.
 an agent can hash the fragment to detect real change and a diff in review means
 something actually changed.
 
-**Nebula appends list values across config files.** An operator rule and an Orbit
+**In fragment mode, nebula appends list values across config files.** An operator rule and an Orbit
 rule both apply. There is no "deny by omission" and no way for the managed
 fragment to remove a rule the operator wrote.
 
@@ -172,7 +173,7 @@ Agents renew at **50% of certificate lifetime** with deterministic per-host
 jitter, leaving the entire second half to recover from failure before expiry.
 
 ```bash
-go run ./cmd/orbit-agent run -dir /etc/nebula \
+go run ./cmd/orbit-agent run -network prod \
     -reload pid:/run/nebula.pid \
     -restart "systemctl restart nebula" \
     -verify-url http://10.42.0.1:8443/agent/v1/state
@@ -317,7 +318,8 @@ that no longer resolves. Nothing local detects that at apply time. The agent
 notices sustained loss of contact and puts the previous generation back.
 
 ```bash
-orbit-agent run -dir /etc/nebula -reload pid:/run/nebula.pid \
+orbit-agent run -network prod -reload "systemctl reload nebula@prod" \
+    -restart "unit:nebula@prod" \
     -verify-url http://10.42.0.2:8443/agent/v1/state
 ```
 
@@ -457,7 +459,7 @@ path is closed to it. It falls back to the public endpoint and proves possession
 of the key from its last certificate:
 
 ```bash
-orbit-agent recover -dir /etc/nebula -reload pid:/run/nebula.pid
+orbit-agent recover -network prod -reload "systemctl reload nebula@prod"
 ```
 
 The proof is Diffie-Hellman rather than a signature — nebula host keys on

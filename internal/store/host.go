@@ -19,18 +19,27 @@ import (
 // succeed: one gets ErrConflict from the database. An application-level "is
 // this address taken?" check would have a window between the check and the
 // insert, and the loser of that race would be a host that cannot communicate.
+//
+// A host created with no address is legal and is what the allocating path wants:
+// CreateHostAllocating inserts the row and then allocates inside the same
+// transaction, so the allocation and the host commit together or neither does.
 func (t *Tx) CreateHost(ctx context.Context, h *Host) error {
 	if h.State == "" {
 		h.State = HostCreated
 	}
+	if len(h.Overrides) == 0 {
+		h.Overrides = []byte(`{}`)
+	}
 
 	err := t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.host (network_id, name, role_id, tags,
-		                        is_lighthouse, is_relay, static_addrs, state)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		                        is_lighthouse, is_relay, static_addrs, state,
+		                        listen_port, tun_dev, config_mode, config_overrides)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, created_at`,
 		h.NetworkID, h.Name, h.RoleID, nonNil(h.Tags),
 		h.IsLighthouse, h.IsRelay, nonNil(h.StaticAddrs), h.State,
+		h.ListenPort, nullIfEmpty(h.TunDev), nullIfEmpty(h.ConfigMode), h.Overrides,
 	).Scan(&h.ID, &h.CreatedAt)
 	if err != nil {
 		return mapErr(err, "create host")
@@ -47,13 +56,38 @@ func (t *Tx) CreateHost(ctx context.Context, h *Host) error {
 	return nil
 }
 
+// CreateHostAllocating inserts a host and allocates it an address.
+//
+// One transaction, deliberately. Splitting it into "create the host, then ask
+// for an address" would leave a host with no address every time the second half
+// failed — and a host with no address is not a partially-configured host, it is
+// one that can never be issued a certificate (enroll.certNetworks refuses it).
+//
+// prefix selects which of the network's prefixes to allocate from; the zero
+// value takes the first. No epoch bump and no restart marking: the host does not
+// exist yet as far as any running nebula is concerned.
+func (t *Tx) CreateHostAllocating(ctx context.Context, net *Network, h *Host, prefix netip.Prefix) error {
+	h.Addrs = nil
+	if err := t.CreateHost(ctx, h); err != nil {
+		return err
+	}
+	addr, err := t.AllocateHostAddress(ctx, net, h.ID, prefix)
+	if err != nil {
+		return err
+	}
+	h.Addrs = []netip.Addr{addr}
+	return nil
+}
+
 const hostCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
 	h.is_lighthouse, h.is_relay, h.static_addrs, h.state,
 	h.applied_config_epoch, h.applied_blocklist_epoch,
 	h.last_seen_at, coalesce(h.nebula_version, ''), coalesce(h.agent_version, ''),
 	h.created_at, coalesce(r.name, ''),
 	coalesce(array(SELECT a.addr FROM orbit.host_address a WHERE a.host_id = h.id
-	               ORDER BY a.addr), '{}')`
+	               ORDER BY a.addr), '{}'),
+	h.listen_port, coalesce(h.tun_dev, ''), coalesce(h.config_mode, ''),
+	h.config_overrides, h.restart_required_epoch, h.addr_changed_at`
 
 // hostFrom is the FROM clause hostCols is written against; the two travel
 // together because hostCols selects the role name out of it.
@@ -71,7 +105,9 @@ func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 		&h.IsLighthouse, &h.IsRelay, &h.StaticAddrs, &h.State,
 		&h.AppliedConfigEpoch, &h.AppliedBlocklistEpoch,
 		&h.LastSeenAt, &h.NebulaVersion, &h.AgentVersion, &h.CreatedAt,
-		&h.RoleName, &h.Addrs)
+		&h.RoleName, &h.Addrs,
+		&h.ListenPort, &h.TunDev, &h.ConfigMode, &h.Overrides,
+		&h.RestartRequiredEpoch, &h.AddrChangedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -685,14 +721,6 @@ func (t *Tx) PruneExpiredCredentials(ctx context.Context, before time.Time) (int
 		return 0, mapErr(err, "prune credentials")
 	}
 	return tag.RowsAffected(), nil
-}
-
-// AddHostAddress claims an additional overlay address for an existing host.
-func (t *Tx) AddHostAddress(ctx context.Context, h *Host, addr netip.Addr) error {
-	_, err := t.tx.Exec(ctx, `
-		INSERT INTO orbit.host_address (network_id, host_id, addr)
-		VALUES ($1, $2, $3)`, h.NetworkID, h.ID, addr)
-	return mapErr(err, "add host address")
 }
 
 // FindHostByAddr looks up a host by one of its overlay addresses.

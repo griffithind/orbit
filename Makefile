@@ -1,3 +1,9 @@
+# Stamped into every binary via internal/version. "dev" when unset, which is
+# always visible and never a release — an empty string would vanish behind an
+# omitempty tag and make a failed injection look like an old build.
+VERSION ?= dev
+LDFLAGS := -X github.com/griffithind/orbit/internal/version.Version=$(VERSION)
+
 ADMIN_DSN ?= postgres://postgres:orbit@localhost:5433/orbit?sslmode=disable
 
 .PHONY: help
@@ -7,7 +13,7 @@ help:
 
 .PHONY: build
 build: ## Build all packages
-	go build ./...
+	go build -ldflags "$(LDFLAGS)" ./...
 
 # The admin CLI, built on its own because it is the one binary that ships to
 # somewhere other than the control plane host. It links neither internal/mesh

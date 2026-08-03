@@ -81,7 +81,7 @@ func TestNewCAIsPublishedImmediately(t *testing.T) {
 
 	// And it must actually appear in what hosts are handed.
 	host := h.createAndEnroll(t, ts, "bundle-check", "10.42.40.5", false, false, nil)
-	bundle := readFile(t, host.dir+"/orbit-ca.crt")
+	bundle := readFile(t, host.dir+"/ca.crt")
 	if countPEMBlocks(bundle) < 2 {
 		t.Errorf("trust bundle has %d CAs, want the original plus the pending one",
 			countPEMBlocks(bundle))
@@ -267,11 +267,11 @@ func TestFullRotation(t *testing.T) {
 	}
 
 	// The old CA must be gone from what hosts are handed.
-	before := countPEMBlocks(readFile(t, host.dir+"/orbit-ca.crt"))
+	before := countPEMBlocks(readFile(t, host.dir+"/ca.crt"))
 	if err := loop.Tick(ctx); err != nil {
 		t.Logf("tick: %v", err)
 	}
-	after := countPEMBlocks(readFile(t, host.dir+"/orbit-ca.crt"))
+	after := countPEMBlocks(readFile(t, host.dir+"/ca.crt"))
 	if after >= before {
 		t.Errorf("trust bundle did not shrink after retirement: %d -> %d", before, after)
 	}

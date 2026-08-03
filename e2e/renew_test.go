@@ -69,8 +69,8 @@ func TestRenewalKeepsTunnelAlive(t *testing.T) {
 	assertReachable(t, clientNode, lh.addr, port, "before")
 	stop()
 
-	certBefore := readFile(t, filepath.Join(client.dir, "orbit-host.crt"))
-	keyBefore := readFile(t, filepath.Join(client.dir, "orbit-host.key"))
+	certBefore := readFile(t, filepath.Join(client.dir, "host.crt"))
+	keyBefore := readFile(t, filepath.Join(client.dir, "host.key"))
 
 	// Renew, through the real agent loop: new keypair, new certificate, and an
 	// in-process reload standing in for SIGHUP.
@@ -105,8 +105,8 @@ func TestRenewalKeepsTunnelAlive(t *testing.T) {
 		t.Fatalf("renew: %v", err)
 	}
 
-	certAfter := readFile(t, filepath.Join(client.dir, "orbit-host.crt"))
-	keyAfter := readFile(t, filepath.Join(client.dir, "orbit-host.key"))
+	certAfter := readFile(t, filepath.Join(client.dir, "host.crt"))
+	keyAfter := readFile(t, filepath.Join(client.dir, "host.key"))
 
 	if certAfter == certBefore {
 		t.Fatal("renewal did not install a new certificate")
@@ -152,8 +152,8 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "rollback", "10.42.2.5", false, false, nil)
 
-	certBefore := readFile(t, filepath.Join(host.dir, "orbit-host.crt"))
-	configBefore := readFile(t, filepath.Join(host.dir, "config.d", agent.FragmentName))
+	certBefore := readFile(t, filepath.Join(host.dir, "host.crt"))
+	configBefore := readFile(t, agent.DefaultLayout(host.dir).ConfigPath())
 
 	// Renew with a verifier that always fails, standing in for "the host lost
 	// contact with the control plane after applying".
@@ -190,8 +190,8 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 		t.Fatal("renewal reported success despite failing verification")
 	}
 
-	certAfter := readFile(t, filepath.Join(host.dir, "orbit-host.crt"))
-	configAfter := readFile(t, filepath.Join(host.dir, "config.d", agent.FragmentName))
+	certAfter := readFile(t, filepath.Join(host.dir, "host.crt"))
+	configAfter := readFile(t, agent.DefaultLayout(host.dir).ConfigPath())
 
 	if certAfter != certBefore {
 		t.Error("certificate was not rolled back")
@@ -213,8 +213,8 @@ func TestRenewReuseKeyKeepsPrivateKey(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "reuse-key", "10.42.2.9", false, false, nil)
 
-	certBefore := readFile(t, filepath.Join(host.dir, "orbit-host.crt"))
-	keyBefore := readFile(t, filepath.Join(host.dir, "orbit-host.key"))
+	certBefore := readFile(t, filepath.Join(host.dir, "host.crt"))
+	keyBefore := readFile(t, filepath.Join(host.dir, "host.key"))
 
 	st, _ := agent.ReadState(host.dir)
 	layout := agent.DefaultLayout(host.dir)
@@ -242,10 +242,10 @@ func TestRenewReuseKeyKeepsPrivateKey(t *testing.T) {
 		t.Fatalf("renew with reuse-key: %v", err)
 	}
 
-	if got := readFile(t, filepath.Join(host.dir, "orbit-host.key")); got != keyBefore {
+	if got := readFile(t, filepath.Join(host.dir, "host.key")); got != keyBefore {
 		t.Error("reuse-key renewal replaced the private key")
 	}
-	if got := readFile(t, filepath.Join(host.dir, "orbit-host.crt")); got == certBefore {
+	if got := readFile(t, filepath.Join(host.dir, "host.crt")); got == certBefore {
 		t.Error("reuse-key renewal did not issue a new certificate")
 	}
 }
@@ -259,11 +259,11 @@ func TestAddressChangeRefusedWithoutRestarter(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "readdress", "10.42.3.5", false, false, nil)
-	certBefore := readFile(t, filepath.Join(host.dir, "orbit-host.crt"))
+	certBefore := readFile(t, filepath.Join(host.dir, "host.crt"))
 
 	// Fabricate a generation carrying a certificate for a different address.
 	other := h.createAndEnroll(t, ts, "readdress-other", "10.42.3.6", false, false, nil)
-	otherCert := readFile(t, filepath.Join(other.dir, "orbit-host.crt"))
+	otherCert := readFile(t, filepath.Join(other.dir, "host.crt"))
 
 	layout := agent.DefaultLayout(host.dir)
 	applier := &agent.Applier{
@@ -272,16 +272,16 @@ func TestAddressChangeRefusedWithoutRestarter(t *testing.T) {
 	}
 
 	err := applier.Apply(context.Background(), agent.Material{
-		Config:      readFile(t, filepath.Join(host.dir, "config.d", agent.FragmentName)),
-		CABundle:    readFile(t, filepath.Join(host.dir, "orbit-ca.crt")),
+		Config:      readFile(t, agent.DefaultLayout(host.dir).ConfigPath()),
+		CABundle:    readFile(t, filepath.Join(host.dir, "ca.crt")),
 		Certificate: otherCert,
-		PrivateKey:  readFile(t, filepath.Join(other.dir, "orbit-host.key")),
+		PrivateKey:  readFile(t, filepath.Join(other.dir, "host.key")),
 	})
 	if err == nil {
 		t.Fatal("applied an address change with no restarter configured")
 	}
 
-	if got := readFile(t, filepath.Join(host.dir, "orbit-host.crt")); got != certBefore {
+	if got := readFile(t, filepath.Join(host.dir, "host.crt")); got != certBefore {
 		t.Error("the refused generation was installed anyway")
 	}
 }

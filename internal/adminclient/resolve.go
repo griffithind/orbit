@@ -111,11 +111,24 @@ func (c *Client) ResolveNetwork(ctx context.Context, ref string) (*wire.NetworkR
 		return nil, err
 	}
 
-	// Not found. Name the alternatives, which needs the listing the fast path
-	// avoids — paid once, on the path where someone is already confused.
+	// Not found by id or slug. Before giving up, try the display name — a
+	// convenience the SERVER deliberately does not offer, because a mutable
+	// string must never be an addressing key there: a rename would silently
+	// retarget every script that held one.
+	//
+	// Doing it here is a different trade. The CLI is interactive, the fallback
+	// costs a listing that only happens when the fast path already missed, and
+	// an operator who types the name they see in `orbit network ls` should not
+	// be told it does not exist. Automation that wants stability uses the slug,
+	// which is what the fast path resolves and what `orbitd bootstrap` prints.
 	all, lerr := c.ListNetworks(ctx)
 	if lerr != nil {
 		return nil, err // the original 404 is the more useful error
+	}
+	for i := range all.Value {
+		if all.Value[i].Name == ref {
+			return &all.Value[i], nil
+		}
 	}
 	return nil, &NoMatchError{Kind: "network", Ref: ref, Available: networkNames(all.Value)}
 }
@@ -143,9 +156,22 @@ func (c *Client) SoleNetwork(ctx context.Context) (*wire.NetworkResponse, error)
 	}
 }
 
+// networkNames lists the alternatives when a reference resolved to nothing.
+//
+// Slug first, name in parentheses when they differ: the slug is what the caller
+// should be typing, since it is immutable and is what a script must hold, but
+// the name is what they will recognise from a UI or a colleague.
 func networkNames(nets []wire.NetworkResponse) []string {
 	out := make([]string, 0, len(nets))
 	for _, n := range nets {
+		if n.Slug != "" && n.Slug != n.Name {
+			out = append(out, n.Slug+" ("+n.Name+")")
+			continue
+		}
+		if n.Slug != "" {
+			out = append(out, n.Slug)
+			continue
+		}
 		out = append(out, n.Name)
 	}
 	sort.Strings(out)

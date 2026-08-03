@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/mesh"
@@ -246,7 +247,7 @@ func TestControlPlaneAsLighthouse(t *testing.T) {
 	// Every other host must now be told to use it — that only happens if the
 	// role reached the host record, which is what topology is rendered from.
 	host := h.createAndEnroll(t, ts, "uses-cp-lighthouse", "10.42.64.7", false, false, nil)
-	cfg := readFile(t, host.dir+"/config.d/"+agentFragment())
+	cfg := readFile(t, agent.DefaultLayout(host.dir).ConfigPath())
 	if !strings.Contains(cfg, "10.42.64.1") || !strings.Contains(cfg, public) {
 		t.Fatalf("host was not told to use the control plane as a lighthouse:\n%s", cfg)
 	}
@@ -275,8 +276,6 @@ func TestControlPlaneAsLighthouse(t *testing.T) {
 		t.Errorf("control plane did not pick up the dedicated lighthouse:\n%s", after)
 	}
 }
-
-func agentFragment() string { return "50-orbit.yml" }
 
 // TestLighthouseRoleChangesWithoutRestart is the point of driving roles from
 // the host record rather than from flags: moving the lighthouse is an API call,
