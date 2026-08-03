@@ -9,6 +9,55 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.2.1
+
+Fixes three bugs found by deploying v0.2.0 to a real host. All three are on the
+control plane; managed hosts are unaffected.
+
+### A control plane that is also a lighthouse could not start
+
+`orbitd serve` renders its own nebula configuration, and `-nebula-port` never
+reached it — the flag was applied to every managed host's config and to nothing
+else. With `am_lighthouse` set from the host record and `listen.port` left at 0,
+nebula refuses the config:
+
+```
+lighthouse.am_lighthouse enabled on node but no port number is set in config
+```
+
+That is the single-VM topology from the README, so it affected the most common
+way to run this.
+
+The port now reaches the control plane. Orbit also catches the contradiction
+itself and says what caused it, rather than passing through a message that names
+a nebula field: the port comes from a flag and the lighthouse role from a
+database row, so nothing else compared the two.
+
+### A failed startup looked like a hang, with no error anywhere
+
+`Store.Close` calls `pgxpool.Close`, which waits for every pooled connection to
+be released — and the epoch notifier holds one parked in `WaitForNotification`.
+Nothing bounded that wait.
+
+`Close` runs from a defer in `serve()`. So any startup failure after the store
+opened returned an error, ran the defer, blocked forever, and never reached the
+line in `main()` that prints the error. The process presented as hung with an
+empty log, and systemd SIGKILLed it at `TimeoutStopSec` on every restart. The
+bug above was invisible behind this one for an entire afternoon.
+
+`Close` now gives the pool five seconds. Abandoning connections at exit costs
+nothing — the process is going away and Postgres reaps the backends when the
+sockets close. Never returning costs the error message.
+
+### Guarding the shape of the bug rather than the instance
+
+`mesh.Config` is built from a struct literal in one place and completed in
+another, and a field missing from both is silently zero. `ListenPort` was
+missing from both. A test now walks the struct with reflection and fails on any
+field `cmd/orbitd` never sets — it found `Heartbeat` on its first run, where
+zero happens to be a safe default, so that is now assigned explicitly rather
+than left to look identical to the case that was a defect.
+
 ## v0.2.0
 
 ### Breaking: four binaries became two

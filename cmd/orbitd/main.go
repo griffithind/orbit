@@ -341,9 +341,15 @@ func serve(args []string) error {
 	// never mounted on the public listener, so it is not merely authenticated
 	// but unroutable from outside the mesh.
 	for _, mc := range meshes {
+		// Every field of mesh.Config, explicitly. Zero means different things
+		// per field — a safe default for Heartbeat, an unreachable lighthouse
+		// for ListenPort — and the difference is invisible at a struct literal
+		// that simply omits one. See cmd/orbitd/wiring_test.go.
 		mc.AgentPort = *agentPort
+		mc.ListenPort = *listenPort
 		mc.LighthouseAddrs = splitCSV(*lighthouse)
 		mc.Relay = *relay
+		mc.Heartbeat = mesh.DefaultHeartbeat
 		node, err := mesh.Join(ctx, svc, mc, log)
 		if err != nil {
 			return err

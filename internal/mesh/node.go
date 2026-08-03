@@ -440,6 +440,26 @@ func inlineInto(rendered, caBundle, certPEM, keyPEM string, cfg Config) (string,
 	}
 	listen["port"] = cfg.ListenPort
 
+	// A lighthouse on an ephemeral port is one nothing can find, and nebula
+	// refuses the config rather than starting into that state — with a message
+	// about "lighthouse.am_lighthouse enabled on node but no port number is
+	// set", which names nebula's field and not the reason Orbit produced it.
+	//
+	// Caught here so the error names the actual cause. Port 0 is right for a
+	// control plane that only dials out; it is a contradiction the moment the
+	// host record says this node is also a lighthouse, and the two facts are
+	// decided in different places — the port by a flag, the role by a database
+	// row — so nothing else compares them.
+	if lh, ok := doc["lighthouse"].(map[string]any); ok {
+		if am, _ := lh["am_lighthouse"].(bool); am && cfg.ListenPort == 0 {
+			return "", fmt.Errorf(
+				"this control plane is a lighthouse but has no fixed nebula port: "+
+					"hosts are told to reach it at %v while it would listen on a random one. "+
+					"Set -nebula-port (default 4242), or clear the lighthouse role on its host record",
+				cfg.LighthouseAddrs)
+		}
+	}
+
 	// The control plane accepts exactly one inbound port: the agent API.
 	//
 	// This is set here rather than left to the host's role, and it REPLACES

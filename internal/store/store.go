@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -60,7 +61,38 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
-func (s *Store) Close() { s.pool.Close() }
+// CloseGrace bounds how long Close waits for the pool to drain.
+//
+// Bounded because pgxpool.Close waits for every acquired connection to be
+// RELEASED, and one of them is held by the epoch notifier parked in
+// WaitForNotification. If that connection does not come back — a cancellation
+// that leaves the socket mid-read, a server that stopped answering — Close
+// never returns.
+//
+// What makes that worse than a slow shutdown: Close is called from a defer in
+// orbitd's serve(). A startup failure AFTER the store opens therefore returns
+// an error, runs this defer, blocks forever, and main() never reaches the line
+// that prints the error. The process looks like it hung during startup, with no
+// message anywhere, when in fact it failed immediately and the reason is
+// trapped behind this call. That cost an afternoon of a real deployment.
+const CloseGrace = 5 * time.Second
+
+// Close releases the pool, and gives up if it will not drain.
+//
+// Abandoning connections at exit costs nothing: the process is going away and
+// Postgres reaps the backends when the sockets close. Never returning costs the
+// error message.
+func (s *Store) Close() {
+	done := make(chan struct{})
+	go func() {
+		s.pool.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(CloseGrace):
+	}
+}
 
 // Pool exposes the underlying pool for LISTEN/NOTIFY consumers, which need a
 // dedicated connection rather than a transaction.

@@ -26,7 +26,7 @@ From [releases](https://github.com/griffithind/orbit/releases). Every binary is
 statically linked with no runtime dependencies.
 
 ```bash
-VERSION=0.2.0
+VERSION=0.2.1
 OS=$(uname -s | tr A-Z a-z)
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
@@ -252,7 +252,7 @@ Designed but not implemented, and marked as such where they appear: SSO/OIDC
 
 ## Maturity
 
-**v0.2.0 is an early release.** The tests are thorough and run against a real
+**v0.2.1 is an early release.** The tests are thorough and run against a real
 Postgres and real Nebula tunnels, with no mock layer — the constraints this
 design rests on live in Nebula's own code, and a mock would encode our belief
 about them rather than the behaviour. CI fails if the database tests silently
