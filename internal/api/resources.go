@@ -89,6 +89,14 @@ func (s *Server) resourceRoutes() []route {
 		a("GET /v1/tokens", "tokens:read", s.handleListTokens),
 		a("DELETE /v1/tokens/{id}", "tokens:write", s.handleRevokeToken),
 
+		// Browser sessions are a derived credential: a session references a
+		// token and holds nothing of its own, so revoking the token already
+		// ends every session it opened. These scopes are the token's for that
+		// reason — anyone who can do the larger thing can do the smaller one,
+		// and a sessions:* pair would only be a second place to get it wrong.
+		a("GET /v1/sessions", "tokens:read", s.handleListSessions),
+		a("DELETE /v1/sessions/{id}", "tokens:write", s.handleRevokeSession),
+
 		a("GET /v1/audit-logs", "audit:read", s.handleListAudit),
 
 		// Operational reads. Four questions an operator asks during an incident,
@@ -1519,6 +1527,74 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.log.Info("api token revoked", "token", tokenID, "by", id.TokenID)
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListSessions lists the browser sessions that are usable right now.
+//
+// The console has the same list. It is here too because the operator whose
+// laptop is missing reaches for a terminal, and because "is anything signed in
+// with this credential" is a question about a token, which is an API object.
+//
+// Live only, by exactly the rule that authenticates a cookie — see
+// store.ListUISessions. The empty currentCookie is not an omission: this
+// request arrived with a bearer token, so none of these sessions is the
+// caller's, and marking one would be a lie.
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	var out []wire.SessionResponse
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		sessions, err := tx.ListUISessions(ctx, "")
+		if err != nil {
+			return err
+		}
+		out = make([]wire.SessionResponse, 0, len(sessions))
+		for _, sess := range sessions {
+			resp := wire.SessionResponse{
+				ID: sess.ID.String(), TokenID: sess.TokenID.String(),
+				TokenName: sess.TokenName, ReadOnly: sess.ReadOnly,
+				CreatedAt:  sess.CreatedAt,
+				ExpiresAt:  sess.ExpiresAt,
+				LastSeenAt: sess.LastSeenAt,
+				UserAgent:  sess.UserAgent,
+			}
+			if sess.CreatedIP != nil {
+				resp.CreatedIP = sess.CreatedIP.String()
+			}
+			out = append(out, resp)
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "sessions")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRevokeSession ends one browser session and leaves its token alone.
+//
+// That is the whole reason this exists next to DELETE /v1/tokens/{id}. Revoking
+// the token is the larger act and takes the operator's shell and their CI with
+// it; closing one forgotten browser should not cost that, or it does not get
+// done.
+func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	sessionID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		return tx.RevokeUISessionByID(ctx, sessionID, *id)
+	})
+	if err != nil {
+		// Already-revoked is ErrNotFound, deliberately: see
+		// store.RevokeUISessionByID.
+		s.notFoundOr(w, err, "session")
+		return
+	}
+
+	s.log.Info("browser session revoked", "session", sessionID, "by", id.Subject)
 	w.WriteHeader(http.StatusNoContent)
 }
 

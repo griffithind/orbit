@@ -105,6 +105,20 @@ func (c *Client) RevokeToken(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+// ListSessions returns the browser sessions that can reach the control plane
+// right now. Live only — a session that expired, was signed out, or went idle
+// is absent rather than listed as dead.
+func (c *Client) ListSessions(ctx context.Context) (Result[[]wire.SessionResponse], error) {
+	return get[[]wire.SessionResponse](ctx, c, "/v1/sessions", nil)
+}
+
+// RevokeSession ends one browser session. The token it references keeps
+// working; RevokeToken is the larger act.
+func (c *Client) RevokeSession(ctx context.Context, id uuid.UUID) error {
+	_, err := c.do(ctx, http.MethodDelete, "/v1/sessions/"+id.String(), nil, nil, nil)
+	return err
+}
+
 // AuditFilter mirrors the query parameters GET /v1/audit-logs accepts.
 type AuditFilter struct {
 	Action     string

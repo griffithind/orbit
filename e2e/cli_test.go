@@ -2,9 +2,12 @@ package e2e
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +19,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -423,5 +427,177 @@ func TestCLIDoesNotLinkTheDataPlane(t *testing.T) {
 					"or the database driver onto an operator's laptop", line)
 			}
 		}
+	}
+}
+
+//------------------------------------------------------------------------------
+// Browser sessions, from the terminal
+//------------------------------------------------------------------------------
+
+// newUISession opens a browser session directly against the store, which is
+// what a sign-in on the console does. The CLI has no way to create one — it
+// authenticates with a bearer token and opens nothing — and that asymmetry is
+// the point of the command: the sessions it lists were made by somebody else,
+// somewhere else.
+func (h *harness) newUISession(t *testing.T, tokenID uuid.UUID, readOnly bool, agent string) string {
+	t.Helper()
+	from := netip.MustParseAddr("198.51.100.23")
+	var cookie string
+	err := h.store.Tx(context.Background(), func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		cookie, _, err = tx.CreateUISession(ctx, tokenID, readOnly, &from, agent)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateUISession: %v", err)
+	}
+	return cookie
+}
+
+// TestCLISessionListAndRevoke is the terminal half of the session controls.
+//
+// It exists because the operator whose laptop is missing reaches for a shell,
+// not for a browser — and because the browser they need to close may be the
+// only one they had. A capability that lives solely in the console is one that
+// is unavailable in precisely the situation it was built for.
+func TestCLISessionListAndRevoke(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	var tok wire.TokenResponse
+	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
+		Name: "cli-sessions-" + uuid.NewString()[:8], Scopes: []string{"hosts:read"},
+	}, &tok); code != http.StatusCreated {
+		t.Fatalf("create token: %d", code)
+	}
+	tokenID := uuid.MustParse(tok.ID)
+
+	h.newUISession(t, tokenID, false, "Mozilla/5.0 (Macintosh) orbit-e2e-laptop")
+	h.newUISession(t, tokenID, true, "Mozilla/5.0 (iPhone) orbit-e2e-phone")
+
+	res := h.cli(t, ts, "session", "ls")
+	if res.code != 0 {
+		t.Fatalf("session ls = %d\n%s", res.code, res.stderr)
+	}
+	for _, want := range []string{tok.Name, "orbit-e2e-laptop", "orbit-e2e-phone", "read-only", "full"} {
+		if !strings.Contains(res.stdout, want) {
+			t.Errorf("session ls does not mention %q:\n%s", want, res.stdout)
+		}
+	}
+
+	// -json is the API response verbatim, which is what makes the id available
+	// to a script without parsing a table.
+	res = h.cli(t, ts, "session", "ls", "-json")
+	if res.code != 0 {
+		t.Fatalf("session ls -json = %d\n%s", res.code, res.stderr)
+	}
+	var listed []wire.SessionResponse
+	if err := json.Unmarshal([]byte(res.stdout), &listed); err != nil {
+		t.Fatalf("decode session ls -json: %v\n%s", err, res.stdout)
+	}
+	var phone string
+	for _, sess := range listed {
+		if sess.TokenID == tok.ID && sess.ReadOnly {
+			phone = sess.ID
+			if sess.CreatedIP != "198.51.100.23" {
+				t.Errorf("created_ip = %q", sess.CreatedIP)
+			}
+			if sess.ExpiresAt.IsZero() || sess.LastSeenAt.IsZero() {
+				t.Error("a listed session carries a zero timestamp")
+			}
+		}
+	}
+	if phone == "" {
+		t.Fatalf("the read-only session is not in the listing:\n%s", res.stdout)
+	}
+
+	res = h.cli(t, ts, "session", "revoke", phone)
+	if res.code != 0 {
+		t.Fatalf("session revoke = %d\n%s", res.code, res.stderr)
+	}
+	// The id on stdout, every word of prose on stderr — the split the whole CLI
+	// keeps, so `orbit session revoke $id > /dev/null` stays quiet and a script
+	// reading stdout gets a value and not a paragraph.
+	if !strings.Contains(res.stdout, phone) {
+		t.Errorf("stdout does not name the session that was ended:\n%s", res.stdout)
+	}
+	if strings.Contains(res.stdout, "token revoke") {
+		t.Error("advice landed on stdout, where a script reads values")
+	}
+	// The advice matters more than it looks: closing a browser is the SMALLER
+	// act, and an operator who came here because a credential leaked has not
+	// finished.
+	if !strings.Contains(res.stderr, "orbit token revoke") {
+		t.Errorf("nothing said that the token is still live:\n%s", res.stderr)
+	}
+
+	// Gone, and gone in a way the next command can see.
+	res = h.cli(t, ts, "session", "ls")
+	if strings.Contains(res.stdout, "orbit-e2e-phone") {
+		t.Errorf("the revoked session is still listed:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stdout, "orbit-e2e-laptop") {
+		t.Errorf("revoking one session removed another:\n%s", res.stdout)
+	}
+
+	// Twice is a 404, not a silent success. An operator working an incident is
+	// entitled to know whether they were the one who ended it.
+	if res := h.cli(t, ts, "session", "revoke", phone); res.code != 5 {
+		t.Errorf("second revoke = %d, want 5 (not found)\n%s", res.code, res.stderr)
+	}
+	if res := h.cli(t, ts, "session", "revoke", "not-a-uuid"); res.code != 2 {
+		t.Errorf("revoke of a non-uuid = %d, want 2 (usage)\n%s", res.code, res.stderr)
+	}
+}
+
+// TestCLISessionRevokeNeedsTokensWrite. Listing is tokens:read and ending one is
+// tokens:write, the same pair that guards the token itself — because revoking
+// the token already ends every session it opened, so a caller who can do that
+// can do this, and one who cannot must not be able to reach it the short way.
+func TestCLISessionRevokeNeedsTokensWrite(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	var owner wire.TokenResponse
+	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
+		Name: "cli-session-owner-" + uuid.NewString()[:8], Scopes: []string{"hosts:read"},
+	}, &owner); code != http.StatusCreated {
+		t.Fatalf("create token: %d", code)
+	}
+	h.newUISession(t, uuid.MustParse(owner.ID), false, "orbit-e2e-scope-check")
+
+	var reader wire.TokenResponse
+	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
+		Name: "cli-session-reader-" + uuid.NewString()[:8], Scopes: []string{"tokens:read"},
+	}, &reader); code != http.StatusCreated {
+		t.Fatalf("create reader token: %d", code)
+	}
+
+	res := h.cliAs(t, ts, reader.Token, "session", "ls", "-json")
+	if res.code != 0 {
+		t.Fatalf("tokens:read cannot list sessions: %d\n%s", res.code, res.stderr)
+	}
+	var listed []wire.SessionResponse
+	if err := json.Unmarshal([]byte(res.stdout), &listed); err != nil {
+		t.Fatalf("decode: %v\n%s", err, res.stdout)
+	}
+	var target string
+	for _, sess := range listed {
+		if sess.TokenID == owner.ID {
+			target = sess.ID
+		}
+	}
+	if target == "" {
+		t.Fatal("the session under test is not listed")
+	}
+
+	if res := h.cliAs(t, ts, reader.Token, "session", "revoke", target); res.code != 4 {
+		t.Fatalf("tokens:read ended a session: exit %d\n%s", res.code, res.stderr)
+	}
+
+	// And it really is still live, not merely reported as refused.
+	res = h.cli(t, ts, "session", "ls")
+	if !strings.Contains(res.stdout, "orbit-e2e-scope-check") {
+		t.Errorf("the session was ended by a caller holding only tokens:read:\n%s", res.stdout)
 	}
 }

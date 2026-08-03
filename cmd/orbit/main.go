@@ -22,6 +22,7 @@
 //	policy    read, check, and apply the network policy document
 //	ca        list, activate, and retire certificate authorities
 //	token     list, mint, and revoke admin tokens
+//	session   list and end browser sessions on the operator console
 //	audit     read the audit trail
 package main
 
@@ -62,6 +63,8 @@ func main() {
 		err = caCmd(ctx, os.Args[2:])
 	case "token":
 		err = tokenCmd(ctx, os.Args[2:])
+	case "session":
+		err = sessionCmd(ctx, os.Args[2:])
 	case "audit":
 		err = auditCmd(ctx, os.Args[2:])
 	case "-h", "--help", "help":
@@ -95,6 +98,7 @@ func usage() {
   policy     show, check, apply, use
   ca         ls, activate, retire
   token      ls, create, revoke
+  session    ls, revoke — browser sessions on the operator console
   audit      read the audit trail
 
 Every command takes -json, which emits the API response verbatim.

@@ -1154,6 +1154,36 @@ type TokenResponse struct {
 	RevokedAt string `json:"revoked_at,omitempty"`
 }
 
+// SessionResponse is one live browser session.
+//
+// No "current" field, unlike the console's rendering of the same rows. This
+// surface authenticates with a bearer token and holds no cookie, so no listed
+// session is ever the caller's — a field that is always false is worse than an
+// absent one, because a reader believes it. TokenID is the honest relation:
+// these are the sessions opened WITH a credential, and it may well be the one
+// making this request.
+type SessionResponse struct {
+	ID        string `json:"id"`
+	TokenID   string `json:"token_id"`
+	TokenName string `json:"token_name"`
+	// ReadOnly narrows the token's scopes for this session only. It is the
+	// difference between a browser that can look and one that can act.
+	ReadOnly bool `json:"read_only"`
+	// time.Time rather than the pre-formatted strings TokenResponse uses.
+	// These three are never absent — a session row cannot exist without them —
+	// and the CLI renders all three relatively ("4m ago", "in 8h"), which means
+	// parsing a string back into a time it was just formatted from.
+	CreatedAt  time.Time `json:"created_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	// CreatedIP is the address the session was opened from, absent when it was
+	// not recorded.
+	CreatedIP string `json:"created_ip,omitempty"`
+	// UserAgent is the browser's self-description. Attacker-controlled text:
+	// useful for telling two sessions apart, never for identifying one.
+	UserAgent string `json:"user_agent,omitempty"`
+}
+
 // WhoAmIResponse describes the calling credential to itself.
 //
 // It never contains the token. The point is to answer "which credential am I

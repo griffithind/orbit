@@ -448,10 +448,21 @@ orbit token revoke $TOKEN_ID     # every console signed in with it is out
 ```
 
 That is the big hammer, and it stops the operator's shell and their CI along
-with the browser. The **API tokens** page lists the sessions that are live right
-now — token, sign-in address, browser, last activity, with your own row marked —
-and signs out one at a time. Closing a laptop left in a cafe should not require
-revoking a credential three other things are using.
+with the browser. Closing a laptop left in a cafe should not require revoking a
+credential three other things are using, so sessions can be ended one at a time —
+from the **API tokens** page, or from a terminal:
+
+```bash
+orbit session ls                 # token, address, browser, last activity
+orbit session revoke $SESSION_ID # that browser only; the token keeps working
+```
+
+The terminal form is not a convenience. The operator whose laptop is missing
+reaches for a shell, and the browser they need to close may be the only one they
+had — a control that exists solely in the console is unavailable in exactly the
+situation it was built for. Listing is `tokens:read`, ending one is
+`tokens:write`: the same pair that guards the token, because revoking the token
+already does the larger version of this.
 
 The list is live sessions only. A session that expired, was signed out, or went
 idle is absent rather than greyed out: the question the page answers is what can

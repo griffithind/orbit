@@ -417,6 +417,12 @@ token, so `DELETE /v1/tokens/{id}` closes every browser it opened on the next
 request. Sessions default to **read-only**; a cookie jar holding a credential
 that can mint certificate authorities is worth opting into rather than out of.
 
+Revoking the token is the large version of that, and it stops the operator's
+shell and their CI too. One browser at a time is `orbit session ls` and `orbit
+session revoke` — in the terminal as well as the console, because the operator
+whose laptop is missing reaches for a shell, and the browser they need to close
+may be the only one they had.
+
 The cookie is `__Host-` prefixed and never accepted by `/v1` — a test mounts both
 surfaces on one mux and asserts the isolation in both directions, because the
 interesting failure is not the one you remember to write a handler for.
