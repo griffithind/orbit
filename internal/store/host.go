@@ -416,7 +416,19 @@ func (t *Tx) RecordAgentReport(ctx context.Context, hostID uuid.UUID, r AgentRep
 		           ELSE greatest(locked.was_block, $3) END,
 		       nebula_version = coalesce(nullif($4, ''), h.nebula_version),
 		       agent_version  = coalesce(nullif($5, ''), h.agent_version),
-		       last_seen_at   = now()
+		       last_seen_at   = now(),
+		       -- A host that has reported is, by definition, active. Enrolled
+		       -- means "has a certificate"; active means "and it is using it",
+		       -- which nothing else was in a position to observe.
+		       --
+		       -- ONLY from enrolled. Every other state is a decision somebody
+		       -- made about this host — suspended by a block, deleted by a
+		       -- decommission — and a report is not consent to undo it. A
+		       -- blocked host still talks for as long as its certificate is
+		       -- live and the blocklist has not reached its peers, so a
+		       -- transition out of suspended here would let the host that was
+		       -- just cut off quietly mark itself well again.
+		       state = CASE WHEN h.state = 'enrolled' THEN 'active' ELSE h.state END
 		  FROM locked
 		 WHERE h.id = locked.id
 		RETURNING locked.name, locked.was_config, locked.was_block,

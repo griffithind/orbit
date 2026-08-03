@@ -1483,3 +1483,87 @@ func TestDeleteRoleIsRefusedWhileHostsCarryIt(t *testing.T) {
 }
 
 func ptrStr(s string) *string { return &s }
+
+// A host that has reported is active. "Enrolled" means it holds a certificate;
+// "active" means it is using it, which nothing but a report can observe.
+//
+// Before this, the only assignment of HostActive anywhere was in UnblockHost —
+// so a host reached active solely by being blocked and then unblocked, and a
+// normally enrolled fleet read as permanently mid-setup in `orbit host ls`.
+func TestReportingMakesAHostActive(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	net := newNetwork(t, s, "10.90.0.0/16")
+	host := newHost(t, s, net, "reporter", "10.90.0.7")
+
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.SetHostState(ctx, host.ID, store.HostEnrolled)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.RecordAgentReport(ctx, host.ID, store.AgentReport{
+			ConfigEpoch: 1, BlocklistEpoch: 1, AgentVersion: "test",
+		})
+	}); err != nil {
+		t.Fatalf("RecordAgentReport: %v", err)
+	}
+
+	if got := readHostState(t, s, host.ID); got != store.HostActive {
+		t.Errorf("state = %q after reporting, want %q", got, store.HostActive)
+	}
+}
+
+// TestReportingDoesNotResurrectABlockedHost is the half that constrains the
+// half above.
+//
+// A blocked host keeps talking until its certificate expires or the blocklist
+// reaches its peers, so it will report after being cut off. Letting that move
+// it out of suspended would let a host undo an operator's decision about it,
+// and the operator would see a fleet where nothing is blocked.
+func TestReportingDoesNotResurrectABlockedHost(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	net := newNetwork(t, s, "10.91.0.0/16")
+
+	for i, state := range []string{store.HostSuspended, store.HostCreated, store.HostDeleted} {
+		t.Run(state, func(t *testing.T) {
+			host := newHost(t, s, net, "host-"+state, fmt.Sprintf("10.91.0.%d", i+10))
+			if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+				return tx.SetHostState(ctx, host.ID, state)
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+				return tx.RecordAgentReport(ctx, host.ID, store.AgentReport{
+					ConfigEpoch: 2, BlocklistEpoch: 2,
+				})
+			}); err != nil {
+				t.Fatalf("RecordAgentReport: %v", err)
+			}
+
+			if got := readHostState(t, s, host.ID); got != state {
+				t.Errorf("a %s host reported and became %q; a report is not consent "+
+					"to undo a decision somebody made about this host", state, got)
+			}
+		})
+	}
+}
+
+func readHostState(t *testing.T, s *store.Store, id uuid.UUID) string {
+	t.Helper()
+	var state string
+	if err := s.Read(context.Background(), func(ctx context.Context, tx *store.Tx) error {
+		h, err := tx.GetHost(ctx, id)
+		if err != nil {
+			return err
+		}
+		state = h.State
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
