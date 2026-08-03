@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# The e2e suite builds real nebula tunnels and talks to a real Postgres. There
+# is no mock layer to run instead, deliberately: the constraints this project is
+# built around (no intermediate CAs, blocklist checked per tunnel, config
+# directory merge semantics) live in nebula's code, and a mock would encode our
+# belief about them rather than the behaviour.
+
+env:
+  PG_IMAGE: postgres:17-alpine
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: orbit
+          POSTGRES_DB: orbit
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ORBIT_TEST_DSN: postgres://postgres:orbit@localhost:5433/orbit?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::these files need gofmt"; echo "$out"; exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # Uninstrumented, and that is required rather than merely convenient:
+      # e2e/revocation_test.go asserts a propagation deadline, and under -race
+      # that assertion measures the race detector instead of the system.
+      - name: test
+        run: go test ./... -count=1 -timeout 10m
+
+      # The store and e2e tests skip themselves when Postgres is unreachable,
+      # which is right on a laptop and wrong here: a broken DSN would turn the
+      # suite green while testing nothing.
+      - name: fail on silently skipped database tests
+        run: |
+          go test ./e2e/ ./internal/store/ -count=1 -v 2>&1 | tee out.txt
+          if grep -q "postgres unavailable" out.txt; then
+            echo "::error::database tests skipped; CI must not pass without them"
+            exit 1
+          fi
+
+  race:
+    name: race
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: orbit
+          POSTGRES_DB: orbit
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ORBIT_TEST_DSN: postgres://postgres:orbit@localhost:5433/orbit?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Scoped to ./internal/... on purpose. Every piece of shared mutable
+      # state on the hot path lives there and is directly tested:
+      #
+      #   internal/notify   subscriber fan-out under subscribe/release churn
+      #   internal/api      the enrollment limiter's key map
+      #   internal/agent    the apply/renew loop's state
+      #   internal/store    pool handling
+      #
+      # Running -race over ./e2e/ as well was measured at roughly 100x: a 0.5s
+      # test took 57s, because the detector instruments every one of nebula's
+      # in-process tunnel goroutines. That buys almost no additional coverage —
+      # the same primitives, reached through a slower path — for a 25-minute PR
+      # gate, so the fan-out gets a direct unit test instead.
+      - name: race
+        run: go test ./internal/... -count=1 -race -timeout 10m

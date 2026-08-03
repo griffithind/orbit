@@ -80,7 +80,10 @@ func setup(t *testing.T) *harness {
 	if _, err := db.Migrate(ctx, admin); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := admin.Exec(ctx, `ALTER ROLE orbit_app LOGIN PASSWORD 'orbit_app_test'`); err != nil {
+	// Serialized on the migration advisory lock: e2e and internal/store run as
+	// separate packages, go test runs packages in parallel, and two concurrent
+	// ALTER ROLEs against the same role fail with "tuple concurrently updated".
+	if err := db.EnsureRoleLogin(ctx, admin, "orbit_app", "orbit_app_test"); err != nil {
 		t.Fatalf("grant login: %v", err)
 	}
 

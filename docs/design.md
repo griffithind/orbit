@@ -662,9 +662,14 @@ Say this plainly in the README rather than implying otherwise.
 | 5 | Move agent API onto the overlay; drop bearer tokens | **done** — `internal/mesh`, `e2e/overlay_test.go` |
 | 6 | Admin API, roles → firewall rules | **done** — `internal/api/resources.go`; **OIDC outstanding** |
 | 7 | Lighthouse/relay generation, HA, convergence view | **done** — `control_plane` registry, agent failover |
+| 8 | Token revocation, host decommission, metrics | **done** — `internal/metrics`, `e2e/{token,decommission,metrics}_test.go` |
 
 Phase 4 is the honesty checkpoint. If measured p99 propagation does not beat 60
-seconds, the central security claim is unproven.
+seconds, the central security claim is unproven. It does: 5.24 s from block to
+tunnel teardown, of which 5 s is nebula's own `connection_alive_interval`.
+
+What remains is SSO/OIDC, which is blocked on an IdP choice rather than on
+effort, and the two enrollment methods in enrollment.md §4–5.
 
 ---
 

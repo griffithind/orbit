@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func newLoopWithGuard(t *testing.T, host *enrolledHost, baseURL string, g agent.
 		t.Fatal(err)
 	}
 	layout := agent.DefaultLayout(host.dir)
-	return &agent.Loop{
+	loop := &agent.Loop{
 		Client: xffClient(t, baseURL, host.addr),
 		Applier: &agent.Applier{
 			Layout: layout, Reloader: agent.NoopReloader{},
@@ -48,6 +49,36 @@ func newLoopWithGuard(t *testing.T, host *enrolledHost, baseURL string, g agent.
 		State:  st,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	// Previously accepted and dropped on the floor, which made every caller's
+	// clock argument a lie.
+	if now != nil {
+		loop.SetClock(now)
+	}
+	return loop
+}
+
+// fakeClock is a hand-advanced time source.
+//
+// Mutex-guarded because the loop reads the clock from whichever goroutine is
+// running a tick, and an unsynchronised variable would trip the race detector
+// on a test whose whole purpose is to run under it.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Now()} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
 }
 
 // TestGuardRevertsUnconfirmedGeneration is the core case: a generation is
@@ -144,23 +175,30 @@ func TestGuardDoesNotRevertAConfirmedGeneration(t *testing.T) {
 
 	certPath := filepath.Join(host.dir, "orbit-host.crt")
 
+	// Driven, not slept. With a real clock this test asserts that a tick
+	// completes within ConfirmWithin, which is a statement about the machine
+	// rather than about the guard: under -race it does not, and the test fails
+	// having found nothing.
+	clock := newFakeClock()
 	loop := newLoopWithGuard(t, host, ts.URL, agent.GuardPolicy{
-		ConfirmWithin: 100 * time.Millisecond,
-		// Not zero: zero means "use the default". A tiny value is how a
-		// caller asks for near-immediate confirmation.
+		ConfirmWithin: time.Minute,
+		// Not zero: zero means "use the default". A small positive value is
+		// how a caller asks for near-immediate confirmation.
 		MinConfirm: time.Millisecond,
 		Quarantine: time.Hour,
-	}, nil)
+	}, clock.Now)
 
 	if err := loop.RenewNow(context.Background()); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
 	renewed := readFile(t, certPath)
 
-	// A tick reaches the control plane, which confirms the generation.
+	// Past MinConfirm, so this tick's success counts as confirmation.
+	clock.Advance(time.Second)
 	_ = loop.Tick(context.Background())
-	// Well past ConfirmWithin: a confirmed generation must survive.
-	time.Sleep(200 * time.Millisecond)
+
+	// Far past ConfirmWithin. A confirmed generation must survive regardless.
+	clock.Advance(time.Hour)
 	_ = loop.Tick(context.Background())
 
 	if got := readFile(t, certPath); got != renewed {

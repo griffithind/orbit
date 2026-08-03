@@ -286,20 +286,37 @@ max  < 60 s       (poll fallback — must never be exceeded when connected)
 Run it in CI at N=10 for every PR, and at N=1000 nightly. A regression here is a
 security regression, not a performance one, and should fail the build.
 
-### 5.4 Metrics to export
+### 5.4 Metrics
+
+Implemented in `internal/metrics`, served on `127.0.0.1:9464/metrics`.
 
 | Metric | Type | Why |
 |---|---|---|
 | `orbit_blocklist_epoch` | gauge, per network | current authoritative epoch |
-| `orbit_hosts_converged` | gauge, per network | numerator for convergence |
-| `orbit_convergence_lag_seconds` | histogram | the real SLO |
-| `orbit_watch_connections` | gauge, per network | pool exhaustion early warning |
+| `orbit_hosts_blocklist_converged` | gauge, per network | numerator for convergence |
+| `orbit_convergence_lag_seconds` | gauge, per network | the real SLO |
+| `orbit_watch_connections` | gauge | pool exhaustion early warning |
 | `orbit_agent_poll_fallback_total` | counter | how many hosts lost long-poll |
-| `orbit_cert_expiry_seconds` | histogram | catches stalled renewal before outage |
+| `orbit_certificates_expiring_soon` | gauge, per network | catches stalled renewal before outage |
+| `orbit_epoch_listener_up` | gauge | push is down; everyone is polling |
 
-Alert on: any host lagging the current epoch by more than 5 minutes; any host
-whose certificate has under 25% of its lifetime remaining (renewal is failing);
-and any increase in `poll_fallback` (something in the network path changed).
+Alert on: `orbit_convergence_lag_seconds > 300`; `orbit_certificates_expiring_soon
+> 0` (a certificate under 25% of its lifetime means renewal is failing); any
+increase in `poll_fallback` (something in the network path changed); and
+`orbit_epoch_listener_up == 0`.
+
+**Two deviations from the original design here, both because the proposed type
+was wrong.** Convergence lag and certificate expiry were specified as
+histograms. A histogram measures the distribution of *completed events*; both of
+these are *levels*. At any instant a host either is or is not behind, and what
+matters is how long the worst one has been — a question a gauge answers directly
+and a histogram cannot answer at all without inventing an event to observe.
+
+The gauges are also read from Postgres at scrape time rather than maintained in
+process memory. Two replicas would otherwise keep separate counts of the same
+fleet and disagree, and every restart would reset convergence to zero — which,
+for a metric whose entire purpose is to gate CA rotation, would be worse than
+having no metric.
 
 ---
 

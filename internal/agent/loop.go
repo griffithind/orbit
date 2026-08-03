@@ -213,6 +213,15 @@ func (l *Loop) clock() time.Time {
 	return time.Now()
 }
 
+// SetClock replaces the loop's time source.
+//
+// For tests, and the reason it is exported: every guard decision is a deadline
+// comparison, so a test that drives them with the real clock is really
+// asserting the machine is fast enough. It then fails under -race or on a
+// loaded CI runner and passes on a laptop, which is the worst signal a test can
+// give. Drive the clock instead.
+func (l *Loop) SetClock(fn func() time.Time) { l.now = fn }
+
 // GuardPolicy configures the unreachable-revert guard.
 type GuardPolicy struct {
 	// ConfirmWithin is how long a freshly applied generation may go without a

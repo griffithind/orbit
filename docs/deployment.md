@@ -239,10 +239,45 @@ deployment defensible, and `cert_ttl` is exactly how much of it you get.
 
 ## 7. Watching it
 
-There are no metrics yet. Two things carry the load:
+Three things carry the load: metrics, the convergence endpoint, and a short list
+of log lines.
+
+### Metrics
+
+`orbitd` serves Prometheus exposition on **`127.0.0.1:9464/metrics`** by
+default. It binds to localhost deliberately — the output enumerates network
+names, host counts, and blocklist sizes, which is fleet inventory. Move it to an
+overlay address (`-metrics-addr 10.42.0.1:9464`) to scrape it from another
+machine, or `-metrics-addr ""` to turn it off.
+
+The fleet gauges are read from Postgres **at scrape time**, not held in memory.
+That is why two replicas report identical numbers and why a restart does not
+reset convergence to zero and page you during every deploy.
+
+| Metric | Alert when |
+|---|---|
+| `orbit_convergence_lag_seconds` | `> 300` — a host has been behind for 5 minutes |
+| `orbit_certificates_expiring_soon` | `> 0` — renewal is failing for someone, well before they drop off |
+| `orbit_epoch_listener_up` | `== 0` — push is down, every agent has fallen back to polling |
+| `orbit_db_scrape_up` | `== 0` — serving, but cannot reach Postgres |
+| `orbit_agent_poll_fallback_total` | any increase — watcher cap reached or the network path changed |
+| `orbit_certificates_issued_total{reason="recover"}` | any increase — recovery is not routine; renewal is broken for that host |
+
+Also exported: `orbit_config_epoch`, `orbit_blocklist_epoch`,
+`orbit_hosts_total`, `orbit_hosts_config_converged`,
+`orbit_hosts_blocklist_converged`, `orbit_blocklist_entries`,
+`orbit_certificate_min_remaining_seconds`, `orbit_watch_connections`,
+`orbit_enrollments_total{result}`, and the standard Go runtime collectors.
+
+Everything is labelled by network only. Per-host labels would grow a time series
+per machine and make Prometheus the most expensive part of a deployment that
+otherwise runs on one small VM; per-host detail is in the convergence endpoint,
+which is queried when someone is actually looking.
+
+### Convergence
 
 ```bash
-# Convergence. Check this before any CA rotation, and after any block.
+# Check this before any CA rotation, and after any block.
 curl -H "Authorization: Bearer $ORBIT_TOKEN" \
      "localhost:8080/v1/networks/$ORBIT_NETWORK/convergence?format=text"
 ```
@@ -257,10 +292,15 @@ blocklist  epoch 18        1204/1204 100.0%
 rotating a CA past these hosts will cut them off
 ```
 
-Log lines worth an alert:
+### Log lines worth an alert
+
+Most of these now have a metric alongside them. Keep both: a counter tells you
+something happened, the log line tells you to which host.
 
 | Message | Means |
 |---|---|
+| `host deleted and its certificates revoked` | a decommission; check it was intended |
+| `token revoked itself; this request was its last` | end of a credential rotation, or someone locked themselves out |
 | `certificate is overdue for renewal` | a host has stopped rotating; it will drop off at expiry |
 | `host recovered after certificate expiry` | renewal is broken for that host — recovery is not routine |
 | `CA activated before convergence` | someone forced a rotation; hosts were cut off |

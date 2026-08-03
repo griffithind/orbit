@@ -32,8 +32,12 @@ Environment=ORBIT_CA_KEY_PASSPHRASE_FILE=%d/ca-pass
 # Database and enrollment pepper. EnvironmentFile is mode 0600, owned by root.
 EnvironmentFile=/etc/orbit/orbit.env
 
+# -metrics-addr defaults to 127.0.0.1:9464 and is stated here so it is visible
+# rather than implicit. Keep it on localhost or move it to an overlay address:
+# /metrics enumerates network names, host counts, and blocklist sizes.
 ExecStart=/usr/local/bin/orbitd serve \
     -addr 127.0.0.1:8080 \
+    -metrics-addr 127.0.0.1:9464 \
     -enroll-url https://orbit.example.com/enroll/v1/enroll \
     -mesh ${ORBIT_NETWORK}=10.42.0.2
 

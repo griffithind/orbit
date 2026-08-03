@@ -7,12 +7,16 @@ Nebula ships an excellent data plane and leaves the control plane to you: you
 provision a CA, distribute keys by hand, and hope you remember which host has
 which certificate. Orbit is the missing half, self-hosted.
 
-> **Status: phases 0–7** (SSO and observability outstanding). A host can be created, enrolled, brought onto a
-> working mesh, rotate its certificate on a live tunnel, and lose access within
-> seconds of being blocked — measured, not asserted. Agents hold no credential:
-> the control plane is itself a mesh member and the management API is
-> unroutable from outside. Multiple replicas are discoverable and agents fail
-> over between them. See [docs/design.md](docs/design.md) §11.
+> **Status: the lifecycle is closed.** A host can be created, enrolled, brought
+> onto a working mesh, rotate its certificate on a live tunnel, lose access
+> within seconds of being blocked, and be decommissioned — measured, not
+> asserted. Agents hold no credential: the control plane is itself a mesh member
+> and the management API is unroutable from outside. Multiple replicas are
+> discoverable and agents fail over between them.
+>
+> **Outstanding:** SSO/OIDC (needs an IdP choice), and the two enrollment
+> methods in [docs/enrollment.md](docs/enrollment.md) §4–5, which are designed
+> and not built. There is no admin CLI — every example here is `curl`.
 
 > **Name is a placeholder.** Rename the module before the first public commit;
 > `github.com/griffithind/orbit` appears in every import path.
@@ -45,8 +49,10 @@ not partitioning inside one.
 `internal/ca` — the certificate authority service.
 
 ```go
-// Signing goes through an interface, never raw key bytes.
-signer, err := ca.NewKMSSigner(cert.Curve_P256, myKMSAdapter)
+// Signing goes through an interface, never raw key bytes. FileSigner is the
+// supported path: a passphrase-encrypted key on local disk, with the file mode
+// enforced at load.
+signer, err := ca.NewFileSignerFromPath("/var/lib/orbit/ca.key", passphrase)
 
 caCert, err := ca.CreateCA(ctx, signer, ca.CAParams{
     Name:      "acme-prod",
@@ -276,6 +282,28 @@ New CAs are created **pending**, never active — publishing into every trust
 bundle and confirming convergence is a deliberate step, not something to skip
 by accident.
 
+Two destructive operations are worth calling out:
+
+```bash
+# Decommission a host: revokes its certificates, then removes the record.
+curl -H "Authorization: Bearer $ORBIT_TOKEN" -XDELETE \
+     "localhost:8080/v1/hosts/$HOST_ID?reason=hardware+returned"
+
+# Retire a leaked token. Effective on the next request; there is no cache.
+curl -H "Authorization: Bearer $ORBIT_TOKEN" -XDELETE \
+     localhost:8080/v1/tokens/$TOKEN_ID
+```
+
+**Deletion revokes before it removes.** The other order would destroy the
+certificate records naming the fingerprints to revoke, leaving a decommissioned
+machine trusted until its certificate expired — a delete weaker than a block.
+It requires `hosts:block` rather than `hosts:write`, so a token trusted to edit
+hosts cannot reach the stronger outcome through a different verb.
+
+**Revoked tokens stay listed**, with `last_used_at`. A row that disappeared
+could not answer the question an incident actually asks: was it used, and was it
+used after we revoked it.
+
 ### Failure containment
 
 **The agent reverts a generation that breaks it.** A config can be structurally
@@ -323,7 +351,25 @@ Refreshing the list preserves which replica an agent is already using; resetting
 everyone to the first entry on any membership change would herd the whole fleet
 onto one replica.
 
-### Watching convergence
+### Watching it
+
+`orbitd` serves Prometheus exposition on `127.0.0.1:9464/metrics` — localhost by
+default because the output is fleet inventory. The fleet gauges are read from
+Postgres at scrape time rather than kept in memory, so replicas agree and a
+restart does not reset convergence to zero and page you on every deploy.
+
+Four alerts cover most of it:
+
+```
+orbit_convergence_lag_seconds > 300     a host has been behind for 5 minutes
+orbit_certificates_expiring_soon > 0    renewal is failing, before anyone drops off
+orbit_epoch_listener_up == 0            push is down; everyone is polling
+orbit_db_scrape_up == 0                 serving, but cannot reach Postgres
+```
+
+Everything is labelled by network only. Per-host labels would grow a time series
+per machine; per-host detail belongs in the convergence endpoint, which is
+queried when someone is looking:
 
 ```bash
 curl -H "Authorization: Bearer $ORBIT_TOKEN" \

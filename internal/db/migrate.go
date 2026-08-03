@@ -139,6 +139,46 @@ func Migrate(ctx context.Context, conn *pgx.Conn) (applied []string, err error) 
 	return applied, nil
 }
 
+// EnsureRoleLogin gives a role a password and the LOGIN attribute.
+//
+// Migrations create orbit_app NOLOGIN with no password, because credentials are
+// a deployment concern rather than a schema one. This is the other half, for
+// automated bring-up and for tests.
+//
+// It takes the migration advisory lock. ALTER ROLE against the same role from
+// two connections at once fails with "tuple concurrently updated" (XX000) — a
+// system-catalog conflict Postgres does not serialize for you — and two test
+// packages running in parallel do exactly that. Sharing the migration lock also
+// keeps this ordered behind the migration that creates the role.
+//
+// The password is interpolated because ALTER ROLE does not accept a parameter
+// there; callers must pass a literal they control, never user input.
+func EnsureRoleLogin(ctx context.Context, conn *pgx.Conn, role, password string) (err error) {
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
+		return fmt.Errorf("acquire role lock: %w", err)
+	}
+	defer func() {
+		if _, uerr := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrationLockID); uerr != nil && err == nil {
+			err = fmt.Errorf("release role lock: %w", uerr)
+		}
+	}()
+
+	q := fmt.Sprintf(`ALTER ROLE %s LOGIN PASSWORD %s`,
+		quoteIdentifier(role), quoteLiteral(password))
+	if _, err := conn.Exec(ctx, q); err != nil {
+		return fmt.Errorf("grant login to %s: %w", role, err)
+	}
+	return nil
+}
+
+func quoteIdentifier(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+func quoteLiteral(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
+}
+
 // MigrateDSN opens a single connection, migrates, and closes it. Convenience
 // for bootstrap paths and tests.
 func MigrateDSN(ctx context.Context, dsn string) ([]string, error) {

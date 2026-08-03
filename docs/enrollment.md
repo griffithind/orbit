@@ -19,14 +19,22 @@ using something it was given out of band.
 That "something" is the enrollment credential. Its strength is the ceiling on
 the strength of every identity in the mesh.
 
-Orbit supports three methods, in increasing order of assurance. A network
-declares which are permitted.
+**Orbit implements one method today: `code`.** Two more are designed below and
+not built. They are documented because the design work is done and the reasoning
+is worth keeping, not because you can use them.
 
-| Method | Bootstrap secret | Assurance | Fits |
+| Method | Bootstrap secret | Assurance | Status |
 |---|---|---|---|
-| `code` | single-use code, 15 min TTL | operator-mediated | laptops, manual installs, small fleets |
-| `cloud_iid` | signed cloud instance identity document | platform-attested | autoscaling groups, ephemeral compute |
-| `attestation` | TPM 2.0 / Secure Enclave key attestation | hardware-bound | managed endpoints, high-assurance fleets |
+| `code` | single-use code, 15 min TTL | operator-mediated | **implemented** |
+| `cloud_iid` | signed cloud instance identity document | platform-attested | design only, §4 |
+| `attestation` | TPM 2.0 / Secure Enclave key attestation | hardware-bound | design only, §5 |
+
+The two unbuilt methods were briefly present in the schema — a table, and values
+in a CHECK constraint — with no handler that could produce a credential for
+either. That was removed in migration `0003`. A schema that lists a method is a
+claim the method works, and anyone reading it for what the system can do was
+being misled. Reintroducing one is an ALTER and a handler, the same work it
+always was.
 
 ---
 
@@ -166,10 +174,13 @@ can never complete a handshake.
 
 ---
 
-## 4. Method: `cloud_iid`
+## 4. Method: `cloud_iid` — designed, not built
 
 For autoscaling, where a human cannot paste a code and a baked-in long-lived
 token is exactly the thing to avoid.
+
+Nothing below exists in the code. It is a specification for the day someone
+needs it.
 
 The instance presents its cloud-signed identity document; Orbit verifies the
 signature against the provider's published keys and matches the instance's
@@ -215,10 +226,13 @@ account, region, and tag set can join the mesh. Scope rules narrowly, and treat
 
 ---
 
-## 5. Method: `attestation`
+## 5. Method: `attestation` — designed, not built
 
 Highest assurance: the host key is generated **inside** a TPM 2.0 or Secure
 Enclave and provably cannot be exported.
+
+Blocked on a decision, not on effort: TPM 2.0 has no X25519, so this forces the
+curve choice for an entire network. See the caveats at the end of this section.
 
 ```json
 { "method": "attestation",
@@ -246,8 +260,8 @@ Two honest caveats:
   software. Decide which, and document it — a claim of "hardware-bound Nebula
   identity" that isn't is worse than no claim.
 
-Ship this after phases 0–5. It is the right long-term answer and the wrong thing
-to block a first release on.
+It is the right long-term answer and the wrong thing to block a first release
+on.
 
 ---
 
@@ -407,7 +421,7 @@ first production rollout rather than after the first outage.
 
 ## 9. What to build first
 
-Phase 2 ships `code` only, and that is the right scope. It is the method every
+Orbit ships `code` only, and that is the right scope. It is the method every
 operator understands, it exercises the full issuance path end to end, and the
 other two methods are additive — they change how a credential is validated, not
 what happens afterwards.

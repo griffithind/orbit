@@ -74,9 +74,10 @@ func setup(t *testing.T) *store.Store {
 
 		// Migrations create orbit_app NOLOGIN and set no password, since
 		// credentials are a deployment concern. Give it one for the test.
-		if _, err := admin.Exec(ctx,
-			fmt.Sprintf(`ALTER ROLE orbit_app LOGIN PASSWORD %s`, quoteLiteral(appPassword))); err != nil {
-			setupErr = fmt.Errorf("grant login to orbit_app: %w", err)
+		// EnsureRoleLogin serializes on the migration advisory lock; the e2e
+		// package does the same thing, and go test runs packages in parallel.
+		if err := db.EnsureRoleLogin(ctx, admin, "orbit_app", appPassword); err != nil {
+			setupErr = err
 			return
 		}
 
