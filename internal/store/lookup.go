@@ -28,12 +28,12 @@ import (
 func (s *Store) AuthenticateToken(ctx context.Context, tokenHash []byte) (*Identity, error) {
 	var id Identity
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, scopes FROM orbit.api_token
+		SELECT id, name, scopes, expires_at FROM orbit.api_token
 		 WHERE token_hash = $1
 		   AND revoked_at IS NULL
 		   AND (expires_at IS NULL OR expires_at > now())`,
 		tokenHash,
-	).Scan(&id.TokenID, &id.Display, &id.Scopes)
+	).Scan(&id.TokenID, &id.Display, &id.Scopes, &id.ExpiresAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound

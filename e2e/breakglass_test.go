@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -131,4 +132,104 @@ func runTokenCreate(t *testing.T, name, scopes string) string {
 		t.Fatalf("stdout carried more than the token, breaking the pipe-to-a-secret-store case: %q", token)
 	}
 	return token
+}
+
+// TestCheckBreakGlassScript runs the real script from the real Makefile target,
+// because a recovery check that is only verified in principle is the same
+// untested belief it exists to replace.
+//
+// Each case is a way the check must NOT silently pass.
+func TestCheckBreakGlassScript(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	good := runTokenCreate(t, "script-ok-"+uuid.NewString()[:8], "*")
+	narrow := runTokenCreate(t, "script-narrow-"+uuid.NewString()[:8], "hosts:read")
+
+	cases := []struct {
+		name     string
+		token    string
+		url      string
+		wantOK   bool
+		contains string
+	}{
+		{"valid", good, ts.URL, true, "break-glass token valid"},
+		// The case a plain 200-check would miss entirely: this token
+		// authenticates perfectly and would fail at the moment it was needed.
+		{"scopes narrowed", narrow, ts.URL, false, "no longer holds"},
+		{"rejected", "orbat_not-a-real-token", ts.URL, false, "401"},
+		{"unreachable", good, "http://127.0.0.1:1", false, "cannot reach"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("sh", "../scripts/check-break-glass.sh")
+			cmd.Env = append(os.Environ(),
+				"ORBIT_BREAK_GLASS="+tc.token,
+				"ORBIT_URL="+tc.url,
+			)
+			out, err := cmd.CombinedOutput()
+			text := string(out)
+
+			if tc.wantOK && err != nil {
+				t.Fatalf("expected success, got %v\n%s", err, text)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatalf("expected a non-zero exit, got success\n%s", text)
+			}
+			if !strings.Contains(text, tc.contains) {
+				t.Errorf("output did not mention %q:\n%s", tc.contains, text)
+			}
+			// The token must never appear in output a cron job would mail or a
+			// CI job would archive.
+			if tc.token != "" && strings.Contains(text, tc.token) {
+				t.Errorf("the script printed the token:\n%s", text)
+			}
+		})
+	}
+}
+
+// TestCheckBreakGlassNeedsAToken: exiting 0 with no token configured would make
+// an unconfigured cron job look like a passing check forever.
+func TestCheckBreakGlassNeedsAToken(t *testing.T) {
+	cmd := exec.Command("sh", "../scripts/check-break-glass.sh")
+	cmd.Env = append(os.Environ(), "ORBIT_BREAK_GLASS=")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("no token configured but the check passed:\n%s", out)
+	}
+	if !strings.Contains(string(out), "ORBIT_BREAK_GLASS") {
+		t.Errorf("error did not name the variable to set:\n%s", out)
+	}
+}
+
+// TestWhoAmINeedsNoScope. The check calls /v1/whoami with a credential whose
+// scopes it is trying to discover, so requiring one would make the endpoint
+// unable to answer for exactly the tokens worth asking about.
+func TestWhoAmINeedsNoScope(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	var tok wire.TokenResponse
+	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
+		Name: "scopeless-" + uuid.NewString()[:8], Scopes: []string{"audit:read"},
+	}, &tok); code != http.StatusCreated {
+		t.Fatalf("create token: %d", code)
+	}
+
+	var who wire.WhoAmIResponse
+	if code := h.reqAs(t, tok.Token, http.MethodGet, ts.URL+"/v1/whoami", nil, &who); code != http.StatusOK {
+		t.Fatalf("whoami with a narrow token = %d, want 200", code)
+	}
+	if who.Kind != store.ActorToken || who.ID != tok.ID {
+		t.Errorf("whoami = %+v, want kind=token id=%s", who, tok.ID)
+	}
+	if who.Unscoped {
+		t.Error("a token holding only audit:read reported itself as unscoped")
+	}
+
+	// And it does not echo the credential back.
+	if strings.Contains(who.ID+who.Name, tok.Token) {
+		t.Error("whoami echoed the token")
+	}
 }

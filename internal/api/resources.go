@@ -38,6 +38,39 @@ func (s *Server) ResourceRoutes(mux *http.ServeMux) {
 	mux.Handle("DELETE /v1/tokens/{id}", s.admin("tokens:write", s.handleRevokeToken))
 
 	mux.Handle("GET /v1/audit-logs", s.admin("audit:read", s.handleListAudit))
+
+	// No scope. Describing the caller to itself reveals nothing the caller does
+	// not already hold, and gating it would make the one request a credential
+	// with unknown scopes can usefully make the one it might be refused.
+	mux.Handle("GET /v1/whoami", s.admin("", s.handleWhoAmI))
+}
+
+// handleWhoAmI reports which credential is being used, and never its value.
+//
+// Two callers. An operator with several tokens in several shells, and the
+// break-glass check in deployment.md 5 — which needs to distinguish "this token
+// still authenticates" from "this token still holds the scopes it was minted
+// with". A plain 200 from any other endpoint conflates those, because a token
+// that lost its scopes returns 403 while a revoked one returns 401.
+func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+
+	resp := wire.WhoAmIResponse{
+		Kind: id.Kind, ID: id.Subject, Name: id.Display,
+		Scopes:   id.Scopes,
+		Unscoped: id.HasScope("*"),
+	}
+	if id.ExpiresAt != nil {
+		resp.ExpiresAt = id.ExpiresAt.Format(time.RFC3339)
+		days := int(time.Until(*id.ExpiresAt).Hours() / 24)
+		resp.ExpiresInDays = &days
+	}
+
+	if wantsPlainText(r) {
+		writePlain(w, http.StatusOK, renderWhoAmI(&resp))
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {

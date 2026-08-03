@@ -23,6 +23,11 @@ check: ## gofmt + vet + test
 	go vet ./...
 	go test ./... -count=1
 
+.PHONY: check-break-glass
+check-break-glass: ## Verify the break-glass token still works (see docs/deployment.md 5)
+	@ORBIT_BREAK_GLASS="$$ORBIT_BREAK_GLASS" ORBIT_URL="$${ORBIT_URL:-http://localhost:8080}" \
+		sh scripts/check-break-glass.sh
+
 .PHONY: db-up
 db-up: ## Start the development Postgres and wait for it
 	docker compose up -d --wait postgres

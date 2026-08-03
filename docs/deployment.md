@@ -222,8 +222,40 @@ where you can do that.
 a belief, not a capability:
 
 ```bash
-curl -H "Authorization: Bearer $BREAK_GLASS" localhost:8080/v1/networks
+ORBIT_BREAK_GLASS=$(op read 'op://Private/Orbit break-glass/password') \
+    make check-break-glass
 ```
+```
+OK    break-glass token valid
+      name    break-glass
+      scopes  *
+      expires never
+```
+
+It exits non-zero on any problem, so it works as a cron job or a CI step. The
+token is passed through the environment rather than as an argument — an argument
+is visible in `ps` to every user on the box — and is never printed.
+
+**Checking that a request returns 200 is not enough**, which is why this calls
+`/v1/whoami` rather than any convenient endpoint. A token whose scopes were
+narrowed still authenticates and still returns 200 everywhere it is allowed; it
+would fail only at the moment it was needed. The check compares the scopes it
+gets back:
+
+```
+FAIL  token no longer holds '*' (has: hosts:read)
+```
+
+Each failure is distinguished, because they need different responses: `401`
+means revoked, expired, or a database restored from a backup predating the
+token; `cannot reach` means the control plane is down, which is a different
+problem from the token being bad. It also warns 30 days before an expiry
+(`ORBIT_WARN_DAYS`), on the theory that a break-glass token should not have one
+at all and learning about it afterwards is the entire failure.
+
+The script is POSIX `sh` and `curl` — no `jq`. It has to run on a machine that
+may be having a bad day, and a recovery check that depends on tooling is one
+more thing that can be missing when it is needed.
 
 **5. Rotate it after any real use**, because a credential that has been read
 out of a vault under pressure has been seen by people and possibly pasted into
@@ -257,6 +289,15 @@ An offline-created token is attributed to `system`, not to a user: there is no
 authenticated actor on a command line, and the OS username in `actor_display` is
 a hint about a shell session rather than proof of anything. `last_used_at`
 moving on a break-glass token nobody reports using is worth an immediate look.
+
+`GET /v1/whoami` answers the same question from the other direction — which
+credential is this shell holding — and needs no scope, since describing a caller
+to itself reveals nothing it does not already have:
+
+```bash
+curl -H "Authorization: Bearer $ORBIT_TOKEN" \
+     "localhost:8080/v1/whoami?format=text"
+```
 
 ---
 

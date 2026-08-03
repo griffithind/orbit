@@ -321,6 +321,27 @@ type TokenResponse struct {
 	RevokedAt string `json:"revoked_at,omitempty"`
 }
 
+// WhoAmIResponse describes the calling credential to itself.
+//
+// It never contains the token. The point is to answer "which credential am I
+// holding, and is it still good" — for a break-glass check, and for the more
+// common case of an operator with three tokens in three shells.
+type WhoAmIResponse struct {
+	// Kind is "token" today, "user" for an OIDC subject.
+	Kind string `json:"kind"`
+	// ID is the token uuid, or an issuer-qualified subject.
+	ID       string   `json:"id"`
+	Name     string   `json:"name,omitempty"`
+	Scopes   []string `json:"scopes"`
+	Unscoped bool     `json:"unscoped"`
+	// ExpiresAt is empty when the credential does not expire.
+	ExpiresAt string `json:"expires_at,omitempty"`
+	// ExpiresInDays is negative for an already-expired credential, which cannot
+	// authenticate — so seeing it here means a clock disagreement worth knowing
+	// about.
+	ExpiresInDays *int `json:"expires_in_days,omitempty"`
+}
+
 type AuditRecordResponse struct {
 	ID        int64     `json:"id"`
 	At        time.Time `json:"at"`

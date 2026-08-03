@@ -57,7 +57,10 @@ func (s *Server) admin(scope string, h http.HandlerFunc) http.Handler {
 			return
 		}
 
-		if !id.HasScope(scope) {
+		// An empty scope means authentication only. Used by /v1/whoami, which
+		// must answer for any valid credential — including one whose scopes the
+		// caller is trying to discover.
+		if scope != "" && !id.HasScope(scope) {
 			writeErr(w, http.StatusForbidden, "token lacks required scope: "+scope)
 			return
 		}

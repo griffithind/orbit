@@ -190,6 +190,11 @@ type Identity struct {
 	// recording last_used_at, and noticing that a revocation targets the
 	// credential making the request.
 	TokenID uuid.UUID
+
+	// ExpiresAt is nil for a credential that does not expire. Carried so a
+	// caller can be told how long it has left without a second query — the
+	// question a break-glass check exists to answer.
+	ExpiresAt *time.Time
 }
 
 // HasScope reports whether the caller carries scope. An identity holding "*"

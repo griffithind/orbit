@@ -66,3 +66,30 @@ func truncate(s string, n int) string {
 	}
 	return s[:n-1] + "…"
 }
+
+// renderWhoAmI formats a credential description for a terminal.
+//
+// Deliberately parseable by grep rather than by jq: the break-glass check in
+// deployment.md 5 runs from cron on a machine that may have neither jq nor a
+// working overlay, and a recovery check that depends on tooling is one more
+// thing that can be missing when it is needed.
+func renderWhoAmI(w *wire.WhoAmIResponse) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "kind    %s\n", w.Kind)
+	fmt.Fprintf(&b, "id      %s\n", w.ID)
+	if w.Name != "" {
+		fmt.Fprintf(&b, "name    %s\n", w.Name)
+	}
+	fmt.Fprintf(&b, "scopes  %s\n", strings.Join(w.Scopes, ", "))
+
+	if w.ExpiresAt == "" {
+		fmt.Fprintf(&b, "expires never\n")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "expires %s", w.ExpiresAt)
+	if w.ExpiresInDays != nil {
+		fmt.Fprintf(&b, "  (%d days)", *w.ExpiresInDays)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
