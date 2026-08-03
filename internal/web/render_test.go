@@ -231,7 +231,7 @@ func fixtures(s *Server) map[string]*pageData {
 			Host: host, Network: net,
 			Code: "orbit-code-abcd-efgh", ExpiresAt: expires,
 			EnrollURL: "https://orbit.example.com/enroll/v1/enroll",
-			Command:   "orbit-agent enroll -url https://orbit.example.com/enroll/v1/enroll -code … -network prod",
+			Command:   "orbit agent enroll -url https://orbit.example.com/enroll/v1/enroll -code … -network prod",
 		}),
 		"rotation.html": s.testPage("CA rotation", rv),
 		"audit.html": s.testPage("Audit", auditView{

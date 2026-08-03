@@ -31,16 +31,12 @@ orbit: ## Build the admin CLI into ./bin/orbit
 release-check: ## Cross-compile every release target without producing artifacts
 	@set -e; \
 	for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do \
-		for c in orbit orbit-agent; do \
-			CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} \
-				go build -o /dev/null ./cmd/$$c && echo "ok   $$c $$t"; \
-		done; \
+		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} \
+			go build -o /dev/null ./cmd/orbit && echo "ok   orbit $$t"; \
 	done; \
 	for t in linux/amd64 linux/arm64; do \
-		for c in orbitd orbit-migrate; do \
-			CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} \
-				go build -o /dev/null ./cmd/$$c && echo "ok   $$c $$t"; \
-		done; \
+		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} \
+			go build -o /dev/null ./cmd/orbitd && echo "ok   orbitd $$t"; \
 	done
 
 .PHONY: third-party
@@ -80,7 +76,7 @@ db-reset: db-down db-up migrate ## Recreate the database from scratch
 
 .PHONY: migrate
 migrate: ## Apply migrations to $(ADMIN_DSN)
-	go run ./cmd/orbit-migrate -dsn "$(ADMIN_DSN)"
+	go run ./cmd/orbitd migrate -dsn "$(ADMIN_DSN)"
 
 .PHONY: psql
 psql: ## Open a psql shell in the development database

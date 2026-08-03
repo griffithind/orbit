@@ -334,7 +334,7 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 		}
 		// The prose has to exist — it is where the expiry and the next command
 		// are — it just must not be on stdout.
-		if !strings.Contains(got.stderr, "orbit-agent enroll") {
+		if !strings.Contains(got.stderr, "orbit agent enroll") {
 			t.Errorf("stderr lost the guidance:\n%s", got.stderr)
 		}
 		// And the code must not be echoed into the prose, or redirecting stdout
@@ -399,33 +399,64 @@ func enrollWorks(t *testing.T, ts *httptest.Server, code string) bool {
 // TestCLIDoesNotLinkTheDataPlane guards the reason `orbit` is a separate binary.
 //
 // orbitd links internal/mesh, and through it nebula and gvisor — a userspace
-// TCP/IP stack — and it links the postgres driver. The admin CLI installs on a
-// laptop and a CI runner, where none of that belongs, and the separation is only
-// real for as long as nothing imports its way back across.
+// TCP/IP stack — and it links the postgres driver. orbit installs on a laptop
+// and on every managed host, where none of that belongs, and the separation is
+// only real for as long as nothing imports its way back across.
 //
 // The failure this catches is an innocent one: a command that wants a constant
-// from internal/store, or a helper from internal/agent, and pulls the whole
-// dependency graph in behind it.
+// from internal/store, or a helper that reaches for nebula's root package,
+// pulling the whole dependency graph in behind it.
+//
+// nebula/cert is ALLOWED and is the reason this test is a list rather than a
+// prefix ban. The agent generates its own keypair and parses its own
+// certificate, which is what that package is for; it carries no tunnel, no
+// network stack, and no listener. The root package is the data plane, and the
+// distinction between the two is exactly what a prefix match would lose.
 func TestCLIDoesNotLinkTheDataPlane(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", "github.com/griffithind/orbit/cmd/orbit").Output()
 	if err != nil {
 		t.Skipf("go list unavailable: %v", err)
 	}
+	deps := strings.Split(string(out), "\n")
 
+	// Prefix bans: nothing under these may appear at all.
 	forbidden := []string{
-		"github.com/slackhq/nebula",
 		"gvisor.dev/gvisor",
 		"github.com/jackc/pgx",
 		"golang.zx2c4.com/wireguard",
 		"github.com/griffithind/orbit/internal/store",
 		"github.com/griffithind/orbit/internal/mesh",
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range deps {
+		// The nebula ROOT package, matched exactly. It is the data plane.
+		if line == "github.com/slackhq/nebula" {
+			t.Error("cmd/orbit links github.com/slackhq/nebula, the data plane itself. " +
+				"The agent validates configurations by running the host's own nebula " +
+				"binary precisely so it does not have to carry one.")
+		}
 		for _, f := range forbidden {
 			if line == f || strings.HasPrefix(line, f+"/") {
-				t.Errorf("cmd/orbit links %s; the admin CLI must not carry the data plane "+
-					"or the database driver onto an operator's laptop", line)
+				t.Errorf("cmd/orbit links %s; neither an operator's laptop nor a managed "+
+					"host should carry the data plane or the database driver", line)
 			}
+		}
+	}
+
+	// And the allowance stays narrow. Listing nebula/cert as acceptable must not
+	// become "anything under nebula/ is acceptable", which is how the root
+	// package's dependencies arrive one subpackage at a time.
+	allowedNebula := map[string]bool{
+		"github.com/slackhq/nebula/cert":      true,
+		"github.com/slackhq/nebula/cert/p256": true,
+	}
+	for _, line := range deps {
+		if !strings.HasPrefix(line, "github.com/slackhq/nebula/") {
+			continue
+		}
+		if !allowedNebula[line] {
+			t.Errorf("cmd/orbit links %s. Only the certificate packages are meant to be "+
+				"here; if this one is genuinely needed, add it above and say what it "+
+				"pulls in with it", line)
 		}
 	}
 }

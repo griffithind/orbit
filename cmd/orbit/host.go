@@ -326,7 +326,7 @@ func renderCertificates(r renderer, h wire.HostResponse) {
 		case "suspended":
 			fmt.Fprintln(out, "  none — this host is blocked and its certificates were revoked")
 		default:
-			fmt.Fprintln(out, "  none — no active certificate; the host may need `orbit-agent recover`")
+			fmt.Fprintln(out, "  none — no active certificate; the host may need `orbit agent recover`")
 		}
 		return
 	}
@@ -611,7 +611,7 @@ enroll  %s
 
 Single use, and shown once. On the host:
 
-  orbit-agent enroll -url %s -code "$ORBIT_ENROLL_CODE"
+  orbit agent enroll -url %s -code "$ORBIT_ENROLL_CODE"
 
 `, c.ExpiresAt.Format(time.RFC3339), until(c.ExpiresAt), c.EnrollURL, c.EnrollURL)
 

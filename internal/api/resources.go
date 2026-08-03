@@ -1037,7 +1037,7 @@ type certificateLag struct {
 // id — deterministic, not random (agent.RenewalPolicy.RenewAt explains why), so
 // the same policy the agent will apply, applied here to the certificate rows we
 // already hold, yields the exact instant. The default policy is what
-// orbit-agent runs; a fleet running a custom one will differ, which is the one
+// the agent runs; a fleet running a custom one will differ, which is the one
 // assumption in this number.
 //
 // It is a ceiling in the sense that matters: an agent may renew EARLIER, if the

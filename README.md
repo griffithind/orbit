@@ -14,7 +14,7 @@ CLI, and a web console. It manages the stock Nebula binary and never forks it.
 ```bash
 orbit host create -name web-03 -addr 10.42.0.7 -role web  # a record
 orbit host code web-03                                   # → orb_1_…, single use
-orbit-agent enroll -code orb_1_…                         # on the host itself
+orbit agent enroll -code orb_1_…                         # on the host itself
 orbit host block web-03                                  # off the mesh in ~5s
 ```
 
@@ -44,12 +44,18 @@ still points at an older one.
 
 Check the download against `SHA256SUMS` on the release page before installing.
 
+Two binaries, and that is the whole install surface:
+
 | Binary | Platforms | Runs on |
 |---|---|---|
-| `orbit` | macOS, Linux · amd64, arm64 | your laptop — the admin CLI |
-| `orbit-agent` | macOS, Linux · amd64, arm64 | every managed host |
-| `orbitd` | Linux · amd64, arm64 | the control plane |
-| `orbit-migrate` | Linux · amd64, arm64 | schema migrations |
+| `orbit` | macOS, Linux · amd64, arm64 | your laptop, and every managed host as `orbit agent run` |
+| `orbitd` | Linux · amd64, arm64 | the control plane, including `orbitd migrate` |
+
+They stay separate for one reason: `orbitd token create` mints a `*` token
+straight from the database, bypassing every scope check — it is the documented
+break-glass path — and that does not belong on an operator laptop. `orbitd` also
+links Nebula and gvisor, so merging would make `go install ./cmd/orbit` pull
+down a userspace TCP/IP stack.
 
 Or from source — Go 1.26 and nothing else:
 
@@ -65,7 +71,7 @@ One VM, acting as its own lighthouse. This is a complete working mesh.
 
 ```bash
 # 1. Schema. orbit_app is created here and holds no CREATE privilege.
-orbit-migrate -dsn "postgres://postgres@localhost/orbit"
+orbitd migrate -dsn "postgres://postgres@localhost/orbit"
 psql -c "ALTER ROLE orbit_app LOGIN PASSWORD '…'"
 
 # 2. First network, CA, role, and admin token. Prints the token once.
@@ -80,7 +86,7 @@ orbitd token create -name break-glass -scopes '*'
 ```
 
 Every host after that is two commands: `orbit host create` on your laptop,
-`orbit-agent enroll` on the host.
+`orbit agent enroll` on the host.
 
 [docs/deployment.md](docs/deployment.md) has the whole of it — bring-up order,
 sealing the CA key to a TPM, backups, alerts, and what survives an outage.
@@ -149,7 +155,7 @@ its scopes, so revoking the token closes every browser it opened.
      ┌──────────────────────┴──────────────────────┐
      │  managed host                               │
      │    nebula          ← stock binary, unforked │
-     │    orbit-agent     ← writes config, signals │
+     │    orbit agent run ← writes config, signals │
      └─────────────────────────────────────────────┘
 ```
 

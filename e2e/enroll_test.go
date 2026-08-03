@@ -425,7 +425,7 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 		t.Fatal("empty enrollment code")
 	}
 
-	// From here on this is exactly what `orbit-agent enroll` does.
+	// From here on this is exactly what `orbit agent enroll` does.
 	kp, err := agent.GenerateKeypair(cert.Curve_CURVE25519)
 	if err != nil {
 		t.Fatalf("generate keypair: %v", err)

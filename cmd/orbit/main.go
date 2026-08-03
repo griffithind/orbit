@@ -24,6 +24,7 @@
 //	token     list, mint, and revoke admin tokens
 //	session   list and end browser sessions on the operator console
 //	audit     read the audit trail
+//	agent     enroll a host, keep its nebula configuration current, recover it
 package main
 
 import (
@@ -67,6 +68,8 @@ func main() {
 		err = tokenCmd(ctx, os.Args[2:])
 	case "session":
 		err = sessionCmd(ctx, os.Args[2:])
+	case "agent":
+		err = agentCmd(ctx, os.Args[2:])
 	case "audit":
 		err = auditCmd(ctx, os.Args[2:])
 	case "version", "-version", "--version":
@@ -81,7 +84,7 @@ func main() {
 		os.Exit(exitUsage)
 	}
 
-	// Same shape as orbitd and orbit-agent — dispatch returns an error, main
+	// Same shape as orbitd — dispatch returns an error, main
 	// prints it and exits — with the one difference that the status is a class
 	// rather than always 1. A caller that cannot tell a revoked token from an
 	// unreachable control plane retries the wrong one.
@@ -105,6 +108,7 @@ func usage() {
   token      ls, create, revoke
   session    ls, revoke — browser sessions on the operator console
   audit      read the audit trail
+  agent      enroll, run, recover — what runs ON a managed host
   version    print the build version
 
 Every command takes -json, which emits the API response verbatim.

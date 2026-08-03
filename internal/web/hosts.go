@@ -602,7 +602,7 @@ func enrollCommand(slug string, resp *wire.EnrollmentCodeResponse) string {
 	if url == "" {
 		url = "https://<control-plane>/enroll/v1/enroll"
 	}
-	return fmt.Sprintf("orbit-agent enroll -url %s -code %s -network %s", url, resp.Code, slug)
+	return fmt.Sprintf("orbit agent enroll -url %s -code %s -network %s", url, resp.Code, slug)
 }
 
 //------------------------------------------------------------------------------

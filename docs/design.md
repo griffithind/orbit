@@ -850,7 +850,7 @@ The agent's failure rules:
   `internal/agent` (`GuardPolicy`), with `ConfirmWithin` (10m default),
   `MinConfirm` (60s — a request completing milliseconds after SIGHUP proves
   nothing, since nebula reloads asynchronously), and `Quarantine` (30m).
-- Provide `orbit-agent freeze` as an operator escape hatch.
+- Provide `orbit agent freeze` as an operator escape hatch.
 
 ---
 

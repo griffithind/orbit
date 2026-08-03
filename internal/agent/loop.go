@@ -720,7 +720,7 @@ func (l *Loop) maybeRenew(ctx context.Context) error {
 
 // RenewNow renews immediately, bypassing the schedule.
 //
-// Exists for the operator escape hatch ("orbit-agent renew") and for tests. It
+// Exists for the operator escape hatch ("orbit agent renew") and for tests. It
 // still goes through the full apply path, so a renewal that breaks the host is
 // rolled back exactly as a scheduled one would be.
 func (l *Loop) RenewNow(ctx context.Context) error {

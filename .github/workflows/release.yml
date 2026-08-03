@@ -122,36 +122,31 @@ jobs:
           LDFLAGS="-s -w -X github.com/griffithind/orbit/internal/version.Version=${VERSION}"
           mkdir -p dist
 
-          # orbit is the admin CLI and orbit-agent runs on managed hosts, so
-          # both ship for laptops as well as servers. The agent's systemd
-          # supervisor is Linux-only, but its command supervisor is not, which
-          # is what makes a macOS build meaningful rather than decorative.
+          # Two binaries. orbit is everything client-side — the admin CLI on a
+          # laptop AND the agent on a managed host, which is `orbit agent run` —
+          # so it ships for both. orbitd is the control plane.
           for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
             goos="${target%/*}"; goarch="${target#*/}"
-            for cmd in orbit orbit-agent; do
-              GOOS="$goos" GOARCH="$goarch" go build \
-                -trimpath -buildvcs=false -ldflags "$LDFLAGS" \
-                -o "build/$cmd" "./cmd/$cmd"
-              tar -czf "dist/${cmd}_${VERSION}_${goos}_${goarch}.tar.gz" \
-                -C build "$cmd" -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
-              rm -f "build/$cmd"
-            done
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath -buildvcs=false -ldflags "$LDFLAGS" \
+              -o "build/orbit" "./cmd/orbit"
+            tar -czf "dist/orbit_${VERSION}_${goos}_${goarch}.tar.gz" \
+              -C build orbit -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
+            rm -f build/orbit
           done
 
-          # orbitd and orbit-migrate are Linux only. Both compile for macOS,
-          # and shipping them anyway would be the mistake: the control plane is
-          # documented, deployed, and tested on Linux, and a build nothing
-          # covers is a support burden wearing a version number.
+          # orbitd is Linux only. It compiles for macOS, and shipping it anyway
+          # would be the mistake: the control plane is documented, deployed, and
+          # tested on Linux, and a build nothing covers is a support burden
+          # wearing a version number.
           for target in linux/amd64 linux/arm64; do
             goos="${target%/*}"; goarch="${target#*/}"
-            for cmd in orbitd orbit-migrate; do
-              GOOS="$goos" GOARCH="$goarch" go build \
-                -trimpath -buildvcs=false -ldflags "$LDFLAGS" \
-                -o "build/$cmd" "./cmd/$cmd"
-              tar -czf "dist/${cmd}_${VERSION}_${goos}_${goarch}.tar.gz" \
-                -C build "$cmd" -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
-              rm -f "build/$cmd"
-            done
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath -buildvcs=false -ldflags "$LDFLAGS" \
+              -o "build/orbitd" "./cmd/orbitd"
+            tar -czf "dist/orbitd_${VERSION}_${goos}_${goarch}.tar.gz" \
+              -C build orbitd -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
+            rm -f build/orbitd
           done
 
           # The systemd units belong with the release: an operator downloading
@@ -170,7 +165,7 @@ jobs:
         run: |
           set -eu
           VERSION="${GITHUB_REF_NAME#v}"
-          for cmd in orbit orbit-agent orbitd; do
+          for cmd in orbit orbitd; do
             tar -xzf "dist/${cmd}_${VERSION}_linux_amd64.tar.gz" -C /tmp "$cmd"
             got=$("/tmp/$cmd" version)
             if [ "$got" != "$VERSION" ]; then
@@ -178,12 +173,6 @@ jobs:
             fi
             echo "$cmd $got"
           done
-          tar -xzf "dist/orbit-migrate_${VERSION}_linux_amd64.tar.gz" -C /tmp orbit-migrate
-          got=$(/tmp/orbit-migrate -version)
-          if [ "$got" != "$VERSION" ]; then
-            echo "::error::orbit-migrate reports '$got', not '$VERSION'"; exit 1
-          fi
-          echo "orbit-migrate $got"
 
       - name: checksums
         run: |
@@ -211,10 +200,8 @@ jobs:
             echo
             echo "| Binary | Runs on |"
             echo "|---|---|"
-            echo "| \`orbit\` | macOS and Linux, amd64 and arm64 — admin CLI |"
-            echo "| \`orbit-agent\` | macOS and Linux, amd64 and arm64 — managed hosts |"
-            echo "| \`orbitd\` | Linux only, amd64 and arm64 — control plane |"
-            echo "| \`orbit-migrate\` | Linux only, amd64 and arm64 — schema migrations |"
+            echo "| \`orbit\` | macOS and Linux, amd64 and arm64 — admin CLI, and \`orbit agent run\` on managed hosts |"
+            echo "| \`orbitd\` | Linux only, amd64 and arm64 — control plane, including \`orbitd migrate\` |"
             echo
             echo "All binaries are statically linked (\`CGO_ENABLED=0\`) and carry no runtime dependency beyond the kernel."
             echo

@@ -1,5 +1,12 @@
-// Command orbit-agent enrolls a host into ONE network and keeps its nebula
-// configuration current.
+package main
+
+// The agent: enrolls a host into ONE network and keeps its nebula configuration
+// current.
+//
+// A subcommand group rather than its own binary. `orbit` is the client-side
+// binary — one artifact for a laptop and for a managed host — and the agent is
+// what it does on a host. The two shared a release and a version already;
+// shipping them apart only meant two downloads and two things to keep in step.
 //
 // One agent process per network. Everything the agent owns for that network
 // lives in one per-network directory — /var/lib/orbit/<slug> by convention —
@@ -25,7 +32,6 @@
 // unit file states the layout once and the flag agrees with it by construction.
 // -network below is a convenience that expands to the default root; it never
 // becomes a second source of truth.
-package main
 
 import (
 	"context"
@@ -90,51 +96,45 @@ func (d *dirFlags) layout() (agent.Layout, error) {
 	return agent.LayoutFor(filepath.Clean(*d.dir), mode), nil
 }
 
-func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
+const agentVerbs = "enroll, run, recover"
 
-	var err error
-	switch os.Args[1] {
+func agentCmd(_ context.Context, args []string) error {
+	if len(args) == 0 {
+		return agentUsage()
+	}
+	switch args[0] {
 	case "enroll":
-		err = enrollCmd(os.Args[2:])
+		return enrollCmd(args[1:])
 	case "run":
-		err = runCmd(os.Args[2:])
+		return runCmd(args[1:])
 	case "recover":
-		err = recoverCmd(os.Args[2:])
-	case "version", "-version", "--version":
-		fmt.Println(version.Version)
-		return
+		return recoverCmd(args[1:])
 	case "-h", "--help", "help":
-		usage()
-		return
+		return agentUsage()
 	default:
-		usage()
-		os.Exit(2)
-	}
-
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "orbit-agent:", err)
-		os.Exit(1)
+		return unknownSub("agent", args[0], agentVerbs)
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `orbit-agent <command> [flags]
+func agentUsage() error {
+	fmt.Fprint(errOut, `orbit agent <command> [flags]
 
   enroll   join a network using an enrollment code
   run      poll for updates and apply them
   recover  re-obtain a certificate after this host's expired while offline
-  version  print the build version
 
 Every command manages exactly ONE network and needs -dir (or -network, which is
 shorthand for `+agent.DefaultRoot+`/<slug>). A host on two networks runs two
 agents over two directories.
 
-Run "orbit-agent <command> -h" for flags.
+These take no admin token and no -url beyond the control plane's public
+enrollment endpoint. They are what runs ON a managed host; every other orbit
+command is what an operator runs about one.
+
+Run "orbit agent <command> -h" for flags.
 `)
+	// No message: the listing above is the message, matching subUsage.
+	return &exitError{code: exitUsage}
 }
 
 func describeSupervisor(s agent.Supervisor) string {

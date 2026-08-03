@@ -1,5 +1,9 @@
 # Orbit agent, on a host managed by Orbit. One instance PER NETWORK.
 #
+# The unit is named for the service, not for a binary: it runs `orbit agent run`,
+# and the agent ships inside the same `orbit` binary an operator uses from a
+# laptop. One download per host.
+#
 # Install to /etc/systemd/system/orbit-agent@.service, then:
 #   systemctl enable --now orbit-agent@prod
 #
@@ -8,7 +12,7 @@
 # on two networks runs two of each.
 #
 # Enroll once by hand before enabling this:
-#   orbit-agent enroll -network prod \
+#   orbit agent enroll -network prod \
 #       -url https://orbit.example.com -code orb_1_… \
 #       -reload "systemctl reload nebula@prod"
 
@@ -35,7 +39,7 @@ Type=exec
 # It is also what lets the agent see whether nebula is running at all: without
 # it, a nebula that cannot start is invisible to the agent and to the control
 # plane.
-ExecStart=/usr/local/bin/orbit-agent run \
+ExecStart=/usr/local/bin/orbit agent run \
     -dir /var/lib/orbit/%i \
     -mode authoritative \
     -reload "systemctl reload nebula@%i" \

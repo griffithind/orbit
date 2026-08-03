@@ -326,7 +326,7 @@ func TestUIAddHostHandsOutAnEnrollmentCode(t *testing.T) {
 	if !strings.Contains(page, "Shown once") {
 		t.Error("the handout does not say the code cannot be shown again")
 	}
-	if !strings.Contains(page, "orbit-agent enroll") {
+	if !strings.Contains(page, "orbit agent enroll") {
 		t.Error("the handout does not include the command to run on the new machine")
 	}
 

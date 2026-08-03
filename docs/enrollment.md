@@ -377,7 +377,7 @@ carrying the previous expiry, and logged at warning level — routine recovery
 means renewal is broken for that host, and that is the thing worth fixing.
 
 ```bash
-orbit-agent recover -network prod -reload "systemctl reload nebula@prod"
+orbit agent recover -network prod -reload "systemctl reload nebula@prod"
 ```
 
 The command needs the old key still on disk, which is why the agent never

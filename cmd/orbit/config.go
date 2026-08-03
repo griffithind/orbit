@@ -21,7 +21,7 @@ import (
 //
 // Registered per subcommand rather than parsed before the verb, so flags come
 // after it: `orbit host ls -network prod`, matching `orbitd serve -addr` and
-// `orbit-agent run -dir`. Go's flag package accepts both -network and --network,
+// `orbit agent run -dir`. Go's flag package accepts both -network and --network,
 // so the CLI is forgiving in the direction people actually expect while the
 // product still speaks one dialect.
 type options struct {

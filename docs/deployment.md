@@ -48,7 +48,7 @@ CREATE DATABASE orbit;
 ```
 
 ```bash
-orbit-migrate -dsn "postgres://postgres@localhost/orbit"
+orbitd migrate -dsn "postgres://postgres@localhost/orbit"
 psql -c "ALTER ROLE orbit_app LOGIN PASSWORD '…'"
 ```
 
@@ -115,7 +115,7 @@ orbitd token create -name break-glass -scopes '*'
 
 # 4. Every host from here is the same two commands.
 orbit host create -name web-01 -addr 10.42.0.7 -role web && orbit host code web-01
-orbit-agent enroll -url https://orbit.example.com -code orb_1_…
+orbit agent enroll -url https://orbit.example.com -code orb_1_…
 ```
 
 `-lighthouse` is a **seed**, not a setting. It applies only when the control
@@ -518,7 +518,7 @@ if hosts cannot punch and fall back to relaying through it.
 
 ```bash
 systemctl stop orbit-control
-orbit-migrate -dsn "postgres://postgres@localhost/orbit"   # forward-only
+orbitd migrate -dsn "postgres://postgres@localhost/orbit"   # forward-only
 install -m755 orbitd /usr/local/bin/orbitd
 systemctl start orbit-control
 ```
