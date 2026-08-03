@@ -63,6 +63,20 @@ jobs:
       - name: test
         run: go test ./... -count=1 -timeout 10m
 
+      # Here and not only in the release workflow. This check first ran at
+      # release time, found that the generator's output depended on the local
+      # module cache, and failed the release — correct, but the wrong moment to
+      # learn it. A check that only runs on a tag is a check whose first
+      # feedback is a broken release.
+      - name: third-party notices are current
+        run: |
+          ./scripts/third-party-notices.sh
+          if ! git diff --quiet THIRD-PARTY-NOTICES.md; then
+            echo "::error::THIRD-PARTY-NOTICES.md is stale; run make third-party"
+            git diff THIRD-PARTY-NOTICES.md
+            exit 1
+          fi
+
       # The store and e2e tests skip themselves when Postgres is unreachable,
       # which is right on a laptop and wrong here: a broken DSN would turn the
       # suite green while testing nothing.
