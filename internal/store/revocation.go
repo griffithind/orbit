@@ -1,0 +1,205 @@
+package store
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// BlockHost revokes every active certificate a host holds, adds each
+// fingerprint to the network blocklist, suspends the host, advances the
+// blocklist epoch, and queues the notification. All in one transaction.
+//
+// The atomicity is the point. A blocklist entry that is visible to agents
+// before the epoch advances would not be fetched; an epoch that advances before
+// the entry is written would cause agents to fetch a blocklist that does not
+// yet contain it and then consider themselves converged. Splitting this across
+// transactions produces a host that everyone believes is blocked and that is
+// still trusted.
+//
+// Returns the new blocklist epoch.
+func (t *Tx) BlockHost(ctx context.Context, hostID uuid.UUID, reason string) (int64, error) {
+	host, err := t.GetHost(ctx, hostID)
+	if err != nil {
+		return 0, err
+	}
+
+	epoch, err := t.nextBlocklistEpoch(ctx, host.NetworkID)
+	if err != nil {
+		return 0, err
+	}
+
+	// Move every active certificate to revoked and capture what we revoked, so
+	// the blocklist entries carry the correct expiry for later pruning.
+	rows, err := t.tx.Query(ctx, `
+		UPDATE orbit.certificate
+		   SET state = 'revoked'
+		 WHERE host_id = $1 AND state IN ('active', 'pending')
+		RETURNING fingerprint, not_after`, hostID)
+	if err != nil {
+		return 0, mapErr(err, "revoke certificates")
+	}
+
+	type revoked struct {
+		fingerprint string
+		notAfter    time.Time
+	}
+	var list []revoked
+	for rows.Next() {
+		var r revoked
+		if err := rows.Scan(&r.fingerprint, &r.notAfter); err != nil {
+			rows.Close()
+			return 0, mapErr(err, "scan revoked certificate")
+		}
+		list = append(list, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, mapErr(err, "revoke certificates")
+	}
+
+	for _, r := range list {
+		// ON CONFLICT DO NOTHING: re-blocking an already-blocked fingerprint is
+		// idempotent rather than an error, so a retried admin request is safe.
+		if _, err := t.tx.Exec(ctx, `
+			INSERT INTO orbit.blocklist_entry
+				(network_id, fingerprint, reason, epoch, not_after)
+		VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (network_id, fingerprint) DO NOTHING`,
+			host.NetworkID, r.fingerprint, reason, epoch, r.notAfter); err != nil {
+			return 0, mapErr(err, "insert blocklist entry")
+		}
+	}
+
+	if err := t.SetHostState(ctx, hostID, HostSuspended); err != nil {
+		return 0, err
+	}
+	return epoch, nil
+}
+
+// nextBlocklistEpoch advances the counter and notifies, returning the new
+// value so callers can stamp entries with the epoch that introduced them.
+func (t *Tx) nextBlocklistEpoch(ctx context.Context, networkID uuid.UUID) (int64, error) {
+	return t.BumpEpoch(ctx, networkID, EpochBlocklist)
+}
+
+// UnblockHost returns a host to active and removes its blocklist entries.
+//
+// Note this does not un-revoke the certificates: those are gone for good and
+// the host must enroll or renew to get a new one. Removing the entries only
+// stops distributing fingerprints that are no longer meaningful.
+func (t *Tx) UnblockHost(ctx context.Context, hostID uuid.UUID) (int64, error) {
+	host, err := t.GetHost(ctx, hostID)
+	if err != nil {
+		return 0, err
+	}
+
+	if _, err := t.tx.Exec(ctx, `
+		DELETE FROM orbit.blocklist_entry
+		 WHERE network_id = $1
+		   AND fingerprint IN (
+		       SELECT fingerprint FROM orbit.certificate WHERE host_id = $2)`,
+		host.NetworkID, hostID); err != nil {
+		return 0, mapErr(err, "remove blocklist entries")
+	}
+
+	if err := t.SetHostState(ctx, hostID, HostActive); err != nil {
+		return 0, err
+	}
+	return t.nextBlocklistEpoch(ctx, host.NetworkID)
+}
+
+// LiveBlocklist returns the fingerprints that belong in distributed config:
+// entries whose revoked certificate has not yet expired.
+//
+// Expired entries are omitted deliberately. Nebula rejects an expired
+// certificate before it consults the blocklist (cert/ca_pool.go verify), so
+// carrying the fingerprint costs bytes in every host's config and buys nothing.
+// With short certificate lifetimes this keeps the blocklist proportional to
+// recent revocations rather than to all history. See docs/revocation.md 4.1.
+func (t *Tx) LiveBlocklist(ctx context.Context, networkID uuid.UUID, now time.Time) ([]string, error) {
+	rows, err := t.tx.Query(ctx, `
+		SELECT fingerprint FROM orbit.blocklist_entry
+		 WHERE network_id = $1 AND not_after > $2
+		 ORDER BY fingerprint`, networkID, now)
+	if err != nil {
+		return nil, mapErr(err, "live blocklist")
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			return nil, mapErr(err, "scan fingerprint")
+		}
+		out = append(out, fp)
+	}
+	return out, rows.Err()
+}
+
+// PruneBlocklist deletes entries whose certificates expired before cutoff.
+// Full history remains in the audit log.
+func (t *Tx) PruneBlocklist(ctx context.Context, networkID uuid.UUID, cutoff time.Time) (int64, error) {
+	tag, err := t.tx.Exec(ctx, `
+		DELETE FROM orbit.blocklist_entry WHERE network_id = $1 AND not_after < $2`,
+		networkID, cutoff)
+	if err != nil {
+		return 0, mapErr(err, "prune blocklist")
+	}
+	return tag.RowsAffected(), nil
+}
+
+//------------------------------------------------------------------------------
+// Convergence
+//------------------------------------------------------------------------------
+
+// Convergence reports how much of a network has applied the current epochs.
+//
+// This gates CA rotation (docs/design.md 6 step 3) and is the measurement
+// behind the revocation SLO. It counts hosts that reported applying an epoch at
+// least as high as the current one; a host that fetched but failed to apply is
+// correctly counted as lagging.
+func (t *Tx) Convergence(ctx context.Context, networkID uuid.UUID, laggingLimit int) (*Convergence, error) {
+	var c Convergence
+	err := t.tx.QueryRow(ctx, `
+		SELECT n.config_epoch, n.blocklist_epoch,
+		       count(h.id),
+		       count(h.id) FILTER (WHERE h.applied_config_epoch    >= n.config_epoch),
+		       count(h.id) FILTER (WHERE h.applied_blocklist_epoch >= n.blocklist_epoch)
+		  FROM orbit.network n
+		  LEFT JOIN orbit.host h
+		         ON h.network_id = n.id AND h.state IN ('enrolled', 'active')
+		 WHERE n.id = $1
+		 GROUP BY n.config_epoch, n.blocklist_epoch`, networkID,
+	).Scan(&c.ConfigEpoch, &c.BlocklistEpoch, &c.HostsTotal, &c.ConfigApplied, &c.BlockApplied)
+	if err != nil {
+		return nil, mapErr(err, "convergence")
+	}
+
+	rows, err := t.tx.Query(ctx, `
+		SELECT h.id, h.name, h.applied_config_epoch, h.applied_blocklist_epoch, h.last_seen_at
+		  FROM orbit.host h
+		  JOIN orbit.network n ON n.id = h.network_id
+		 WHERE h.network_id = $1
+		   AND h.state IN ('enrolled', 'active')
+		   AND (h.applied_config_epoch < n.config_epoch
+		     OR h.applied_blocklist_epoch < n.blocklist_epoch)
+		 ORDER BY h.last_seen_at NULLS FIRST
+		 LIMIT $2`, networkID, laggingLimit)
+	if err != nil {
+		return nil, mapErr(err, "lagging hosts")
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var l LaggingHost
+		if err := rows.Scan(&l.HostID, &l.Name, &l.AppliedConfigEpoch,
+			&l.AppliedBlocklistEpoch, &l.LastSeenAt); err != nil {
+			return nil, mapErr(err, "scan lagging host")
+		}
+		c.Lagging = append(c.Lagging, l)
+	}
+	return &c, rows.Err()
+}

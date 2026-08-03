@@ -1,0 +1,65 @@
+# Orbit control plane.
+#
+# Install to /etc/systemd/system/orbit-control.service
+#
+# The CA key passphrase is loaded as a systemd credential rather than an
+# environment variable. Encrypt it with:
+#
+#   systemd-creds encrypt --name=ca-pass --with-key=host+tpm2 - /etc/orbit/ca-pass.cred
+#
+# --with-key=host+tpm2 seals it to this machine's TPM, so a stolen disk image
+# is useless without this specific host. Drop to host+tpm2 -> host if the VM
+# has no TPM; that still keeps the secret out of `ps` and out of any log that
+# dumps the environment.
+
+[Unit]
+Description=Orbit control plane
+Documentation=file:///opt/orbit/docs/deployment.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=orbit
+Group=orbit
+
+# The CA key passphrase, decrypted into $CREDENTIALS_DIRECTORY at start and
+# never written to disk in the clear.
+LoadCredentialEncrypted=ca-pass:/etc/orbit/ca-pass.cred
+Environment=ORBIT_CA_KEY_PASSPHRASE_FILE=%d/ca-pass
+
+# Database and enrollment pepper. EnvironmentFile is mode 0600, owned by root.
+EnvironmentFile=/etc/orbit/orbit.env
+
+ExecStart=/usr/local/bin/orbitd serve \
+    -addr 127.0.0.1:8080 \
+    -enroll-url https://orbit.example.com/enroll/v1/enroll \
+    -mesh ${ORBIT_NETWORK}=10.42.0.2
+
+Restart=on-failure
+RestartSec=5s
+
+# The control plane holds a root of trust for the whole mesh. Give it as little
+# of the machine as it can work with.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Only the CA key directory is writable, and only to hold the key.
+ReadWritePaths=/var/lib/orbit
+
+[Install]
+WantedBy=multi-user.target

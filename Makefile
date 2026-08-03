@@ -1,0 +1,52 @@
+ADMIN_DSN ?= postgres://postgres:orbit@localhost:5433/orbit?sslmode=disable
+
+.PHONY: help
+help:
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "%-14s %s\n", $$1, $$2}'
+
+.PHONY: build
+build: ## Build all packages
+	go build ./...
+
+.PHONY: test
+test: ## Run all tests (store tests skip if Postgres is unreachable)
+	go test ./... -count=1
+
+.PHONY: test-v
+test-v: ## Run all tests verbosely
+	go test ./... -count=1 -v
+
+.PHONY: check
+check: ## gofmt + vet + test
+	@test -z "$$(gofmt -l . | tee /dev/stderr)" || (echo "gofmt needed"; exit 1)
+	go vet ./...
+	go test ./... -count=1
+
+.PHONY: db-up
+db-up: ## Start the development Postgres and wait for it
+	docker compose up -d --wait postgres
+
+.PHONY: db-down
+db-down: ## Stop and remove the development Postgres (destroys data)
+	docker compose down -v
+
+.PHONY: db-reset
+db-reset: db-down db-up migrate ## Recreate the database from scratch
+
+.PHONY: migrate
+migrate: ## Apply migrations to $(ADMIN_DSN)
+	go run ./cmd/orbit-migrate -dsn "$(ADMIN_DSN)"
+
+.PHONY: psql
+psql: ## Open a psql shell in the development database
+	docker compose exec postgres psql -U postgres -d orbit
+
+.PHONY: e2e
+e2e: ## Run the end-to-end tests (needs Postgres)
+	go test ./e2e/ -count=1 -v -timeout 300s
+
+.PHONY: demo
+demo: ## Bootstrap a local mesh and print next steps
+	@ORBIT_ENROLL_PEPPER=$$(head -c 32 /dev/urandom | base64) \
+	  go run ./cmd/orbitd bootstrap -dsn "postgres://orbit_app:orbit_app_test@localhost:5433/orbit?sslmode=disable"

@@ -1,0 +1,25 @@
+# Build output. Anchored to the root: unanchored "orbitd" would also match
+# cmd/orbitd, which is source.
+/bin/
+/orbitd
+/orbit-agent
+/orbit-migrate
+/interop
+
+# Local secrets and state. A CA key must never reach a commit.
+*.key
+*.crt
+*.pem
+*.cred
+*.env
+!deploy/orbit.env.example
+
+# Local data
+/var/
+*.sql.age
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

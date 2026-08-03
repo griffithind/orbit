@@ -1,0 +1,413 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/netip"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+// CreateHost inserts a host and claims its overlay addresses.
+//
+// Addresses go into host_address, whose primary key is (network_id, addr). Two
+// concurrent requests racing for the same address therefore cannot both
+// succeed: one gets ErrConflict from the database. An application-level "is
+// this address taken?" check would have a window between the check and the
+// insert, and the loser of that race would be a host that cannot communicate.
+func (t *Tx) CreateHost(ctx context.Context, h *Host) error {
+	if h.State == "" {
+		h.State = HostCreated
+	}
+
+	err := t.tx.QueryRow(ctx, `
+		INSERT INTO orbit.host (network_id, name, role_id, tags,
+		                        is_lighthouse, is_relay, static_addrs, state)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, created_at`,
+		h.NetworkID, h.Name, h.RoleID, nonNil(h.Tags),
+		h.IsLighthouse, h.IsRelay, nonNil(h.StaticAddrs), h.State,
+	).Scan(&h.ID, &h.CreatedAt)
+	if err != nil {
+		return mapErr(err, "create host")
+	}
+
+	for _, addr := range h.Addrs {
+		if _, err := t.tx.Exec(ctx, `
+			INSERT INTO orbit.host_address (network_id, host_id, addr)
+		VALUES ($1, $2, $3)`,
+			h.NetworkID, h.ID, addr); err != nil {
+			return mapErr(err, "claim overlay address")
+		}
+	}
+	return nil
+}
+
+const hostCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
+	h.is_lighthouse, h.is_relay, h.static_addrs, h.state,
+	h.applied_config_epoch, h.applied_blocklist_epoch,
+	h.last_seen_at, coalesce(h.nebula_version, ''), coalesce(h.agent_version, ''),
+	h.created_at,
+	coalesce(array(SELECT a.addr FROM orbit.host_address a WHERE a.host_id = h.id
+	               ORDER BY a.addr), '{}')`
+
+func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
+	var h Host
+	err := row.Scan(&h.ID, &h.NetworkID, &h.Name, &h.RoleID, &h.Tags,
+		&h.IsLighthouse, &h.IsRelay, &h.StaticAddrs, &h.State,
+		&h.AppliedConfigEpoch, &h.AppliedBlocklistEpoch,
+		&h.LastSeenAt, &h.NebulaVersion, &h.AgentVersion, &h.CreatedAt, &h.Addrs)
+	if err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+func (t *Tx) GetHost(ctx context.Context, id uuid.UUID) (*Host, error) {
+	h, err := scanHost(t.tx.QueryRow(ctx,
+		`SELECT `+hostCols+` FROM orbit.host h WHERE h.id = $1`, id))
+	if err != nil {
+		return nil, mapErr(err, "get host")
+	}
+	return h, nil
+}
+
+// ListHosts returns every host in a network, excluding deleted ones.
+func (t *Tx) ListHosts(ctx context.Context, networkID uuid.UUID) ([]Host, error) {
+	rows, err := t.tx.Query(ctx,
+		`SELECT `+hostCols+` FROM orbit.host h
+		  WHERE h.network_id = $1 AND h.state <> 'deleted' ORDER BY h.name`, networkID)
+	if err != nil {
+		return nil, mapErr(err, "list hosts")
+	}
+	defer rows.Close()
+
+	var out []Host
+	for rows.Next() {
+		h, err := scanHost(rows)
+		if err != nil {
+			return nil, mapErr(err, "scan host")
+		}
+		out = append(out, *h)
+	}
+	return out, rows.Err()
+}
+
+// SetHostState transitions a host. Returns ErrNotFound if it does not exist.
+func (t *Tx) SetHostState(ctx context.Context, id uuid.UUID, state string) error {
+	tag, err := t.tx.Exec(ctx, `UPDATE orbit.host SET state = $2 WHERE id = $1`, id, state)
+	if err != nil {
+		return mapErr(err, "set host state")
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AgentReport is what an agent tells us after applying a configuration.
+type AgentReport struct {
+	ConfigEpoch    int64
+	BlocklistEpoch int64
+	NebulaVersion  string
+	AgentVersion   string
+}
+
+// RecordAgentReport stores what a host has actually applied.
+//
+// The epochs move forward only. An agent that reports a lower epoch than we
+// already recorded is either replaying or has been rolled back; either way,
+// letting it lower the number would make a network look less converged than it
+// is and could stall a CA rotation waiting on a value that keeps regressing.
+func (t *Tx) RecordAgentReport(ctx context.Context, hostID uuid.UUID, r AgentReport) error {
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE orbit.host
+		   SET applied_config_epoch    = greatest(applied_config_epoch, $2),
+		       applied_blocklist_epoch = greatest(applied_blocklist_epoch, $3),
+		       nebula_version = coalesce(nullif($4, ''), nebula_version),
+		       agent_version  = coalesce(nullif($5, ''), agent_version),
+		       last_seen_at   = now()
+		 WHERE id = $1`,
+		hostID, r.ConfigEpoch, r.BlocklistEpoch, r.NebulaVersion, r.AgentVersion)
+	if err != nil {
+		return mapErr(err, "record agent report")
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+//------------------------------------------------------------------------------
+// Certificates
+//------------------------------------------------------------------------------
+
+// InsertCertificate records a newly issued certificate and supersedes the
+// previous active one for the same host and certificate version.
+//
+// Scoping by version matters: during a v1 to v2 migration a host legitimately
+// holds one active certificate of each version, and superseding across versions
+// would revoke half of a working configuration.
+func (t *Tx) InsertCertificate(ctx context.Context, c *Certificate) error {
+	if c.State == "" {
+		c.State = CertActive
+	}
+
+	if c.State == CertActive {
+		if _, err := t.tx.Exec(ctx, `
+			UPDATE orbit.certificate SET state = 'superseded'
+			 WHERE host_id = $1 AND cert_version = $2 AND state = 'active'`,
+			c.HostID, c.CertVer); err != nil {
+			return mapErr(err, "supersede previous certificate")
+		}
+	}
+
+	// Idempotent on an identical certificate for the same host.
+	//
+	// Nebula encodes validity to second granularity, so two renewals inside the
+	// same second that reuse the key produce byte-identical certificates and
+	// therefore the same fingerprint. That is not an error: the certificate
+	// exists and belongs to this host. A retried renewal must not 500.
+	//
+	// The WHERE clause keeps this narrow. If the fingerprint somehow belongs to
+	// a different host, no row is returned and the caller sees a conflict, which
+	// is the correct outcome for what would be a genuine collision.
+	err := t.tx.QueryRow(ctx, `
+		INSERT INTO orbit.certificate (host_id, ca_id, fingerprint, pem,
+		                               cert_version, not_before, not_after, state)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (fingerprint) DO UPDATE
+		   SET state = EXCLUDED.state
+		 WHERE orbit.certificate.host_id = EXCLUDED.host_id
+		RETURNING id, issued_at`,
+		c.HostID, c.CAID, c.Fingerprint, c.PEM,
+		c.CertVer, c.NotBefore, c.NotAfter, c.State,
+	).Scan(&c.ID, &c.IssuedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("insert certificate: %w: fingerprint belongs to another host", ErrConflict)
+		}
+		return mapErr(err, "insert certificate")
+	}
+	return nil
+}
+
+const certCols = `id, host_id, ca_id, fingerprint, pem, cert_version,
+	not_before, not_after, state, issued_at`
+
+func scanCert(row interface{ Scan(...any) error }) (*Certificate, error) {
+	var c Certificate
+	err := row.Scan(&c.ID, &c.HostID, &c.CAID, &c.Fingerprint, &c.PEM, &c.CertVer,
+		&c.NotBefore, &c.NotAfter, &c.State, &c.IssuedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (t *Tx) ActiveCertificates(ctx context.Context, hostID uuid.UUID) ([]Certificate, error) {
+	rows, err := t.tx.Query(ctx,
+		`SELECT `+certCols+` FROM orbit.certificate
+		  WHERE host_id = $1 AND state = 'active' ORDER BY cert_version`, hostID)
+	if err != nil {
+		return nil, mapErr(err, "active certificates")
+	}
+	defer rows.Close()
+
+	var out []Certificate
+	for rows.Next() {
+		c, err := scanCert(rows)
+		if err != nil {
+			return nil, mapErr(err, "scan certificate")
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// CertificatesDueForRenewal returns active certificates past the midpoint of
+// their lifetime, oldest first. This drives the renewal sweep; agents also
+// renew on their own schedule, and the sweep exists to catch the ones that
+// are not.
+func (t *Tx) CertificatesDueForRenewal(ctx context.Context, networkID uuid.UUID, now time.Time, limit int) ([]Certificate, error) {
+	rows, err := t.tx.Query(ctx, `
+		SELECT c.id, c.host_id, c.ca_id, c.fingerprint, c.pem, c.cert_version,
+		       c.not_before, c.not_after, c.state, c.issued_at
+		  FROM orbit.certificate c
+		  JOIN orbit.host h ON h.id = c.host_id
+		 WHERE h.network_id = $1
+		   AND c.state = 'active'
+		   AND h.state IN ('enrolled', 'active')
+		   AND $2 >= c.not_before + (c.not_after - c.not_before) / 2
+		 ORDER BY c.not_after
+		 LIMIT $3`, networkID, now, limit)
+	if err != nil {
+		return nil, mapErr(err, "certificates due for renewal")
+	}
+	defer rows.Close()
+
+	var out []Certificate
+	for rows.Next() {
+		c, err := scanCert(rows)
+		if err != nil {
+			return nil, mapErr(err, "scan certificate")
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+//------------------------------------------------------------------------------
+// Enrollment credentials
+//------------------------------------------------------------------------------
+
+// CreateEnrollmentCredential stores the hash of an enrollment secret.
+//
+// The caller supplies a keyed hash and never persists the plaintext; it exists
+// only in the HTTP response that created it. Keying it means a database leak on
+// its own yields nothing usable.
+func (t *Tx) CreateEnrollmentCredential(ctx context.Context, c *EnrollmentCredential, secretHash []byte) error {
+	if c.Method == "" {
+		c.Method = MethodCode
+	}
+	err := t.tx.QueryRow(ctx, `
+		INSERT INTO orbit.enrollment_credential
+			(network_id, host_id, method, secret_hash, expires_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, created_at`,
+		c.NetworkID, c.HostID, c.Method, secretHash, c.ExpiresAt, c.CreatedBy,
+	).Scan(&c.ID, &c.CreatedAt)
+	return mapErr(err, "create enrollment credential")
+}
+
+// ClaimInstance records a cloud instance as enrolled.
+//
+// The (provider, instance_id) primary key is what makes cloud IID enrollment
+// single-use. A replayed identity document races this insert and loses with
+// ErrConflict; an application-level check could be raced.
+func (t *Tx) ClaimInstance(ctx context.Context, provider, instanceID string, networkID, hostID uuid.UUID) error {
+	_, err := t.tx.Exec(ctx, `
+		INSERT INTO orbit.enrolled_instance
+			(provider, instance_id, network_id, host_id)
+		VALUES ($1, $2, $3, $4)`,
+		provider, instanceID, networkID, hostID)
+	return mapErr(err, "claim instance")
+}
+
+// PruneExpiredCredentials deletes unredeemed credentials past their expiry.
+// Redeemed ones are retained: they are evidence.
+func (t *Tx) PruneExpiredCredentials(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := t.tx.Exec(ctx, `
+		DELETE FROM orbit.enrollment_credential
+		 WHERE used_at IS NULL AND expires_at < $1`, before)
+	if err != nil {
+		return 0, mapErr(err, "prune credentials")
+	}
+	return tag.RowsAffected(), nil
+}
+
+// AddHostAddress claims an additional overlay address for an existing host.
+func (t *Tx) AddHostAddress(ctx context.Context, h *Host, addr netip.Addr) error {
+	_, err := t.tx.Exec(ctx, `
+		INSERT INTO orbit.host_address (network_id, host_id, addr)
+		VALUES ($1, $2, $3)`, h.NetworkID, h.ID, addr)
+	return mapErr(err, "add host address")
+}
+
+// FindHostByAddr looks up a host by one of its overlay addresses.
+//
+// Used by the control plane to find its own record across restarts. Distinct
+// from ResolveAgentHost, which answers an agent request from a source address;
+// this one runs inside the caller's transaction.
+func (t *Tx) FindHostByAddr(ctx context.Context, networkID uuid.UUID, addr netip.Addr) (*Host, error) {
+	h, err := scanHost(t.tx.QueryRow(ctx,
+		`SELECT `+hostCols+` FROM orbit.host h
+		   JOIN orbit.host_address a ON a.host_id = h.id
+		  WHERE a.network_id = $1 AND a.addr = $2`, networkID, addr))
+	if err != nil {
+		return nil, mapErr(err, "find host by address")
+	}
+	return h, nil
+}
+
+// LatestCertificate returns the most recently issued certificate for a host,
+// whatever its state.
+//
+// Recovery needs this: a host past expiry has no *active* certificate, but the
+// public key in its last one is the only thing that can prove the host is who it
+// claims to be.
+func (t *Tx) LatestCertificate(ctx context.Context, hostID uuid.UUID) (*Certificate, error) {
+	c, err := scanCert(t.tx.QueryRow(ctx,
+		`SELECT `+certCols+` FROM orbit.certificate
+		  WHERE host_id = $1 ORDER BY issued_at DESC LIMIT 1`, hostID))
+	if err != nil {
+		return nil, mapErr(err, "latest certificate")
+	}
+	return c, nil
+}
+
+// SetHostRoles updates a host's data-plane roles and advertised addresses.
+//
+// Bumps the config epoch when anything changed, because these are exactly the
+// fields other hosts render into their static_host_map and relay list. A change
+// nobody is told about is a lighthouse half the mesh still dials and half does
+// not.
+func (t *Tx) SetHostRoles(ctx context.Context, hostID uuid.UUID, isLighthouse, isRelay bool, staticAddrs []string) error {
+	var networkID uuid.UUID
+	err := t.tx.QueryRow(ctx, `
+		UPDATE orbit.host
+		   SET is_lighthouse = $2, is_relay = $3, static_addrs = $4
+		 WHERE id = $1
+		   AND (is_lighthouse, is_relay, static_addrs) IS DISTINCT FROM ($2, $3, $4::text[])
+		RETURNING network_id`,
+		hostID, isLighthouse, isRelay, nonNil(staticAddrs)).Scan(&networkID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // unchanged; no epoch bump, no needless config churn
+		}
+		return mapErr(err, "set host roles")
+	}
+	_, err = t.BumpEpoch(ctx, networkID, EpochConfig)
+	return err
+}
+
+// UpdateHostMeta changes a host's role assignment and tags.
+//
+// Separate from SetHostRoles because these do not change network topology: a
+// tag is metadata, and a role change alters the host's own firewall rules and
+// groups but not what other hosts render about it. Both still advance the
+// config epoch, since the host itself needs the new configuration.
+func (t *Tx) UpdateHostMeta(ctx context.Context, hostID uuid.UUID, roleID *string, tags *[]string) error {
+	host, err := t.GetHost(ctx, hostID)
+	if err != nil {
+		return err
+	}
+
+	newRole := host.RoleID
+	if roleID != nil {
+		if *roleID == "" {
+			newRole = nil
+		} else {
+			parsed, err := uuid.Parse(*roleID)
+			if err != nil {
+				return fmt.Errorf("invalid role_id: %w", err)
+			}
+			newRole = &parsed
+		}
+	}
+	newTags := host.Tags
+	if tags != nil {
+		newTags = *tags
+	}
+
+	if _, err := t.tx.Exec(ctx,
+		`UPDATE orbit.host SET role_id = $2, tags = $3 WHERE id = $1`,
+		hostID, newRole, nonNil(newTags)); err != nil {
+		return mapErr(err, "update host")
+	}
+	_, err = t.BumpEpoch(ctx, host.NetworkID, EpochConfig)
+	return err
+}
