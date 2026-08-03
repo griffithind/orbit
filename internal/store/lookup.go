@@ -25,21 +25,25 @@ import (
 // Returns ErrNotFound for an unknown, revoked, or expired token without
 // distinguishing between them, so the failure carries no information to a
 // prober.
-func (s *Store) AuthenticateToken(ctx context.Context, tokenHash []byte) (*TokenIdentity, error) {
-	var id TokenIdentity
+func (s *Store) AuthenticateToken(ctx context.Context, tokenHash []byte) (*Identity, error) {
+	var id Identity
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, scopes FROM orbit.api_token
+		SELECT id, name, scopes FROM orbit.api_token
 		 WHERE token_hash = $1
 		   AND revoked_at IS NULL
 		   AND (expires_at IS NULL OR expires_at > now())`,
 		tokenHash,
-	).Scan(&id.TokenID, &id.Scopes)
+	).Scan(&id.TokenID, &id.Display, &id.Scopes)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, mapErr(err, "authenticate token")
 	}
+	// The name comes from the row that already had to be read for the scopes,
+	// so a readable actor in the audit log costs nothing per request.
+	id.Kind = ActorToken
+	id.Subject = id.TokenID.String()
 	return &id, nil
 }
 

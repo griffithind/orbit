@@ -98,10 +98,7 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		if err := tx.CreateNetwork(ctx, &net); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionNetworkCreated, TargetType: "network", TargetID: net.ID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionNetworkCreated, "network", net.ID.String()))
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "network")
@@ -192,10 +189,7 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.BumpEpoch(ctx, networkID, store.EpochConfig); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionRoleCreated, TargetType: "role", TargetID: role.ID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionRoleCreated, "role", role.ID.String()))
 	})
 	if err != nil {
 		if errors.Is(err, ca.ErrGroupNotInCA) {
@@ -310,10 +304,7 @@ func (s *Server) handleCreateCA(w http.ResponseWriter, r *http.Request) {
 		if err := tx.CreateCA(ctx, &row); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionCACreated, TargetType: "ca", TargetID: row.ID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionCACreated, "ca", row.ID.String()))
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "network")
@@ -429,10 +420,9 @@ func (s *Server) handleActivateCA(w http.ResponseWriter, r *http.Request) {
 				"ca", caID, "network", row.NetworkID,
 				"cutOff", conv.HostsTotal-conv.ConfigApplied, "total", conv.HostsTotal)
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: action, TargetType: "ca", TargetID: caID.String(), Meta: meta,
-		})
+		e := id.Audit(action, "ca", caID.String())
+		e.Meta = meta
+		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {
 		if errors.Is(err, errNotConverged) {
@@ -474,10 +464,7 @@ func (s *Server) handleRetireCA(w http.ResponseWriter, r *http.Request) {
 		if err := tx.RetireCA(ctx, caID); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionCARetired, TargetType: "ca", TargetID: caID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionCARetired, "ca", caID.String()))
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrCAInUse) {
@@ -524,10 +511,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionTokenCreated, TargetType: "token", TargetID: tokenID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionTokenCreated, "token", tokenID.String()))
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "token")
@@ -590,10 +574,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 		if err := tx.RevokeAPIToken(ctx, tokenID); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionTokenRevoked, TargetType: "token", TargetID: tokenID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionTokenRevoked, "token", tokenID.String()))
 	})
 	if err != nil {
 		// ErrNotFound also covers an already-revoked token, deliberately: see
@@ -636,7 +617,8 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 		for _, rec := range recs {
 			a := wire.AuditRecordResponse{
 				ID: rec.ID, At: rec.At, ActorType: rec.ActorType, ActorID: rec.ActorID,
-				Action: rec.Action, TargetType: rec.TargetType, TargetID: rec.TargetID,
+				ActorDisplay: rec.ActorDisplay,
+				Action:       rec.Action, TargetType: rec.TargetType, TargetID: rec.TargetID,
 				Meta: rec.Meta,
 			}
 			if rec.SourceIP != nil {

@@ -16,11 +16,11 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-// identityKey carries the authenticated token identity through the request.
+// identityKey carries the authenticated identity through the request.
 type identityKey struct{}
 
-func identityFrom(ctx context.Context) *store.TokenIdentity {
-	id, _ := ctx.Value(identityKey{}).(*store.TokenIdentity)
+func identityFrom(ctx context.Context) *store.Identity {
+	id, _ := ctx.Value(identityKey{}).(*store.Identity)
 	return id
 }
 
@@ -29,6 +29,12 @@ func identityFrom(ctx context.Context) *store.TokenIdentity {
 // Authentication establishes identity; the scope check is separate and explicit
 // per route, so adding a route without deciding its scope is a compile-time
 // omission rather than an accidentally-public endpoint.
+//
+// Only API tokens authenticate here today. A second credential type — an OIDC
+// bearer JWT — would branch on the token's prefix (store.APITokenPrefix) and
+// produce the same store.Identity, leaving every handler, scope check, and
+// audit entry below untouched. That is why nothing downstream of this function
+// knows what a token is.
 func (s *Server) admin(scope string, h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r)
@@ -158,10 +164,7 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 		if err := tx.CreateHost(ctx, &host); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionHostCreated, TargetType: "host", TargetID: host.ID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionHostCreated, "host", host.ID.String()))
 	})
 	if err != nil {
 		if errors.Is(err, errOutOfRange) {
@@ -261,10 +264,7 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionHostUpdated, TargetType: "host", TargetID: hostID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionHostUpdated, "host", hostID.String()))
 	})
 	if err != nil {
 		if errors.Is(err, errLighthouseNeedsAddr) {
@@ -305,7 +305,7 @@ func (s *Server) handleCreateEnrollCode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	resp, err := s.enroll.CreateCode(r.Context(), hostID, 0, id.TokenID.String())
+	resp, err := s.enroll.CreateCode(r.Context(), hostID, 0, *id)
 	if err != nil {
 		s.notFoundOr(w, err, "host")
 		return
@@ -327,10 +327,7 @@ func (s *Server) handleBlockHost(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionHostBlocked, TargetType: "host", TargetID: hostID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionHostBlocked, "host", hostID.String()))
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "host")
@@ -353,10 +350,7 @@ func (s *Server) handleUnblockHost(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionHostUnblocked, TargetType: "host", TargetID: hostID.String(),
-		})
+		return tx.AppendAudit(ctx, id.Audit(store.ActionHostUnblocked, "host", hostID.String()))
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "host")
@@ -403,11 +397,9 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "token", ActorID: id.TokenID.String(),
-			Action: store.ActionHostDeleted, TargetType: "host", TargetID: hostID.String(),
-			Meta: []byte(fmt.Sprintf(`{"name":%q,"reason":%q}`, name, reason)),
-		})
+		e := id.Audit(store.ActionHostDeleted, "host", hostID.String())
+		e.Meta = []byte(fmt.Sprintf(`{"name":%q,"reason":%q}`, name, reason))
+		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "host")

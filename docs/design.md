@@ -113,8 +113,8 @@ key". See §4.3 for what Orbit does instead.
 
 ```
                          ┌──────────────────────────────────┐
-   operators ──OIDC────▶ │  Admin API      /v1/…            │
-   CI / IaC ──token────▶ │                                  │
+   operators ──token───▶ │  Admin API      /v1/…            │
+   CI / IaC ──token────▶ │  (OIDC later — see 4.4)          │
                          ├──────────────────────────────────┤
    unenrolled hosts ───▶ │  Enroll API     /enroll/v1/…     │  public TLS
                          ├──────────────────────────────────┤
@@ -123,7 +123,8 @@ key". See §4.3 for what Orbit does instead.
                                          │
                          ┌───────────────▼──────────────────┐
                          │  CA service (internal/ca)        │
-                         │  Signer ──▶ KMS / PKCS#11 / file │
+                         │  Signer ──▶ file (KMS/PKCS#11:    │
+                         │             RemoteSigner, unbuilt)│
                          └───────────────┬──────────────────┘
                                          │
                     Postgres  +  NOTIFY/LISTEN fan-out
@@ -135,7 +136,7 @@ fine; running them on one listener is not.
 
 | Surface | Exposure | Authentication | Rate limit |
 |---|---|---|---|
-| Admin | public or private | OIDC session, or API token with scopes | per token |
+| Admin | public or private | API token with scopes; OIDC is additive, see 4.4 | per token |
 | Enroll | public | single-use enrollment credential | per source address + global ceiling |
 | Agent | **overlay address only** | source overlay IP (see §4.3) | per host |
 
@@ -398,6 +399,91 @@ Implementation notes, both learned the hard way:
   rule completes handshakes and then silently drops every agent connection —
   it looks exactly like a network fault. Setting it in code also stops a role
   edit from ever widening what the control plane exposes to every managed host.
+
+### 4.4 Identity, and why OIDC is deferred rather than designed around
+
+Every caller on the admin API resolves to one `store.Identity`:
+
+```go
+type Identity struct {
+    Kind    string    // ActorToken today; ActorUser for an OIDC subject
+    Subject string    // token uuid, or an issuer-qualified subject
+    Display string    // token name, or an email
+    Scopes  []string
+    TokenID uuid.UUID // set only when Kind is ActorToken
+}
+```
+
+Nothing below `admin()` knows what a token is. Adding OIDC means one branch in
+that middleware — Orbit tokens carry the `orbat_` prefix, so distinguishing a
+JWT from a token is a prefix check rather than a guess — and every handler,
+scope check, and audit entry is unchanged.
+
+`Display` is not scaffolding for that future. It is why the audit log reads
+`deploy-bot` instead of a uuid **today**, and it is captured at write time
+rather than joined, because tokens are revoked and hosts are hard-deleted:
+attribution that depends on a join degrades over exactly the period an audit
+cares about.
+
+**When OIDC does land, three rules are not negotiable.**
+
+1. **Tokens keep working, always.** Not behind an `-allow-token-fallback` flag
+   someone will helpfully disable. The bootstrap token is the break-glass path
+   and `orbitd bootstrap` never touches an IdP.
+2. **An unset `-oidc-issuer` means the code path does not exist** — no discovery
+   fetch, no JWKS refresh goroutine, no per-request branch. That is the
+   difference between optional and merely configurable.
+3. **A failed IdP never blocks startup.** Log loudly, serve with tokens. A
+   control plane that will not boot because an identity provider is unreachable
+   is worse than one with no SSO at all.
+
+Two details are the usual way this is got wrong: **`aud` must be pinned** to an
+Orbit-specific audience, or any token that IdP issued for any service
+authenticates here; and **JWKS must be served stale on fetch failure**, or a
+30-second IdP blip locks out every operator mid-incident.
+
+Group-to-scope mapping belongs in configuration, not in the database. The
+mapping from "IdP group" to "may mint certificates" is precisely what an
+attacker with admin API access would want to edit — the same reasoning that
+keeps `orbit_app` from being able to `ALTER` the schema.
+
+### 4.5 The control plane cannot dial the overlay
+
+`internal/mesh.Node` exposes `Listen` and no `Dial`. orbitd runs nebula on a
+userspace gVisor netstack with no tun device, so the host kernel has **no route
+to the overlay**: `http.DefaultClient` inside orbitd cannot reach any address in
+the mesh. The control plane accepts agent connections and initiates nothing.
+
+This is worth stating because it is invisible until something depends on it, and
+then it fails confusingly. The concrete case is an in-mesh identity provider —
+Keycloak on an overlay address — where JWKS fetch would simply never connect.
+
+Nebula's `service.Service` does provide `DialContext`, so exposing it is roughly
+fifteen lines. **It should not be done casually.** Outbound reach means a
+compromised orbitd, on the machine holding the mesh's root CA key, can connect
+to every host it manages. If it is ever added it should be scoped to one
+declared destination rather than offered as a general dialer.
+
+That constraint interacts with a cycle worth recording. An in-mesh IdP creates
+three dependencies, not one:
+
+- **Bootstrap** — Keycloak needs a certificate, which needs the admin API, which
+  needs Keycloak. Broken by rule 1 above: bootstrap → token → enroll Keycloak →
+  *then* enable OIDC. An OIDC-only Orbit could never host its own IdP.
+- **Recurring** — Keycloak's certificate expires every `cert_ttl`. If renewal
+  fails and OIDC is the only admin path, fixing Keycloak requires the API that
+  Keycloak gates. This one does not resolve; it needs a break-glass token stored
+  outside the mesh and actually tested.
+- **Name and trust** — in-mesh FreeIPA means DNS resolution also crosses the
+  overlay, and Keycloak's TLS certificate chains to FreeIPA's CA, which nebula's
+  CA knows nothing about. Two PKIs in one deployment that never interact and
+  both have to be right.
+
+The recommendation is to dual-home the IdP: in-mesh for everything else, plus
+one address only orbitd uses. Orbit is what everything else depends on, so it
+should depend on as little as possible — the mesh surviving the control plane's
+death is the headline property, and it is a poor trade to make the control plane
+depend on a service that needs the control plane to exist.
 
 ---
 
@@ -664,8 +750,9 @@ Phase 4 is the honesty checkpoint. If measured p99 propagation does not beat 60
 seconds, the central security claim is unproven. It does: 5.24 s from block to
 tunnel teardown, of which 5 s is nebula's own `connection_alive_interval`.
 
-What remains is SSO/OIDC, which is blocked on an IdP choice rather than on
-effort, and the two enrollment methods in enrollment.md §4–5.
+What remains is SSO/OIDC (§4.4 — deferred by choice; the identity seam is in
+place and tokens are the supported path) and the two enrollment methods in
+enrollment.md §4–5.
 
 ---
 

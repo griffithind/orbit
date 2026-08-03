@@ -24,7 +24,7 @@ func (t *Tx) AppendAudit(ctx context.Context, e AuditEntry) error {
 		e.Meta = []byte(`{}`)
 	}
 	if e.ActorType == "" {
-		e.ActorType = "system"
+		e.ActorType = ActorSystem
 	}
 
 	var ip any
@@ -34,9 +34,9 @@ func (t *Tx) AppendAudit(ctx context.Context, e AuditEntry) error {
 
 	_, err := t.tx.Exec(ctx, `
 		INSERT INTO orbit.audit_log
-			(actor_type, actor_id, action, target_type, target_id, meta, source_ip)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		e.ActorType, nullIfEmpty(e.ActorID), e.Action,
+			(actor_type, actor_id, actor_display, action, target_type, target_id, meta, source_ip)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		e.ActorType, nullIfEmpty(e.ActorID), nullIfEmpty(e.ActorDisplay), e.Action,
 		nullIfEmpty(e.TargetType), nullIfEmpty(e.TargetID), e.Meta, ip)
 	return mapErr(err, "append audit")
 }
@@ -65,7 +65,7 @@ func (t *Tx) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRecord, error
 	}
 
 	rows, err := t.tx.Query(ctx, `
-		SELECT id, actor_type, coalesce(actor_id, ''), action,
+		SELECT id, actor_type, coalesce(actor_id, ''), coalesce(actor_display, ''), action,
 		       coalesce(target_type, ''), coalesce(target_id, ''), meta, source_ip, at
 		  FROM orbit.audit_log
 		 WHERE ($1 = '' OR action = $1)
@@ -85,7 +85,7 @@ func (t *Tx) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRecord, error
 	var out []AuditRecord
 	for rows.Next() {
 		var r AuditRecord
-		if err := rows.Scan(&r.ID, &r.ActorType, &r.ActorID, &r.Action,
+		if err := rows.Scan(&r.ID, &r.ActorType, &r.ActorID, &r.ActorDisplay, &r.Action,
 			&r.TargetType, &r.TargetID, &r.Meta, &r.SourceIP, &r.At); err != nil {
 			return nil, mapErr(err, "scan audit")
 		}

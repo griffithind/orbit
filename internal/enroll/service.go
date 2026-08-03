@@ -92,7 +92,11 @@ func (s *Service) clock() time.Time {
 //
 // Returns the plaintext, which the caller must relay to exactly one place and
 // never store. Only its keyed hash is persisted.
-func (s *Service) CreateCode(ctx context.Context, hostID uuid.UUID, ttl time.Duration, createdBy string) (*wire.EnrollmentCodeResponse, error) {
+//
+// actor is threaded through rather than a bare id string: this previously took
+// one and recorded it as actor_type "user" while every caller passed a token
+// uuid, which is precisely the mislabel an audit trail must not have.
+func (s *Service) CreateCode(ctx context.Context, hostID uuid.UUID, ttl time.Duration, actor store.Identity) (*wire.EnrollmentCodeResponse, error) {
 	if ttl <= 0 {
 		ttl = DefaultCodeTTL
 	}
@@ -119,16 +123,13 @@ func (s *Service) CreateCode(ctx context.Context, hostID uuid.UUID, ttl time.Dur
 			HostID:    &host.ID,
 			Method:    store.MethodCode,
 			ExpiresAt: expiresAt,
-			CreatedBy: createdBy,
+			CreatedBy: actor.Subject,
 		}
 		if err := tx.CreateEnrollmentCredential(ctx, &cred, stored); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "user", ActorID: createdBy,
-			Action:     store.ActionEnrollCodeCreated,
-			TargetType: "host", TargetID: host.ID.String(),
-		})
+		return tx.AppendAudit(ctx,
+			actor.Audit(store.ActionEnrollCodeCreated, "host", host.ID.String()))
 	})
 	if err != nil {
 		return nil, err
@@ -203,7 +204,7 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 			ip = &from
 		}
 		if err := tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "agent", ActorID: host.ID.String(),
+			ActorType: store.ActorAgent, ActorID: host.ID.String(), ActorDisplay: host.Name,
 			Action:     store.ActionEnrolled,
 			TargetType: "host", TargetID: host.ID.String(),
 			SourceIP: ip,
@@ -240,7 +241,7 @@ func (s *Service) auditUnknownCredential(ctx context.Context, from netip.Addr) {
 	}
 	err := s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "agent",
+			ActorType: store.ActorAgent,
 			Action:    store.ActionEnrollFailed,
 			Meta:      []byte(`{"reason":"unknown, spent, or expired credential"}`),
 			SourceIP:  ip,
@@ -267,7 +268,7 @@ func (s *Service) auditEnrollFailure(ctx context.Context, redeemed *store.Redeem
 
 	err := s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		return tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "agent", ActorID: target,
+			ActorType: store.ActorAgent, ActorID: target,
 			Action:     store.ActionEnrollFailed,
 			TargetType: "host", TargetID: target,
 			Meta:     []byte(fmt.Sprintf(`{"reason":%q}`, cause.Error())),
@@ -333,7 +334,7 @@ func (s *Service) Renew(ctx context.Context, hostID uuid.UUID, req wire.RenewReq
 			return err
 		}
 		if err := tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "agent", ActorID: host.ID.String(),
+			ActorType: store.ActorAgent, ActorID: host.ID.String(), ActorDisplay: host.Name,
 			Action:     store.ActionCertificateIssued,
 			TargetType: "host", TargetID: host.ID.String(),
 		}); err != nil {

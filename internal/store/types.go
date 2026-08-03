@@ -144,30 +144,75 @@ type BlocklistEntry struct {
 }
 
 type AuditEntry struct {
-	ActorType  string // user | token | agent | system
-	ActorID    string
-	Action     string
-	TargetType string
-	TargetID   string
-	Meta       []byte
-	SourceIP   *netip.Addr
+	ActorType string // user | token | agent | system
+	ActorID   string
+	// ActorDisplay is the actor's name as it was when this happened — a token
+	// name, or an email once an OIDC subject can authenticate. Captured rather
+	// than joined: the record must stay legible after the token is deleted.
+	ActorDisplay string
+	Action       string
+	TargetType   string
+	TargetID     string
+	Meta         []byte
+	SourceIP     *netip.Addr
 }
 
-// TokenIdentity is what an API token resolves to.
-type TokenIdentity struct {
+// Actor kinds. These are the values audit_log.actor_type accepts.
+const (
+	ActorToken  = "token"
+	ActorUser   = "user"
+	ActorAgent  = "agent"
+	ActorSystem = "system"
+)
+
+// Identity is an authenticated caller on the admin API.
+//
+// Deliberately not named for the credential that produced it. Today every
+// identity comes from an API token; an OIDC subject would populate the same
+// struct with Kind=ActorUser and a Subject that is not a uuid, and no handler
+// or audit call site would change. That is the whole reason Subject is a string
+// and TokenID is a separate, kind-specific field.
+type Identity struct {
+	// Kind is how this caller authenticated, and becomes audit actor_type.
+	Kind string
+
+	// Subject is the stable identifier recorded in the audit log: a token uuid
+	// today, an issuer-qualified subject for OIDC.
+	Subject string
+
+	// Display is the human-readable name — a token's name, or an email.
+	Display string
+
+	Scopes []string
+
+	// TokenID is set only when Kind is ActorToken. It exists because two
+	// operations genuinely need the token itself rather than the identity:
+	// recording last_used_at, and noticing that a revocation targets the
+	// credential making the request.
 	TokenID uuid.UUID
-	Scopes  []string
 }
 
-// HasScope reports whether the token carries scope. A token holding "*" passes
-// every check; reserve it for bootstrap credentials.
-func (t TokenIdentity) HasScope(scope string) bool {
-	for _, s := range t.Scopes {
+// HasScope reports whether the caller carries scope. An identity holding "*"
+// passes every check; reserve it for bootstrap credentials.
+func (i Identity) HasScope(scope string) bool {
+	for _, s := range i.Scopes {
 		if s == scope || s == "*" {
 			return true
 		}
 	}
 	return false
+}
+
+// Audit starts an audit entry attributed to this caller.
+//
+// A constructor rather than three fields copied at each call site: the actor is
+// the part that is always the same and always easy to get subtly wrong, and
+// threading it by hand is how an entry ends up attributed to "system".
+func (i Identity) Audit(action, targetType, targetID string) AuditEntry {
+	return AuditEntry{
+		ActorType: i.Kind, ActorID: i.Subject, ActorDisplay: i.Display,
+		Action: action, TargetType: targetType, TargetID: targetID,
+	}
 }
 
 // AgentIdentity is what a source overlay address resolves to on the agent API.

@@ -237,7 +237,7 @@ func (s *Service) Recover(ctx context.Context, req wire.RecoverRequest, from net
 		// Audited loudly. Routine recovery means renewal is broken somewhere,
 		// and a recovery an operator did not expect is worth investigating.
 		if err := tx.AppendAudit(ctx, store.AuditEntry{
-			ActorType: "agent", ActorID: host.ID.String(),
+			ActorType: store.ActorAgent, ActorID: host.ID.String(), ActorDisplay: host.Name,
 			Action: store.ActionRecovered, TargetType: "host", TargetID: host.ID.String(),
 			Meta:     []byte(fmt.Sprintf(`{"previous_not_after":%q}`, last.NotAfter.Format(time.RFC3339))),
 			SourceIP: ip,

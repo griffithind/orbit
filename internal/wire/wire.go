@@ -322,13 +322,18 @@ type TokenResponse struct {
 }
 
 type AuditRecordResponse struct {
-	ID         int64           `json:"id"`
-	At         time.Time       `json:"at"`
-	ActorType  string          `json:"actor_type"`
-	ActorID    string          `json:"actor_id,omitempty"`
-	Action     string          `json:"action"`
-	TargetType string          `json:"target_type,omitempty"`
-	TargetID   string          `json:"target_id,omitempty"`
-	Meta       json.RawMessage `json:"meta,omitempty"`
-	SourceIP   string          `json:"source_ip,omitempty"`
+	ID        int64     `json:"id"`
+	At        time.Time `json:"at"`
+	ActorType string    `json:"actor_type"`
+	ActorID   string    `json:"actor_id,omitempty"`
+	// ActorDisplay is the actor's name as it was at the time — a token name, or
+	// an email once OIDC subjects can authenticate. Present so a reader does
+	// not have to resolve actor_id against a table the actor may have been
+	// deleted from.
+	ActorDisplay string          `json:"actor_display,omitempty"`
+	Action       string          `json:"action"`
+	TargetType   string          `json:"target_type,omitempty"`
+	TargetID     string          `json:"target_id,omitempty"`
+	Meta         json.RawMessage `json:"meta,omitempty"`
+	SourceIP     string          `json:"source_ip,omitempty"`
 }
