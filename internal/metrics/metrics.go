@@ -157,12 +157,12 @@ func (m *Metrics) EpochNotified(kind string) {
 
 // ListenerUp records a LISTEN state transition.
 //
-// This used to keep a second copy of the state in an atomic.Bool, because a
-// prometheus.Gauge is write-only short of rendering the exposition format and
-// /healthz answers on the request path, where no scrape is happening. The copy
-// is gone: notify.Notifier.Up() reports its own state, so a caller that needs
-// the boolean asks the thing that has it instead of asking a metrics collector
-// that happened to be listening.
+// It sets the gauge and keeps nothing. A prometheus.Gauge is write-only short
+// of rendering the exposition format, so it is tempting to mirror the state in
+// an atomic.Bool for callers that answer on the request path — /healthz is the
+// one that wants it. Resist that: notify.Notifier.Up() reports its own state,
+// and a caller needing the boolean should ask the thing that has it rather than
+// a metrics collector that happened to be listening.
 func (m *Metrics) ListenerUp(up bool) {
 	if m == nil {
 		return

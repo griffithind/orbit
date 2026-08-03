@@ -148,8 +148,9 @@ func (n *Notifier) Run(ctx context.Context) error {
 func (n *Notifier) listen(ctx context.Context) error {
 	// The down transition is paired with the up transition here rather than in
 	// Run, so that no exit from this function can leave the reported state
-	// stale. Run used to own it and missed one: a cancelled context returns
-	// before the call, so after shutdown Up would have kept saying yes.
+	// stale. Run is the wrong owner for it: Run returns early on a cancelled
+	// context, and a report left behind by that path would have Up saying yes
+	// for a notifier that had stopped.
 	defer n.up(false)
 
 	conn, err := n.pool.Acquire(ctx)

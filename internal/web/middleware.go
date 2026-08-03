@@ -420,20 +420,20 @@ func (s *Server) needLogin(w http.ResponseWriter, r *http.Request, note string) 
 
 // setSessionCookie writes the session cookie.
 //
-// This package is the only thing that writes it. internal/api briefly carried a
-// second implementation — written in parallel with this one, and using
-// SameSite=Strict — which nothing ever called; it has been removed, because two
-// implementations of a security-critical thing, one live and one dead,
-// disagreeing on a security property, is worse than either alone. A reader
-// finds whichever comes first.
+// This package is the only thing that writes it, and that is worth keeping: two
+// implementations of a security-critical thing, disagreeing on a security
+// property, is worse than either alone, because a reader finds whichever comes
+// first.
 //
-// The removed one declined Lax on the grounds that it "would be defensible for
-// a UI that only ever mutates on POST — but that is a promise about handlers
-// not written yet". That objection is right, and this package answers it by
-// making the promise enforceable rather than aspirational: every route is
+// SameSite is Lax rather than Strict. Strict would be the stronger default, and
+// the case against Lax is real — it is only safe for a UI that never mutates
+// behind a GET, which is a promise about handlers not yet written. This package
+// makes that promise enforceable instead of aspirational: every route is
 // registered by method in Routes, safeMethod defines what may be reached
 // without a CSRF check, and TestSafeMethods and TestEveryActionIsARealForm fail
-// if a mutation ever appears behind a GET.
+// if a mutation ever appears behind a GET. Lax is what keeps a link from a
+// ticket or from chat landing signed in rather than on a login page, which is
+// the moment an operator is least able to absorb one.
 //
 // SameSite=Lax, and NOT Strict, is therefore the deliberate choice here. With
 // Strict, a top-level navigation that

@@ -184,9 +184,9 @@ func TestPanicAfterPartialWriteAborts(t *testing.T) {
 	}
 }
 
-// TestRequestLogging covers the levels and the fields. It is the part that was
-// silent in production: the line used to be emitted at Debug, which the default
-// Info logger drops.
+// TestRequestLogging covers the levels and the fields. The level matters: a
+// request line emitted at Debug is dropped by the default Info logger, which
+// makes the whole access log silent in production.
 func TestRequestLogging(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ok", func(w http.ResponseWriter, _ *http.Request) {

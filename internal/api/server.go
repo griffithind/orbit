@@ -597,12 +597,11 @@ func (s *Server) probeHealth(ctx context.Context) healthSnapshot {
 // agent talking to it is polling. That is the operational truth even when it is
 // the intended configuration.
 //
-// This used to route the question through s.cfg.Metrics, because the metrics
-// collector was the only place the live state was readable from Go — and so a
-// server built without metrics reported push as up on the strength of it being
-// configured, which is the one answer a health probe must never give. The state
-// now lives on the notifier, where it belongs, and the metrics collector is
-// back to being only a metrics collector.
+// The state comes from the notifier and not from s.cfg.Metrics, which is the
+// other place it is observable. Routing through the metrics collector would
+// make a server built without metrics report push as up on the strength of it
+// being configured, and "configured" is the one answer a health probe must
+// never give to "is it working".
 func (s *Server) pushUp() bool {
 	return s.cfg.Notifier != nil && s.cfg.Notifier.Up()
 }

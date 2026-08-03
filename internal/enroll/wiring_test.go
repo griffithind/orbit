@@ -13,24 +13,18 @@ import (
 	"github.com/griffithind/orbit/internal/store"
 )
 
-// The policy render path was wired nowhere in production, and every test passed.
+// The policy source has to be the DEFAULT, not something a caller supplies.
 //
-// This is the fifth time today a mechanism has been complete on one side and
-// never triggered from the other — the agent's revert report, the renewal
-// pull-forward, the report handler's field copying, Revert's reload-vs-restart,
-// and this. The shape is always the same: two halves that are each correct and
-// each independently tested, joined by a line nobody wrote.
-//
-// This one was the worst of them. A policy document could be stored, switched
+// The failure these guard against is a policy document that is stored, switched
 // on, and reported in force by /v1/networks/{ref}/policy, by the CLI, and by
-// convergence — while no host had ever received a single compiled rule. An
-// operator would read "in force" and be wrong about their firewall.
+// convergence — while no host has received a single compiled rule. An operator
+// reads "in force" and is wrong about their firewall.
 //
-// The structural cause is that enroll.Config is built from a literal in ten
-// places: cmd/orbitd and nine test harnesses. A field omitted from a struct
-// literal is silent, and the harness omitting it is precisely why no test could
-// notice production omitting it too. So the fix is not a test that checks
-// main.go — it is that the safe value is the default, and these assert that.
+// It is reachable because enroll.Config is built from a struct literal in ten
+// places, one of them production and nine of them test harnesses. A field
+// omitted from a literal is silent, and a harness that omits it is exactly why
+// no test would notice production omitting it too. So the guard is not a test
+// that reads main.go — it is that the safe value is what a zero Config gets.
 
 // TestProductionWiringTakesTheDefault reads cmd/orbitd's own literal.
 //

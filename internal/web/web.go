@@ -348,12 +348,10 @@ func isLoopbackHost(host string) bool {
 
 // StoreSessions adapts a *store.Store to Sessions.
 //
-// Here rather than in cmd/orbitd so there is exactly one adapter. It is pure
-// plumbing — three methods that open a transaction — and the version that lived
-// in main.go could not be reached by a test, so a test wanting a UI had to write
-// its own. Two adapters for one interface is how they come to disagree about
-// something that matters, which is the mistake this package's own session
-// cookie already made once today.
+// It lives here rather than at the composition root so there is exactly one
+// adapter. An adapter in cmd/orbitd cannot be reached by a test, so every test
+// wanting a UI would write its own — and two implementations of one interface
+// is how they come to disagree about something that matters.
 func StoreSessions(st *store.Store) Sessions { return storeSessions{st} }
 
 type storeSessions struct{ st *store.Store }

@@ -263,14 +263,13 @@ const (
 
 // Identity is an authenticated caller on the admin API.
 //
-// Deliberately not named for the credential that produced it, and that has
-// already paid for itself once: ResolveSession returns this same struct for a
-// browser session cookie, populated from the token the session references, so
-// nothing downstream of authentication learns that sessions exist. An OIDC
-// subject would populate it with Kind=ActorUser and a Subject that is not a
-// uuid, and no handler or audit call site would change either. That is the
-// whole reason Subject is a string and TokenID is a separate, kind-specific
-// field.
+// Deliberately not named for the credential that produced it. ResolveSession
+// returns this same struct for a browser session cookie, populated from the
+// token the session references, so nothing downstream of authentication learns
+// that sessions exist. An OIDC subject would populate it with Kind=ActorUser
+// and a Subject that is not a uuid, and no handler or audit call site would
+// change either. That is why Subject is a string and TokenID is a separate,
+// kind-specific field.
 type Identity struct {
 	// Kind is how this caller authenticated, and becomes audit actor_type.
 	Kind string

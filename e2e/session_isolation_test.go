@@ -41,9 +41,8 @@ import (
 // topological. Putting them on the same mux removes that comfort: whatever
 // keeps the credentials apart here is the middleware and nothing else.
 //
-// The /ui side is internal/web's OWN mux, not a re-implementation: internal/api
-// briefly carried a parallel browser-auth path that nothing called, and it has
-// been removed, so this test now exercises the code a running orbitd serves.
+// The /ui side is internal/web's OWN mux rather than a re-implementation, so
+// this exercises the code a running orbitd serves.
 func (h *harness) serveBothSurfaces(t *testing.T) *httptest.Server {
 	t.Helper()
 

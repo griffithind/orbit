@@ -22,11 +22,11 @@ import (
 // The control plane is a mesh member, so it needs the same configuration
 // updates every other host gets.
 //
-// Rendering its configuration once at startup — which is what it used to do —
-// leaves it with a frozen trust bundle, blocklist, and lighthouse list. The
-// visible symptom is a stale lighthouse address, but the serious ones are
-// silent: after a CA rotation it rejects every host that renewed onto the new
-// CA, and after a block it keeps trusting the blocked host.
+// Rendering its configuration once at startup would leave it with a frozen
+// trust bundle, blocklist, and lighthouse list. The visible symptom is a stale
+// lighthouse address, but the serious ones are silent: after a CA rotation it
+// rejects every host that renewed onto the new CA, and after a block it keeps
+// trusting the blocked host.
 
 func (h *harness) joinControlPlane(t *testing.T, addr string, agentPort int) (*mesh.Node, *enroll.Service) {
 	t.Helper()
@@ -144,8 +144,8 @@ func TestControlPlanePicksUpABlocklistEntry(t *testing.T) {
 	}
 }
 
-// TestControlPlanePicksUpANewLighthouse is the visible case from the
-// deployment guide: adding a lighthouse used to require restarting orbitd.
+// TestControlPlanePicksUpANewLighthouse is the visible case from the deployment
+// guide: adding a lighthouse must not require restarting orbitd.
 func TestControlPlanePicksUpANewLighthouse(t *testing.T) {
 	h := setup(t)
 	ts := h.serve(t, freeUDPPort(t))

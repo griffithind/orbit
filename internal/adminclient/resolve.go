@@ -96,8 +96,8 @@ func (e *NoMatchError) Is(target error) bool { return target == ErrNoMatch }
 // this is the one place to change.
 func (c *Client) ResolveNetwork(ctx context.Context, ref string) (*wire.NetworkResponse, error) {
 	// One request. The server resolves a uuid or a name, because network names
-	// are globally unique — this used to list every network and filter here,
-	// which cost a full listing on every command that names one.
+	// are globally unique. Listing every network and filtering client-side
+	// would cost a full listing on every command that names one.
 	res, err := c.GetNetwork(ctx, ref)
 	if err == nil {
 		return &res.Value, nil

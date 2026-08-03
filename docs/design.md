@@ -871,30 +871,33 @@ The agent's failure rules:
 Explicitly **not** mitigated: an attacker with code execution in Orbit can mint
 certificates within the compromised CA's scope until that CA is rotated. Nebula's
 flat trust model offers no way to make an online signing key less than a root.
-Say this plainly in the README rather than implying otherwise.
+The README states this plainly rather than implying otherwise.
 
 ---
 
-## 11. Build order
+## 11. Where each part of this design lives
 
-| Phase | Deliverable | Status |
-|---|---|---|
-| 0 | CA service: pluggable signer, scoped CAs, issuance, verification tests | **done** — `internal/ca` |
-| 1 | Postgres schema + repository layer | **done** — `internal/db`, `internal/store` |
-| 2 | Enroll API + agent: write config.d, SIGHUP | **done** — `internal/{nebulacfg,enroll,api,agent}`, `e2e` |
-| 3 | Renewal at 50% TTL, atomic swap, rollback | **done** — `internal/agent`, `e2e` |
-| 4 | Block → push → **measure p99 propagation** | **done** — `internal/notify`, `e2e/revocation_test.go` |
-| 5 | Move agent API onto the overlay; drop bearer tokens | **done** — `internal/mesh`, `e2e/overlay_test.go` |
-| 6 | Admin API, roles → firewall rules | **done** — `internal/api/resources.go`; **OIDC outstanding** |
-| 7 | Lighthouse/relay generation, HA, convergence view | **done** — `control_plane` registry, agent failover |
-| 8 | Token revocation, host decommission, metrics | **done** — `internal/metrics`, `e2e/{token,decommission,metrics}_test.go` |
+| Concern | Code |
+|---|---|
+| CA service: pluggable signer, scoped CAs, issuance, verification | `internal/ca` |
+| Schema and repository layer | `internal/db`, `internal/store` |
+| Enrollment, config rendering, agent apply | `internal/{nebulacfg,enroll,api,agent}` |
+| Renewal at 50% TTL, atomic swap, rollback | `internal/agent` |
+| Block, push, propagation measurement | `internal/notify`, `e2e/revocation_test.go` |
+| Agent API on the overlay | `internal/mesh` |
+| Admin API, roles and policy to firewall rules | `internal/api`, `internal/policy` |
+| Lighthouse and relay generation, replica registry, convergence | `internal/api`, `internal/store` |
+| Metrics | `internal/metrics` |
+| Operator console | `internal/web` |
 
-Phase 4 is the honesty checkpoint. If measured p99 propagation does not beat 60
-seconds, the central security claim is unproven. It does: 5.24 s from block to
-tunnel teardown, of which 5 s is nebula's own `connection_alive_interval`.
+Propagation is the claim this design stands or falls on, so it is measured
+rather than asserted: 5.24 s from block to tunnel teardown, of which 5 s is
+nebula's own `connection_alive_interval`. `e2e/revocation_test.go` fails if that
+regresses past its deadline.
 
-What remains is SSO/OIDC (§4.4 — deferred by choice; the identity seam is in
-place and tokens are the supported path) and the two enrollment methods in
+Two things in this document are described but not implemented, and are marked as
+such where they appear: SSO/OIDC (§4.4, where the identity seam is in place and
+tokens are the supported path) and the two enrollment methods in
 enrollment.md §4–5.
 
 ---

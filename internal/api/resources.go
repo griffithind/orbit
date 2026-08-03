@@ -1713,10 +1713,9 @@ func auditLimitParam(w http.ResponseWriter, q url.Values) (int, bool) {
 
 //------------------------------------------------------------------------------
 
-// networkResponse is the ONLY renderer for a network. A second one briefly
-// existed in admin.go while two people worked on this file in parallel, and two
-// renderers for one type is precisely the drift internal/wire exists to prevent
-// — a field added to one is silently absent from half the API.
+// networkResponse is the ONLY renderer for a network, and must stay so. Two
+// renderers for one type is precisely the drift internal/wire exists to
+// prevent: a field added to one is silently absent from half the API.
 func networkResponse(n *store.Network) wire.NetworkResponse {
 	cidrs := make([]string, 0, len(n.CIDRs))
 	for _, c := range n.CIDRs {

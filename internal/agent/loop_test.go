@@ -126,7 +126,8 @@ func writePreviousGeneration(t *testing.T, l *Loop) {
 	}
 }
 
-// TestWatchRefusalIsDistinctFromIdle pins the value the loop used to discard.
+// TestWatchRefusalIsDistinctFromIdle pins a distinction the loop must not
+// collapse.
 //
 // "The hold expired with nothing new" and "the server offered a generation this
 // host refuses" were the same false. They are not the same situation: the first
@@ -164,14 +165,14 @@ func TestWatchRefusalIsDistinctFromIdle(t *testing.T) {
 // TestWatchDoesNotSpinOnAQuarantinedGeneration is the regression that matters.
 //
 // The server answers a watch immediately whenever the agent's known epoch is
-// behind, and a quarantine keeps it behind for the whole quarantine window. The
-// loop used to reconnect at once regardless, so a single quarantined host
-// hammered the control plane — one notifier subscribe and one state read per
-// pass — for thirty minutes, fleet-wide.
+// behind, and a quarantine keeps it behind for the whole quarantine window. A
+// loop that reconnects at once regardless turns a single quarantined host into
+// a source of load on the control plane — one notifier subscribe and one state
+// read per pass — for thirty minutes, fleet-wide.
 //
 // Counting requests rather than measuring an interval keeps this honest: a slow
 // machine only makes the count smaller, so the test cannot fail by being run
-// somewhere slow. Before the fix the same window produced thousands.
+// somewhere slow. Without the backoff the same window produces thousands.
 func TestWatchDoesNotSpinOnAQuarantinedGeneration(t *testing.T) {
 	cp := &fakeControlPlane{
 		state: wire.StateResponse{ConfigEpoch: 9, BlocklistEpoch: 1, Config: "pki: {}"},

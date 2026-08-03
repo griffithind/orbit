@@ -8,15 +8,13 @@ import (
 
 // The route table.
 //
-// Registration used to be thirty-three mux.Handle calls spread across two
-// files, which works and is perfectly readable — but it leaves one class of
-// mistake completely unguarded. Orbit runs three surfaces with three different
+// Routes are data rather than a sequence of mux.Handle calls, and the reason is
+// one specific class of mistake. Orbit runs three surfaces with three different
 // authentication models on three separately-bound listeners, and with a plain
 // ServeMux a route registered against the wrong mux silently inherits the wrong
 // middleware. An admin route mounted on the agent listener is authenticated by
 // source address; an agent route mounted on the public one is not authenticated
-// at all. Nothing about either mistake fails to compile, and nothing about
-// either looks wrong in a diff.
+// at all. Neither mistake fails to compile, and neither looks wrong in a diff.
 //
 // Making the routes data means a test can read them. That is the whole purpose:
 // see routes_test.go, which asserts every property this comment claims.

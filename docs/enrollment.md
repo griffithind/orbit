@@ -19,9 +19,9 @@ using something it was given out of band.
 That "something" is the enrollment credential. Its strength is the ceiling on
 the strength of every identity in the mesh.
 
-**Orbit implements one method today: `code`.** Two more are designed below and
-not built. They are documented because the design work is done and the reasoning
-is worth keeping, not because you can use them.
+**Orbit implements one method: `code`.** Two more are designed in §4 and §5 and
+are not built. They are documented because the reasoning is worth keeping, not
+because you can use them.
 
 | Method | Bootstrap secret | Assurance | Status |
 |---|---|---|---|
@@ -29,12 +29,10 @@ is worth keeping, not because you can use them.
 | `cloud_iid` | signed cloud instance identity document | platform-attested | design only, §4 |
 | `attestation` | TPM 2.0 / Secure Enclave key attestation | hardware-bound | design only, §5 |
 
-The two unbuilt methods were briefly present in the schema — a table, and values
-in a CHECK constraint — with no handler that could produce a credential for
-either. That was removed in migration `0003`. A schema that lists a method is a
-claim the method works, and anyone reading it for what the system can do was
-being misled. Reintroducing one is an ALTER and a handler, the same work it
-always was.
+Neither appears in the schema, and that is deliberate. A CHECK constraint listing
+a method is a claim the method works, and anyone reading the schema for what the
+system can do would be misled by one that no handler can produce a credential
+for. Adding either is an `ALTER` and a handler.
 
 ---
 

@@ -318,10 +318,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 // convergence still climbs — so an operator watching a revocation land sees
 // only that it is taking far longer than it should, with no indication why.
 //
-// This used to report configured-ness alone, because notify only exposed
-// Ready(), which means "established at least once" and stays true across a drop
-// and a reconnect. Notifier.Up() reports the live state, so the down case is
-// now sayable.
+// The distinction rests on Notifier.Up() rather than Ready(): Ready means
+// "established at least once" and stays true across a drop and a reconnect,
+// which is precisely the case this has to separate.
 func (s *Server) pushStatus(networkID uuid.UUID) pushView {
 	if s.cfg.Notifier == nil {
 		return pushView{

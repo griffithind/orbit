@@ -2,12 +2,12 @@
 --
 -- THE PROBLEM THIS SOLVES. One machine may belong to two networks. That is two
 -- nebula processes on one kernel, and they need two things that cannot be
--- shared: a UDP listen port, and a tun device name. Until now the listen port
--- was a flag on the control-plane process (enroll.Config.ListenPort), which
--- means every network a replica serves rendered the SAME port into every host's
--- configuration — so the second nebula on a dual-homed machine fails to bind,
--- at start, with an error about a port and nothing about which network wanted
--- it. The tun device was not modelled at all.
+-- shared: a UDP listen port, and a tun device name. A listen port held only as
+-- a flag on the control-plane process (enroll.Config.ListenPort) makes every
+-- network a replica serves render the SAME port into every host's configuration
+-- — so the second nebula on a dual-homed machine fails to bind, at start, with
+-- an error about a port and nothing about which network wanted it. A tun device
+-- not modelled at all fails the same way, later and less legibly.
 --
 -- WHERE THE VALUES LIVE, and why both levels.
 --

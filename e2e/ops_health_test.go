@@ -21,10 +21,10 @@ import (
 
 // Liveness and readiness.
 //
-// Until now there was no health endpoint anywhere, so the only signal a load
-// balancer, a systemd readiness check, or a monitoring probe had was whether
-// the TCP port accepted a connection — which stays green through a total
-// database outage, on a process that will fail every request it is handed.
+// Without these endpoints the only signal a load balancer, a systemd readiness
+// check, or a monitoring probe has is whether the TCP port accepts a
+// connection — which stays green through a total database outage, on a process
+// that will fail every request it is handed.
 
 // servePublicWithHealth mirrors what orbitd builds for its public listener,
 // plus the health routes.

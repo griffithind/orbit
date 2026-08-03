@@ -114,7 +114,7 @@ orbitd serve -mesh "$ORBIT_NETWORK=10.42.0.1" \
 orbitd token create -name break-glass -scopes '*'
 
 # 4. Every host from here is the same two commands.
-curl -H "Authorization: Bearer $ORBIT_TOKEN" -XPOST localhost:8080/v1/hosts -d '…'
+orbit host create -name web-01 -addr 10.42.0.7 -role web && orbit host code web-01
 orbit-agent enroll -url https://orbit.example.com -code orb_1_…
 ```
 
@@ -128,9 +128,7 @@ none because every host keeps dialling it.
 Roles thereafter change through the API and take effect without a restart:
 
 ```bash
-curl -H "Authorization: Bearer $ORBIT_TOKEN" -XPATCH \
-     localhost:8080/v1/hosts/$HOST_ID \
-     -d '{"is_lighthouse":true,"static_addrs":["203.0.113.20:4242"]}'
+orbit host set lh-01 -lighthouse -static-addrs 203.0.113.20:4242
 ```
 
 `orbitd` logs the roles actually in force at startup, read from the record — and
@@ -262,8 +260,8 @@ out of a vault under pressure has been seen by people and possibly pasted into
 places:
 
 ```bash
-orbitd token create -name break-glass-2 -scopes '*'      # new one first
-curl -H "Authorization: Bearer $NEW" -XDELETE localhost:8080/v1/tokens/$OLD_ID
+orbitd token create -name break-glass-2 -scopes '*'   # new one first
+orbit token revoke $OLD_ID                            # then the old one
 ```
 
 Minting the replacement before revoking the old one is the order that cannot
@@ -276,9 +274,8 @@ observable rather than hidden. Every use updates `last_used_at`, and creation is
 audited even from the command line:
 
 ```bash
-curl -H "Authorization: Bearer $ORBIT_TOKEN" localhost:8080/v1/tokens
-curl -H "Authorization: Bearer $ORBIT_TOKEN" \
-     "localhost:8080/v1/audit-logs?action=token.created"
+orbit token ls
+orbit audit -action token.created
 ```
 
 ```
@@ -295,8 +292,7 @@ credential is this shell holding — and needs no scope, since describing a call
 to itself reveals nothing it does not already have:
 
 ```bash
-curl -H "Authorization: Bearer $ORBIT_TOKEN" \
-     "localhost:8080/v1/whoami?format=text"
+orbit whoami
 ```
 
 ---
@@ -404,8 +400,7 @@ which is queried when someone is actually looking.
 
 ```bash
 # Check this before any CA rotation, and after any block.
-curl -H "Authorization: Bearer $ORBIT_TOKEN" \
-     "localhost:8080/v1/networks/$ORBIT_NETWORK/convergence?format=text"
+orbit converge
 ```
 ```
 config     epoch 42        1198/1204  99.5%

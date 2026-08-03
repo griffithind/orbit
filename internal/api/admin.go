@@ -37,12 +37,11 @@ func IdentityFrom(ctx context.Context) *store.Identity { return identityFrom(ctx
 
 // credential is one way of turning a request into a store.Identity.
 //
-// This is the seam. Authentication and the scope check were always separate
-// steps; splitting the credential out makes the FIRST step pluggable too,
-// without anything below it changing — a handler, a scope check, and an audit
-// entry are written against an Identity and cannot tell which of these produced
-// it. The admin() comment used to say a second credential type "would" fit
-// here. This is that second credential type, and it did.
+// This is the seam. Authentication and the scope check are separate steps, and
+// splitting the credential out makes the FIRST step pluggable without anything
+// below it changing: a handler, a scope check, and an audit entry are written
+// against an Identity and cannot tell which credential produced it. An OIDC
+// subject is the next one that fits here.
 //
 // Each carries its own refusal messages because /v1's are load-bearing: they
 // are what an operator's tooling reads, and this refactor must not change them
