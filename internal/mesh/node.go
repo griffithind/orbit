@@ -163,14 +163,28 @@ func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger)
 		"network", cfg.NetworkID, "addr", cfg.Addr,
 		"host", issued.HostID, "certNotAfter", issued.NotAfter)
 
-	return &Node{
+	n := &Node{
 		cfg: cfg, ctrl: ctrl, svc: svc, log: log, c: c, es: es,
 		hostID:   issued.HostID,
 		seeded:   issued.Created,
 		certPEM:  issued.Certificate,
 		keyPEM:   issued.PrivateKey,
 		NotAfter: issued.NotAfter,
-	}, nil
+	}
+
+	// Report immediately, not at the first maintenance tick. The node is
+	// running a generation from the moment it joins, and until it says so its
+	// host record reads "never seen" — the machine serving the request, shown
+	// in `orbit host ls` as though it were offline.
+	cfgEpoch, blockEpoch, err := es.ControlPlaneEpochs(ctx, issued.HostID)
+	if err == nil {
+		err = es.ReportControlPlaneApplied(ctx, issued.HostID, cfgEpoch, blockEpoch)
+	}
+	if err != nil {
+		log.Warn("could not report the joined configuration", "error", err)
+	}
+
+	return n, nil
 }
 
 // Refresh re-renders this node's configuration and reloads nebula.
@@ -194,6 +208,29 @@ func (n *Node) Refresh(ctx context.Context) error {
 
 	if err := n.c.ReloadConfigString(yaml); err != nil {
 		return fmt.Errorf("reload control plane config: %w", err)
+	}
+
+	// Say which generation is now running. Convergence counts this host like
+	// any other, so a control plane that applies configurations silently is one
+	// that is permanently behind — and CA activation refuses while any host is.
+	//
+	// Read AFTER the reload rather than before: reporting an epoch that has not
+	// been applied yet is how a convergence figure comes to mean nothing, and
+	// the direction of the error matters. Claiming to be ahead lets a CA
+	// rotation proceed past a host that has not caught up, which is the one
+	// outcome the gate exists to prevent.
+	//
+	// A failure here is logged and not returned. The configuration IS applied
+	// by this point, and turning a bookkeeping problem into a refresh failure
+	// would leave the node reporting nothing at all while also looking broken.
+	cfgEpoch, blockEpoch, err := n.es.ControlPlaneEpochs(ctx, n.hostID)
+	if err != nil {
+		n.log.Warn("could not read the applied epochs to report", "error", err)
+		return nil
+	}
+	if err := n.es.ReportControlPlaneApplied(ctx, n.hostID, cfgEpoch, blockEpoch); err != nil {
+		n.log.Warn("could not report the applied configuration", "error", err,
+			"consequence", "this host counts as behind, and CA activation refuses while it is")
 	}
 	return nil
 }

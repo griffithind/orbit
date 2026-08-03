@@ -17,6 +17,7 @@ import (
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/policy"
 	"github.com/griffithind/orbit/internal/store"
+	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -1034,6 +1035,49 @@ func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip
 // Separate from SelfIssue because those updates arrive far more often than a
 // certificate needs replacing, and minting one per blocklist change would churn
 // the database and rotate the control plane's key for no reason.
+// ReportControlPlaneApplied records the generation the control plane is now
+// running, against its own host record.
+//
+// The control plane is a mesh member and Convergence counts it like any other
+// host. Without this its applied epoch stays at 0 forever, convergence can
+// never read 100%, and CA activation — which refuses while any host is behind —
+// becomes permanently impossible. The failure is silent until somebody needs to
+// rotate a compromised CA.
+//
+// It reuses RecordAgentReport rather than writing the columns directly, so the
+// control plane converges by exactly the rule every other host converges by:
+// the same monotonicity, the same last_seen_at, the same audit behaviour.
+// AgentVersion is Orbit's own build, because on this host the agent and the
+// control plane are the same process.
+func (s *Service) ReportControlPlaneApplied(ctx context.Context, hostID uuid.UUID, configEpoch, blocklistEpoch int64) error {
+	return s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.RecordAgentReport(ctx, hostID, store.AgentReport{
+			ConfigEpoch:    configEpoch,
+			BlocklistEpoch: blocklistEpoch,
+			AgentVersion:   version.Version,
+		})
+	})
+}
+
+// ControlPlaneEpochs reports the network generation the control plane's host
+// record belongs to, so a caller that has just applied a rendered config knows
+// which generation it applied.
+func (s *Service) ControlPlaneEpochs(ctx context.Context, hostID uuid.UUID) (configEpoch, blocklistEpoch int64, err error) {
+	err = s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		host, err := tx.GetHost(ctx, hostID)
+		if err != nil {
+			return err
+		}
+		net, err := tx.GetNetwork(ctx, host.NetworkID)
+		if err != nil {
+			return err
+		}
+		configEpoch, blocklistEpoch = net.ConfigEpoch, net.BlocklistEpoch
+		return nil
+	})
+	return configEpoch, blocklistEpoch, err
+}
+
 func (s *Service) ControlPlaneMaterial(ctx context.Context, hostID uuid.UUID) (config, caBundle string, err error) {
 	err = s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		host, err := tx.GetHost(ctx, hostID)

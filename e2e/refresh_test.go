@@ -366,3 +366,106 @@ func TestLighthouseRequiresAnAddress(t *testing.T) {
 		t.Errorf("making a host a lighthouse with no address = %d, want 400", code)
 	}
 }
+
+// TestControlPlaneConvergesLikeAnyOtherHost.
+//
+// The control plane is a mesh member with a host record, and Convergence counts
+// every enrolled or active host — the control plane included. If it never
+// reports the generation it has applied, its record sits at epoch 0 forever and
+// convergence can never read 100%.
+//
+// That is not cosmetic, because CA activation is GATED on convergence:
+// POST /v1/cas/{id}/activate refuses while hosts are behind. A control plane
+// that is permanently behind makes CA rotation permanently impossible — and
+// nothing says so until the day somebody needs to rotate a compromised CA,
+// which is the worst day to discover it.
+//
+// Asserting on convergence rather than on the reporting call is deliberate.
+// Every existing mesh test builds its own mesh.Config and checks what it
+// rendered, which is why none of them noticed: a harness that supplies what
+// production forgot cannot detect the omission. This asserts the property an
+// operator reads off `orbit converge`.
+func TestControlPlaneConvergesLikeAnyOtherHost(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	node, _ := h.joinControlPlane(t, "10.42.80.1", 8455)
+
+	// The control plane is the ONLY host in the denominator. An enrolled peer
+	// would sit at epoch 0 too, because nothing in this suite runs an agent
+	// loop to report for it, and a test that cannot reach 100% for harness
+	// reasons says nothing about the control plane.
+
+	// First: joining is itself applying a generation, and must be reported. A
+	// node that waits for its first maintenance tick shows up as "never seen"
+	// in the meantime — the machine serving the request, listed as offline.
+	requireConverged(t, h, "immediately after joining")
+
+	// Then: the epoch advances underneath it, which is the case that actually
+	// matters. Bumped directly rather than by enrolling a host, so the
+	// denominator stays at one and the assertion stays about the control plane.
+	if err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		_, err := tx.BumpEpoch(ctx, h.netID, store.EpochConfig)
+		return err
+	}); err != nil {
+		t.Fatalf("advance the epoch: %v", err)
+	}
+	if err := node.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	requireConverged(t, h, "after the epoch advanced and it refreshed")
+
+	// And it must be seen, not merely counted: `never` in a last-seen column is
+	// what an operator reads as a dead host.
+	var seen bool
+	if err := h.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		host, err := tx.GetHost(ctx, node.HostID())
+		if err != nil {
+			return err
+		}
+		seen = host.LastSeenAt != nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !seen {
+		t.Error("the control plane's host record has never been seen; `orbit host ls` " +
+			"shows the machine serving the request as though it were offline")
+	}
+}
+
+// requireConverged waits for every counted host to have applied the current
+// generation, and explains what a stall means if it does not.
+func requireConverged(t *testing.T, h *harness, when string) {
+	t.Helper()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var conv *store.Convergence
+		if err := h.store.Read(context.Background(), func(ctx context.Context, tx *store.Tx) error {
+			var err error
+			conv, err = tx.Convergence(ctx, h.netID, 10)
+			return err
+		}); err != nil {
+			t.Fatalf("convergence: %v", err)
+		}
+		if conv.HostsTotal > 0 && conv.ConfigApplied == conv.HostsTotal {
+			return
+		}
+		if time.Now().After(deadline) {
+			var behind []string
+			for _, l := range conv.Lagging {
+				behind = append(behind, fmt.Sprintf("%s(config=%d,seen=%v)",
+					l.Name, l.AppliedConfigEpoch, l.LastSeenAt != nil))
+			}
+			t.Fatalf("convergence stalled at %d/%d for epoch %d %s; behind: %s\n\n"+
+				"A host that never reports its applied epoch is permanently behind, and "+
+				"CA activation refuses while any host is. If the control plane is the one "+
+				"lagging, rotation is impossible in the single-VM topology the README "+
+				"recommends.",
+				conv.ConfigApplied, conv.HostsTotal, conv.ConfigEpoch, when,
+				strings.Join(behind, " "))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
