@@ -81,6 +81,15 @@ jobs:
           fi
           echo "README pins $pinned"
 
+      # Before anything is built. Discovering that a release has no notes after
+      # the artifacts exist means either publishing without them or throwing the
+      # build away.
+      - name: the changelog has a section for this release
+        run: |
+          set -eu
+          ./scripts/changelog-section.sh "${GITHUB_REF_NAME#v}" > /dev/null
+          echo "CHANGELOG.md has notes for ${GITHUB_REF_NAME#v}"
+
       # A stale notices file is a licence claim that is no longer true. It is
       # generated, so the check is that regenerating changes nothing.
       - name: third-party notices are current
@@ -98,12 +107,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # fetch-depth: 0 so the tag OBJECT is present, not just the commit it
-      # points at. A shallow checkout gives `git tag -l --format=...` nothing to
-      # read, and the release notes would silently lose their body.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -193,16 +197,12 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           notes=$(mktemp)
           {
-            # The tag's own annotation, first. It is where whoever cut the
-            # release said what changed and what breaks, and a release page that
-            # opens with install instructions buries exactly that.
-            body=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
-            if [ -n "$body" ]; then
-              echo "$body"
-              echo
-              echo "---"
-              echo
-            fi
+            # What changed, first. A release page that opens with install
+            # instructions buries the part a reader of a breaking release needs.
+            ./scripts/changelog-section.sh "$VERSION"
+            echo
+            echo "---"
+            echo
 
             echo "## Install"
             echo

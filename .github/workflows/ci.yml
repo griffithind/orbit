@@ -63,6 +63,16 @@ jobs:
       - name: test
         run: go test ./... -count=1 -timeout 10m
 
+      # The version the README tells people to install must have notes. Checked
+      # on every push, because the alternative is finding out at tag time, which
+      # is the moment it is most expensive to fix.
+      - name: the pinned version has changelog notes
+        run: |
+          set -eu
+          pinned=$(sed -n 's/^VERSION=\(.*\)$/\1/p' README.md | head -1)
+          ./scripts/changelog-section.sh "$pinned" > /dev/null
+          echo "CHANGELOG.md has notes for $pinned"
+
       # Here and not only in the release workflow. This check first ran at
       # release time, found that the generator's output depended on the local
       # module cache, and failed the release — correct, but the wrong moment to

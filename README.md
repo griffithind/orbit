@@ -285,8 +285,13 @@ restoring from backup has not been exercised end to end.
 make db-up          # development Postgres in Docker
 make migrate
 make check          # gofmt, vet, and the full suite
-make release-check  # cross-compile every release target
+make release-ready  # everything the release workflow checks, before tagging
 ```
+
+Release notes live in [CHANGELOG.md](CHANGELOG.md), not in the tag message: git
+strips markdown headings from a tag annotation unless `--cleanup=verbatim` is
+passed, and notes in a file are reviewable before they are published. The
+release refuses to publish without a section for the version being tagged.
 
 The store and e2e tests skip themselves when Postgres is unreachable, so
 `go test ./...` stays useful without Docker. CI treats a skip as a failure.

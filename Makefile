@@ -39,6 +39,17 @@ release-check: ## Cross-compile every release target without producing artifacts
 			go build -o /dev/null ./cmd/orbitd && echo "ok   orbitd $$t"; \
 	done
 
+# Everything the release workflow checks, before a tag exists to check it.
+.PHONY: release-ready
+release-ready: ## Verify this tree could be released as the version the README pins
+	@v=$$(sed -n 's/^VERSION=\(.*\)$$/\1/p' README.md | head -1); \
+	echo "README pins $$v"; \
+	./scripts/changelog-section.sh "$$v" > /dev/null && echo "changelog ok"; \
+	./scripts/third-party-notices.sh > /dev/null; \
+	git diff --quiet THIRD-PARTY-NOTICES.md && echo "notices ok" \
+		|| { echo "notices STALE — commit the regenerated file"; exit 1; }; \
+	$(MAKE) --no-print-directory release-check
+
 .PHONY: third-party
 third-party: ## Regenerate THIRD-PARTY-NOTICES.md from go.mod
 	./scripts/third-party-notices.sh
