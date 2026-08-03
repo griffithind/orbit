@@ -1,8 +1,22 @@
 // Package nebulacfg renders the configuration fragment Orbit owns on a managed
 // host.
 //
-// Orbit writes exactly one file, /etc/nebula/config.d/50-orbit.yml, and never
-// touches the operator's own configuration. Nebula merges every .yml in a
+// Orbit writes exactly one file, /var/lib/nebula/config.d/50-orbit.yml, and
+// never touches the operator's own configuration.
+//
+// /var/lib, not /etc, and the distinction is not cosmetic. Everything Orbit
+// writes on a managed host — the certificate, the private key, the rendered
+// fragment, and the previous generation kept for rollback — is RUNTIME STATE
+// that the agent creates and replaces on its own schedule. On an image-based
+// system (bootc, OSTree, Fedora CoreOS) /usr is read-only and /etc is an
+// overlay the image reconciles on upgrade, so runtime state written there is
+// fighting the image manager and can be reverted underneath a running host.
+// /var is the location such systems guarantee is persistent and unmanaged.
+//
+// Operator-authored configuration is the opposite case and stays in /etc: it is
+// authored once, read-only at runtime, and belongs to whoever builds the image.
+// That is why the control plane reads /etc/orbit/orbit.env and writes
+// /var/lib/orbit/ca.key. Nebula merges every .yml in a
 // config directory with mergo.WithAppendSlice (config/config.go parse), so:
 //
 //   - scalar keys Orbit sets win or lose by file order, and
@@ -35,14 +49,25 @@ type Paths struct {
 	Key  string // this host's private key; written once at enrollment
 }
 
+// DefaultDir is where the agent keeps everything it owns on a managed host.
+//
+// Under /var/lib so an image-based system leaves it alone; see the package
+// comment. systemd's StateDirectory=nebula creates exactly this path with the
+// right ownership and is the idiomatic way to get it.
+const DefaultDir = "/var/lib/nebula"
+
 // DefaultPaths are the conventional locations. The agent owns these files
 // entirely; the operator's own pki.* keys, if any, are overridden by ours
 // because 50-orbit.yml sorts after a conventional 00-base.yml.
+//
+// The agent rewrites these to match its own -dir on receipt, so a control plane
+// rendering one layout and an agent running another is not a mismatch — see
+// internal/agent.localize.
 func DefaultPaths() Paths {
 	return Paths{
-		CA:   "/etc/nebula/orbit-ca.crt",
-		Cert: "/etc/nebula/orbit-host.crt",
-		Key:  "/etc/nebula/orbit-host.key",
+		CA:   DefaultDir + "/orbit-ca.crt",
+		Cert: DefaultDir + "/orbit-host.crt",
+		Key:  DefaultDir + "/orbit-host.key",
 	}
 }
 

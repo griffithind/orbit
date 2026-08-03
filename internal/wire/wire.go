@@ -344,6 +344,86 @@ type LaggingHost struct {
 	LastSeenAt            *time.Time `json:"last_seen_at,omitempty"`
 }
 
+// --- Operational read surfaces ---
+//
+// These exist because the questions they answer were previously answerable only
+// from psql. Each maps to a store method that already existed and was routed
+// nowhere.
+
+// BlocklistEntryResponse is one revoked fingerprint still being distributed.
+//
+// Entries outlive the host they revoke — DeleteHost removes the host row but
+// deliberately leaves the blocklist entries, or a decommission would quietly
+// un-revoke the machine it decommissioned. So HostName is best-effort and empty
+// for a host that no longer exists, which is exactly the case worth seeing.
+type BlocklistEntryResponse struct {
+	Fingerprint string `json:"fingerprint"`
+	Reason      string `json:"reason,omitempty"`
+	Epoch       int64  `json:"epoch"`
+	// NotAfter is when the revoked certificate expires, and therefore when this
+	// entry stops being worth distributing: nebula rejects an expired
+	// certificate before it consults the blocklist.
+	NotAfter  string `json:"not_after"`
+	CreatedAt string `json:"created_at"`
+	HostName  string `json:"host_name,omitempty"`
+}
+
+// TrustBundleResponse is every CA a host should currently trust.
+//
+// Fetchable repeatedly, unlike the PEM in a CA creation response, because the
+// moment it is needed is a rotation that has gone wrong and the create response
+// is long gone.
+type TrustBundleResponse struct {
+	NetworkID string `json:"network_id"`
+	PEM       string `json:"pem"`
+	// CAs describes what is in the bundle, so a reader does not have to parse
+	// the PEM to answer "which CAs does this include, and what state are they
+	// in".
+	CAs []CAResponse `json:"cas"`
+}
+
+// ExpiringCertificateResponse is a certificate approaching expiry.
+//
+// The metrics endpoint reports how many; this reports which. During a renewal
+// failure the count says something is wrong and only the names say what.
+type ExpiringCertificateResponse struct {
+	HostID      string `json:"host_id"`
+	HostName    string `json:"host_name"`
+	Fingerprint string `json:"fingerprint"`
+	NotAfter    string `json:"not_after"`
+	// RenewAt is when the host should already have renewed. A RenewAt in the
+	// past is the actionable signal, not NotAfter.
+	RenewAt    string `json:"renew_at"`
+	LastSeenAt string `json:"last_seen_at,omitempty"`
+}
+
+// ControlPlaneResponse is one live replica serving a network's agent API.
+type ControlPlaneResponse struct {
+	HostID     string `json:"host_id"`
+	Addr       string `json:"addr"`
+	AgentPort  int    `json:"agent_port"`
+	LastSeenAt string `json:"last_seen_at"`
+}
+
+// HealthResponse is the liveness and readiness answer.
+//
+// Deliberately not on the admin surface and deliberately unauthenticated: a
+// load balancer and a systemd readiness check cannot hold a token, and the
+// answer reveals nothing an unauthenticated caller could not infer from whether
+// the port accepts a connection at all.
+type HealthResponse struct {
+	// Status is "ok" or "degraded". A process that is serving but cannot reach
+	// Postgres is degraded, not down — it will answer nothing useful, and that
+	// is worth distinguishing from a refused connection.
+	Status   string `json:"status"`
+	Database bool   `json:"database"`
+	// Push reports whether the LISTEN connection is established. False means
+	// every agent has fallen back to polling: correct, an order of magnitude
+	// slower, and invisible without this.
+	Push    bool   `json:"push"`
+	Version string `json:"version,omitempty"`
+}
+
 // Error is the uniform error body. Message is safe to show a user; it never
 // distinguishes "does not exist" from "you may not see it", because that
 // distinction is exactly what a prober is looking for.

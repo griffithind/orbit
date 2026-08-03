@@ -20,6 +20,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/nebulacfg"
 )
 
 const version = "0.1.0"
@@ -76,7 +77,7 @@ func enrollCmd(args []string) error {
 	var (
 		url    = fs.String("url", "", "control plane base URL")
 		code   = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-		dir    = fs.String("dir", "/etc/nebula", "nebula configuration directory")
+		dir    = fs.String("dir", nebulacfg.DefaultDir, "directory the agent owns: certificate, key, rendered config, rollback copy")
 		reload = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty for none`)
 		curve  = fs.String("curve", "CURVE25519", "key curve; must match the network")
 	)
@@ -158,7 +159,7 @@ func enrollCmd(args []string) error {
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var (
-		dirFlag   = fs.String("dir", "/etc/nebula", "nebula configuration directory")
+		dirFlag   = fs.String("dir", nebulacfg.DefaultDir, "directory the agent owns: certificate, key, rendered config, rollback copy")
 		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
 		restart   = fs.String("restart", "", "how to restart nebula; required to apply a changed overlay address")
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
@@ -265,7 +266,7 @@ func parseCurve(name string) (cert.Curve, error) {
 func recoverCmd(args []string) error {
 	fs := flag.NewFlagSet("recover", flag.ExitOnError)
 	var (
-		dir    = fs.String("dir", "/etc/nebula", "nebula configuration directory")
+		dir    = fs.String("dir", nebulacfg.DefaultDir, "directory the agent owns: certificate, key, rendered config, rollback copy")
 		url    = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
 		reload = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
 		curve  = fs.String("curve", "CURVE25519", "key curve; must match the network")

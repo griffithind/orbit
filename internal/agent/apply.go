@@ -39,10 +39,12 @@ const FragmentName = "50-orbit.yml"
 
 // Layout describes where things live on the managed host.
 type Layout struct {
-	// Dir is nebula's configuration directory, e.g. /etc/nebula.
+	// Dir is the directory the agent owns on this host, e.g. /var/lib/nebula.
+	// Under /var rather than /etc because everything in it is runtime state the
+	// agent writes and replaces; see the internal/nebulacfg package comment.
 	Dir string
 	// ConfigD is the merge directory nebula is pointed at, e.g.
-	// /etc/nebula/config.d.
+	// /var/lib/nebula/config.d.
 	ConfigD string
 	// Paths are the certificate and key locations referenced by the rendered
 	// fragment. They must match what the control plane rendered.
@@ -333,7 +335,7 @@ func (a *Applier) validateStaged(staging string, staged map[string]string, m Mat
 // PreviousDirName holds the last known-good generation.
 //
 // A stable directory, not a fresh temp one per apply. The temp-per-apply
-// version leaked: nothing removed them, so /etc/nebula accumulated a
+// version leaked: nothing removed them, so the directory accumulated a
 // .orbit-backup-* directory for every configuration change the host ever
 // received. It also meant there was no single place to revert *to* later,
 // which the unreachable-guard needs.

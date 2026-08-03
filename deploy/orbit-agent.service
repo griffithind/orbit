@@ -17,7 +17,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/orbit-agent run \
-    -dir /etc/nebula \
+    -dir /var/lib/nebula \
     -reload "systemctl reload nebula" \
     -restart "systemctl restart nebula" \
     -verify-url http://10.42.0.2:8443/agent/v1/state
@@ -28,7 +28,10 @@ RestartSec=30s
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/etc/nebula
+# The same directory nebula.service declares. Everything the agent writes lives
+# here rather than in /etc, so an image-based system (bootc, OSTree) does not
+# reconcile runtime state away on upgrade. See the comment in nebula.service.
+StateDirectory=nebula
 
 [Install]
 WantedBy=multi-user.target
