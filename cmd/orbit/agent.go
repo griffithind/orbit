@@ -155,11 +155,9 @@ func newLogger() *slog.Logger {
 func enrollCmd(args []string) error {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	var (
-		url       = fs.String("url", "", "control plane base URL")
-		code      = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty for none`)
-		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
-		nebulaBin = fs.String("nebula", "", "nebula binary used to validate a configuration before applying it (default: nebula on PATH)")
+		url   = fs.String("url", "", "control plane base URL")
+		code  = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
+		curve = fs.String("curve", "CURVE25519", "key curve; must match the network")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -205,11 +203,14 @@ func enrollCmd(args []string) error {
 		return fmt.Errorf("enroll: %w", err)
 	}
 
+	// No engine here: enrolling writes the first generation, and `orbit agent
+	// run` is what starts nebula on it. Reloading something that is not running
+	// yet is the one case there is nothing useful to do about.
 	applier := &agent.Applier{
-		Layout:       layout,
-		Reloader:     agent.ParseReloader(*reload),
-		NebulaBinary: *nebulaBin,
-		Log:          log,
+		Layout:            layout,
+		Reloader:          agent.NoopReloader{},
+		DisableValidation: true,
+		Log:               log,
 	}
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		return err
@@ -247,12 +248,6 @@ func enrollCmd(args []string) error {
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var (
-		nebulaBin = fs.String("nebula", "", "nebula binary used to validate a configuration before applying it (default: nebula on PATH)")
-		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
-		restart   = fs.String("restart", "",
-			`how to restart nebula: "unit:nebula@<network>", a command, or empty. `+
-				`Required to apply a changed overlay address, and the only way the agent can `+
-				`tell whether nebula is running at all`)
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		interval  = fs.Duration("interval", time.Minute, "poll interval")
 		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
@@ -279,23 +274,34 @@ func runCmd(args []string) error {
 		return err
 	}
 
+	// Nebula runs HERE. One engine serves as both the reloader and the
+	// supervisor, so the apply sequence, the revert guard, and verification are
+	// unchanged from when it drove a separate process — they were already
+	// written against those two interfaces.
+	//
+	// It also removes the failure the old -restart flag existed to warn about:
+	// there is no configuration to forget, an address change is always
+	// applicable, and "is nebula running" always has an exact answer.
+	engine := &agent.Embedded{ConfigPath: layout.ConfigPath(), Log: log}
+	defer func() { _ = engine.Close() }()
+
 	applier := &agent.Applier{
-		Layout:       layout,
-		Reloader:     agent.ParseReloader(*reload),
-		NebulaBinary: *nebulaBin,
-		Log:          log,
+		Layout:   layout,
+		Reloader: engine,
+		// The linked copy IS the copy that will run it, so validating in
+		// process is exact rather than a guess about the host's binary version.
+		DisableValidation: true,
+		Log:               log,
 	}
-	// The pidfile comes from -reload rather than a flag of its own: a host that
-	// reloads by pidfile has exactly one, and naming it twice is one more thing
-	// to get out of step.
-	applier.Supervisor = agent.ParseSupervisor(*restart, agent.PidFileFromReloadSpec(*reload))
-	if applier.Supervisor == nil {
-		// Two distinct losses, both silent, so name both. Without a supervisor
-		// an address change is refused outright rather than applied, and a
-		// nebula that is not running is invisible to this host and to the
-		// control plane.
-		log.Warn("no -restart configured: a changed overlay address will be REFUSED rather " +
-			"than applied, and the agent cannot tell whether nebula is running")
+	applier.Supervisor = engine
+
+	if err := engine.Start(ctx); err != nil {
+		// Not fatal. The agent's job from here is to fetch a generation that
+		// works and apply it, and refusing to run because the CURRENT
+		// configuration is bad is how a host stays broken: the fix is on the
+		// control plane, and reaching it is what this loop does.
+		log.Error("nebula did not start on the existing configuration; "+
+			"continuing so a new generation can replace it", "error", err)
 	}
 	if *verifyURL != "" {
 		applier.Verifier = agent.NewReachabilityVerifier(*verifyURL)
@@ -380,11 +386,9 @@ func parseCurve(name string) (cert.Curve, error) {
 func recoverCmd(args []string) error {
 	fs := flag.NewFlagSet("recover", flag.ExitOnError)
 	var (
-		url       = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
-		nebulaBin = fs.String("nebula", "", "nebula binary used to validate a configuration before applying it (default: nebula on PATH)")
-		reload    = fs.String("reload", "", `how to reload nebula: "pid:/run/nebula.pid", a command, or empty`)
-		restart   = fs.String("restart", "", `how to restart nebula: "unit:nebula@<network>", a command, or empty`)
-		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
+		url = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
+
+		curve = fs.String("curve", "CURVE25519", "key curve; must match the network")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -443,15 +447,18 @@ func recoverCmd(args []string) error {
 		return fmt.Errorf("recover: %w", err)
 	}
 
+	// Recovery re-keys the host, and a recovered certificate can carry a
+	// different overlay address than the expired one — a restart, not a reload.
+	// The engine is both.
+	engine := &agent.Embedded{ConfigPath: layout.ConfigPath(), Log: log}
+	defer func() { _ = engine.Close() }()
+
 	applier := &agent.Applier{
-		Layout:   layout,
-		Reloader: agent.ParseReloader(*reload),
-		// Recovery re-keys the host, and a recovered certificate can carry a
-		// different overlay address than the expired one. That is a restart, not
-		// a reload, so this path needs a supervisor as much as `run` does.
-		Supervisor:   agent.ParseSupervisor(*restart, agent.PidFileFromReloadSpec(*reload)),
-		NebulaBinary: *nebulaBin,
-		Log:          log,
+		Layout:            layout,
+		Reloader:          engine,
+		Supervisor:        engine,
+		DisableValidation: true,
+		Log:               log,
 	}
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		return err

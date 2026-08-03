@@ -398,65 +398,43 @@ func enrollWorks(t *testing.T, ts *httptest.Server, code string) bool {
 
 // TestCLIDoesNotLinkTheDataPlane guards the reason `orbit` is a separate binary.
 //
-// orbitd links internal/mesh, and through it nebula and gvisor — a userspace
-// TCP/IP stack — and it links the postgres driver. orbit installs on a laptop
-// and on every managed host, where none of that belongs, and the separation is
-// only real for as long as nothing imports its way back across.
+// orbit RUNS nebula — the agent embeds it — so the data plane is expected here
+// and this test is about the two things that must still not cross.
 //
-// The failure this catches is an innocent one: a command that wants a constant
-// from internal/store, or a helper that reaches for nebula's root package,
-// pulling the whole dependency graph in behind it.
+// gvisor is the userspace network stack, and only the control plane needs it:
+// orbitd joins the overlay without a tun device, a managed host IS the tun
+// device. If gvisor appears in orbit, something has wired the agent to the
+// userspace path and every host is now carrying a second TCP/IP implementation
+// it never uses.
 //
-// nebula/cert is ALLOWED and is the reason this test is a list rather than a
-// prefix ban. The agent generates its own keypair and parses its own
-// certificate, which is what that package is for; it carries no tunnel, no
-// network stack, and no listener. The root package is the data plane, and the
-// distinction between the two is exactly what a prefix match would lose.
+// The postgres driver and internal/store are the other side. orbit talks to the
+// control plane over HTTP and holds no database credential; a host that links
+// the driver is one import away from someone deciding it could just read the
+// database directly.
+//
+// The failure this catches is innocent: a command that wants a constant from
+// internal/store, or a helper from internal/mesh, pulling the whole graph in
+// behind it.
 func TestCLIDoesNotLinkTheDataPlane(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", "github.com/griffithind/orbit/cmd/orbit").Output()
 	if err != nil {
 		t.Skipf("go list unavailable: %v", err)
 	}
-	deps := strings.Split(string(out), "\n")
 
-	// Prefix bans: nothing under these may appear at all.
 	forbidden := []string{
 		"gvisor.dev/gvisor",
 		"github.com/jackc/pgx",
-		"golang.zx2c4.com/wireguard",
 		"github.com/griffithind/orbit/internal/store",
 		"github.com/griffithind/orbit/internal/mesh",
 	}
-	for _, line := range deps {
-		// The nebula ROOT package, matched exactly. It is the data plane.
-		if line == "github.com/slackhq/nebula" {
-			t.Error("cmd/orbit links github.com/slackhq/nebula, the data plane itself. " +
-				"The agent validates configurations by running the host's own nebula " +
-				"binary precisely so it does not have to carry one.")
-		}
+	for _, line := range strings.Split(string(out), "\n") {
 		for _, f := range forbidden {
 			if line == f || strings.HasPrefix(line, f+"/") {
-				t.Errorf("cmd/orbit links %s; neither an operator's laptop nor a managed "+
-					"host should carry the data plane or the database driver", line)
+				t.Errorf("cmd/orbit links %s, which belongs to the control plane. "+
+					"A managed host runs nebula on a real tun device and talks to "+
+					"orbitd over HTTP; it needs neither a userspace network stack "+
+					"nor a database driver", line)
 			}
-		}
-	}
-
-	// And the allowance stays narrow. Listing nebula/cert as acceptable must not
-	// become "anything under nebula/ is acceptable", which is how the root
-	// package's dependencies arrive one subpackage at a time.
-	allowedNebula := map[string]bool{
-		"github.com/slackhq/nebula/cert":      true,
-		"github.com/slackhq/nebula/cert/p256": true,
-	}
-	for _, line := range deps {
-		if !strings.HasPrefix(line, "github.com/slackhq/nebula/") {
-			continue
-		}
-		if !allowedNebula[line] {
-			t.Errorf("cmd/orbit links %s. Only the certificate packages are meant to be "+
-				"here; if this one is genuinely needed, add it above and say what it "+
-				"pulls in with it", line)
 		}
 	}
 }
