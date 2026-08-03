@@ -26,9 +26,23 @@ From [releases](https://github.com/griffithind/orbit/releases). Every binary is
 statically linked with no runtime dependencies.
 
 ```bash
-curl -fsSL https://github.com/griffithind/orbit/releases/latest/download/orbit_0.1.0_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar -xz
+VERSION=0.1.0
+OS=$(uname -s | tr A-Z a-z)
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+
+curl -fsSLO https://github.com/griffithind/orbit/releases/download/v$VERSION/orbit_${VERSION}_${OS}_${ARCH}.tar.gz
+tar -xzf orbit_${VERSION}_${OS}_${ARCH}.tar.gz
 sudo install orbit /usr/local/bin/
+orbit version
 ```
+
+Pinned to a version on purpose. `releases/latest/download/` resolves to whatever
+the newest release is, and every artifact name here carries its version — so the
+two together produce a URL that 404s the day after the next release. Bump
+`VERSION` to upgrade; the release workflow refuses to publish a tag whose README
+still points at an older one.
+
+Check the download against `SHA256SUMS` on the release page before installing.
 
 | Binary | Platforms | Runs on |
 |---|---|---|

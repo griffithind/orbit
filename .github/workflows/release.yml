@@ -64,6 +64,23 @@ jobs:
             exit 1
           fi
 
+      # The README pins an install URL to a version, so that it keeps working
+      # after the next release rather than 404ing. A pin is only as good as the
+      # thing that notices it went stale, and the honest moment to check is
+      # here: at any other time the README legitimately names the last release
+      # rather than the next one.
+      - name: the README installs the version being released
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          pinned=$(sed -n 's/^VERSION=\(.*\)$/\1/p' README.md | head -1)
+          if [ "$pinned" != "$VERSION" ]; then
+            echo "::error::README installs $pinned but this release is $VERSION."
+            echo "Set VERSION=$VERSION in the README install block and re-tag."
+            exit 1
+          fi
+          echo "README pins $pinned"
+
       # A stale notices file is a licence claim that is no longer true. It is
       # generated, so the check is that regenerating changes nothing.
       - name: third-party notices are current
