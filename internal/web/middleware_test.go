@@ -21,13 +21,17 @@ import (
 // need real rows live in e2e/ui_security_test.go; these are the ones that must
 // never be skipped because Postgres was not up.
 
-// fakeSessions is the session layer, stubbed. The real one is being built
-// separately; what this package needs from it is three methods, and this is the
-// proof that the interface is small enough to be worth having.
+// fakeSessions is the session layer, stubbed. What this package needs from it
+// is five methods, and this is the proof that the interface is small enough to
+// be worth having.
 type fakeSessions struct {
 	identity *store.Identity
 	err      error
 	revoked  map[string]bool
+	// sessions is what List returns. Nil is a legitimate answer and several
+	// tests rely on it: a handler must not assume the list is non-empty just
+	// because the caller is holding one of the things in it.
+	sessions []store.UISession
 }
 
 func (f *fakeSessions) Create(context.Context, uuid.UUID, bool, *netip.Addr, string) (string, time.Time, error) {
@@ -49,6 +53,18 @@ func (f *fakeSessions) Revoke(_ context.Context, v string) error {
 		f.revoked = map[string]bool{}
 	}
 	f.revoked[v] = true
+	return nil
+}
+
+func (f *fakeSessions) List(context.Context, string) ([]store.UISession, error) {
+	return f.sessions, f.err
+}
+
+func (f *fakeSessions) RevokeByID(_ context.Context, id uuid.UUID, _ store.Identity) error {
+	if f.revoked == nil {
+		f.revoked = map[string]bool{}
+	}
+	f.revoked[id.String()] = true
 	return nil
 }
 

@@ -447,6 +447,18 @@ A session *references* its token rather than copying its scopes, so
 orbit token revoke $TOKEN_ID     # every console signed in with it is out
 ```
 
+That is the big hammer, and it stops the operator's shell and their CI along
+with the browser. The **API tokens** page lists the sessions that are live right
+now — token, sign-in address, browser, last activity, with your own row marked —
+and signs out one at a time. Closing a laptop left in a cafe should not require
+revoking a credential three other things are using.
+
+The list is live sessions only. A session that expired, was signed out, or went
+idle is absent rather than greyed out: the question the page answers is what can
+reach the control plane at this moment. The history — who signed in, from where
+— is in the audit log, which outlives these rows; they are swept within twelve
+hours of dying.
+
 Every screen works with JavaScript disabled — forms are real forms, links are
 real links. Live updates are an enhancement, not a requirement.
 

@@ -71,14 +71,14 @@ var assetFS embed.FS
 // Sessions is the session layer this package needs, and the whole of it.
 //
 // An interface rather than a direct dependency on *store.Store for two reasons.
-// It is the exact contract — three operations, no more — so what the UI requires
-// of the session layer is readable in one place rather than inferred from call
-// sites. And it lets every handler test run without a database, which is what
-// makes "a broken template is a test failure rather than a 3am 500" affordable
-// enough to actually enforce.
+// It is the exact contract — nothing the UI does not use — so what this package
+// requires of the session layer is readable in one place rather than inferred
+// from call sites. And it lets every handler test run without a database, which
+// is what makes "a broken template is a test failure rather than a 3am 500"
+// affordable enough to actually enforce.
 //
-// The adapter that satisfies this with store.CreateUISession, ResolveSession
-// and RevokeUISession lives at the composition root, in cmd/orbitd.
+// StoreSessions, at the bottom of this file, is the only implementation that
+// talks to Postgres.
 type Sessions interface {
 	// Create mints a session for an already-authenticated API token and returns
 	// the cookie's plaintext value.
@@ -93,6 +93,17 @@ type Sessions interface {
 	// Revoke ends a session. Idempotent from the caller's point of view: logout
 	// must not fail because the session was already gone.
 	Revoke(ctx context.Context, cookieValue string) error
+
+	// List returns the sessions that can reach the control plane right now,
+	// with currentCookie's own row marked. Live only — see
+	// store.ListUISessions for why a dead session is absent rather than greyed
+	// out.
+	List(ctx context.Context, currentCookie string) ([]store.UISession, error)
+
+	// RevokeByID ends a session the caller picked out of List. Separate from
+	// Revoke because an operator ending somebody else's browser does not have
+	// its cookie, and there is no path from a listed session back to one.
+	RevokeByID(ctx context.Context, id uuid.UUID, by store.Identity) error
 }
 
 // Config is what the UI needs from the process around it.
@@ -219,6 +230,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 
 	get("/ui/audit", "audit:read", s.handleAudit)
 	get("/ui/tokens", "tokens:read", s.handleTokens)
+	// Ending a session is scoped as tokens:write rather than as something of
+	// its own, because a session is a reference to a token and revoking the
+	// token already ends every session derived from it. Anyone who can do the
+	// larger thing can do the smaller one; a separate scope would only be a
+	// second place to get it wrong. A read-only session can see the list and
+	// cannot act on it, which is the intended shape.
+	post("/ui/sessions/{id}/revoke", "tokens:write", s.handleRevokeSession)
 
 	// SSE. Its own scope is networks:read because that is what the events say
 	// something about, and it revalidates the session inside the stream loop —
@@ -362,5 +380,21 @@ func (s storeSessions) Resolve(ctx context.Context, cookieValue string) (*store.
 func (s storeSessions) Revoke(ctx context.Context, cookieValue string) error {
 	return s.st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		return tx.RevokeUISession(ctx, cookieValue)
+	})
+}
+
+func (s storeSessions) List(ctx context.Context, currentCookie string) ([]store.UISession, error) {
+	var out []store.UISession
+	err := s.st.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		out, err = tx.ListUISessions(ctx, currentCookie)
+		return err
+	})
+	return out, err
+}
+
+func (s storeSessions) RevokeByID(ctx context.Context, id uuid.UUID, by store.Identity) error {
+	return s.st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.RevokeUISessionByID(ctx, id, by)
 	})
 }

@@ -40,5 +40,52 @@
 {{- else }}
 <p class="note">No tokens exist. That should be impossible — you are signed in with one.</p>
 {{- end }}
+
+<h2>Browser sessions</h2>
+{{/*
+  Live sessions only. A session that has expired, been signed out, or gone idle
+  is not shown greyed out, because the question this list answers is "what can
+  reach the control plane right now" and a dead row is a no, not a weaker yes.
+  The audit log is where the history lives — it outlives these rows, which are
+  swept within twelve hours of dying.
+*/}}
+<p class="subtitle">Signed in right now. Each one references a token above and
+  holds no permission of its own.</p>
+
+{{- if .Sessions }}
+<div class="scroll">
+<table class="grid stackable">
+  <thead>
+    <tr><th scope="col">Token</th><th scope="col">State</th><th scope="col">Last seen</th>
+      <th scope="col">Signed in</th><th scope="col">From</th><th scope="col">Ends</th>
+      {{- if $.Data.CanRevoke }}<th scope="col">Sign out</th>{{- end }}</tr>
+  </thead>
+  <tbody>
+  {{- range .Sessions }}
+    <tr>
+      <td data-label="Token">{{ .TokenName }}<span class="note"><code>{{ .TokenID }}</code></span></td>
+      <td data-label="State">{{ template "badge" .Badge }}</td>
+      <td data-label="Last seen">{{ ago .LastSeenAt }}</td>
+      <td data-label="Signed in">{{ ago .CreatedAt }}</td>
+      <td data-label="From">{{ if .From }}<code>{{ .From }}</code>{{ else }}<span class="note">not recorded</span>{{ end }}
+        {{- if .Agent }}<span class="note">{{ .Agent }}</span>{{ end }}</td>
+      <td data-label="Ends">{{ ago .ExpiresAt }}</td>
+      {{- if $.Data.CanRevoke }}
+      <td data-label="Sign out">
+        <form method="post" action="/ui/sessions/{{ .ID }}/revoke">
+          <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+          <button type="submit" class="button"
+                  data-confirm="{{ if .Current }}This is the session you are using. Signing it out will return you to the login page.{{ else }}Sign this session out? The token it uses keeps working — revoke the token itself if the credential leaked.{{ end }}">Sign out</button>
+        </form>
+      </td>
+      {{- end }}
+    </tr>
+  {{- end }}
+  </tbody>
+</table>
+</div>
+{{- else }}
+<p class="note">No live sessions. That should be impossible — you are reading this in one.</p>
+{{- end }}
 {{- end }}
 {{- end -}}

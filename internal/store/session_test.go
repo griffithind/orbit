@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -566,5 +568,291 @@ func TestReadOnlyScopesMatchTheAPIScopeTable(t *testing.T) {
 			" store.ReadOnlyScopes() = %v\n"+
 			"Add the missing scope to store.readOnlyScopes in internal/store/session.go.",
 			fromAPI, fromStore)
+	}
+}
+
+//------------------------------------------------------------------------------
+// Listing and ending sessions from the outside
+//------------------------------------------------------------------------------
+
+// The tests below filter the listing down to the token they created. The
+// listing is global by design — an operator asks "who is signed in", not "who
+// is signed in with this credential" — and the package's tests share one
+// database, so asserting on the whole result would make every test here depend
+// on which others ran.
+
+func listSessions(t *testing.T, s *store.Store, currentCookie string) []store.UISession {
+	t.Helper()
+	var out []store.UISession
+	err := s.Read(context.Background(), func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		out, err = tx.ListUISessions(ctx, currentCookie)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("ListUISessions: %v", err)
+	}
+	return out
+}
+
+func sessionsOfToken(all []store.UISession, tokenID uuid.UUID) []store.UISession {
+	var out []store.UISession
+	for _, sess := range all {
+		if sess.TokenID == tokenID {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
+// TestListUISessionsAgreesWithResolveSession is the test this listing exists to
+// be held to. Every row it returns must be one ResolveSession accepts, and
+// every session ResolveSession accepts must appear. A page that answers "which
+// browsers can reach the control plane right now" is worth nothing if its
+// answer and the authentication path's answer are computed from two different
+// rules — and the drift would be silent until somebody acted on it.
+func TestListUISessionsAgreesWithResolveSession(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	conn := adminConn(t)
+
+	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+
+	live, _ := newSession(t, s, tokenID, true)
+
+	// One of each way a session dies, all on the same token.
+	dead := map[string]string{
+		"revoked": `revoked_at = now()`,
+		// created_at moves with it: the table CHECKs expires_at against it, so a
+		// row cannot be expired without also being old.
+		"expired": `created_at = now() - interval '13 hours',
+		            expires_at = now() - interval '1 hour',
+		            last_seen_at = now()`,
+		"idle timeout": `last_seen_at = now() - interval '31 minutes'`,
+	}
+	cookies := map[string]string{}
+	for name, age := range dead {
+		cookie, _ := newSession(t, s, tokenID, true)
+		cookies[name] = cookie
+		sum := sha256.Sum256([]byte(cookie))
+		if _, err := conn.Exec(ctx,
+			`UPDATE orbit.ui_session SET `+age+` WHERE cookie_hash = $1`, sum[:]); err != nil {
+			t.Fatalf("age the %s session: %v", name, err)
+		}
+	}
+
+	got := sessionsOfToken(listSessions(t, s, ""), tokenID)
+	if len(got) != 1 {
+		t.Fatalf("listed %d sessions, want the 1 that is live", len(got))
+	}
+
+	// And the agreement, in both directions, checked rather than assumed.
+	if _, err := s.ResolveSession(ctx, live); err != nil {
+		t.Errorf("the listed session does not authenticate: %v", err)
+	}
+	for name, cookie := range cookies {
+		if _, err := s.ResolveSession(ctx, cookie); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("the %s session was excluded from the listing but still "+
+				"authenticates (%v); the listing is hiding a live browser", name, err)
+		}
+	}
+}
+
+// TestListUISessionsKillsItsRowsWhenTheTokenIsRevoked. The token is the
+// credential; a session is a reference to it. Revoking the token must empty the
+// listing, or an operator reads "3 browsers signed in" for a credential that
+// stopped working.
+func TestListUISessionsKillsItsRowsWhenTheTokenIsRevoked(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	newSession(t, s, tokenID, false)
+	newSession(t, s, tokenID, true)
+
+	if got := sessionsOfToken(listSessions(t, s, ""), tokenID); len(got) != 2 {
+		t.Fatalf("listed %d sessions before revocation, want 2", len(got))
+	}
+
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.RevokeAPIToken(ctx, tokenID)
+	}); err != nil {
+		t.Fatalf("RevokeAPIToken: %v", err)
+	}
+
+	if got := sessionsOfToken(listSessions(t, s, ""), tokenID); len(got) != 0 {
+		t.Errorf("%d session(s) still listed for a revoked token", len(got))
+	}
+}
+
+// TestListUISessionsMarksTheCaller. Put a sign-out control on every row without
+// this and the likeliest use of it is an operator ending their own session
+// halfway through an incident.
+func TestListUISessionsMarksTheCaller(t *testing.T) {
+	s := setup(t)
+
+	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	mine, _ := newSession(t, s, tokenID, false)
+	newSession(t, s, tokenID, true)
+
+	got := sessionsOfToken(listSessions(t, s, mine), tokenID)
+	if len(got) != 2 {
+		t.Fatalf("listed %d sessions, want 2", len(got))
+	}
+	current := 0
+	for _, sess := range got {
+		if sess.Current {
+			current++
+		}
+	}
+	if current != 1 {
+		t.Errorf("%d of 2 sessions marked Current, want exactly 1", current)
+	}
+
+	// And no cookie means nothing is the caller's, rather than everything.
+	for _, sess := range sessionsOfToken(listSessions(t, s, ""), tokenID) {
+		if sess.Current {
+			t.Error("a session was marked Current for a caller holding no cookie")
+		}
+	}
+}
+
+// TestListUISessionsCarriesNoCredential. This struct is rendered into a page.
+// The cookie is not recoverable from the database, so the way it could leak is
+// a field added later that carries the hash — which is not the credential, but
+// is the only thing in the row that is derived from it, and has no business on
+// a screen.
+func TestListUISessionsCarriesNoCredential(t *testing.T) {
+	s := setup(t)
+
+	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	cookie, _ := newSession(t, s, tokenID, false)
+
+	got := sessionsOfToken(listSessions(t, s, cookie), tokenID)
+	if len(got) != 1 {
+		t.Fatalf("listed %d sessions, want 1", len(got))
+	}
+
+	rendered := fmt.Sprintf("%+v", got[0])
+	if strings.Contains(rendered, cookie) {
+		t.Fatal("the cookie value appears in a listed session")
+	}
+	sum := sha256.Sum256([]byte(cookie))
+	if strings.Contains(rendered, fmt.Sprintf("%x", sum)) ||
+		strings.Contains(rendered, fmt.Sprintf("%v", sum[:])) {
+		t.Fatal("the cookie hash appears in a listed session")
+	}
+
+	typ := reflect.TypeOf(got[0])
+	for i := range typ.NumField() {
+		f := typ.Field(i)
+		if f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.Uint8 {
+			t.Errorf("UISession.%s is a byte slice. The only bytes on this row are "+
+				"the cookie hash; if this field is something else, say so here and "+
+				"delete this branch", f.Name)
+		}
+	}
+}
+
+// TestRevokeUISessionByIDEndsOneBrowser. The point of ending a session by id
+// rather than revoking the token: the other sessions, and the token itself,
+// keep working. An operator who has to revoke a credential to close one laptop
+// will not do it during an incident.
+func TestRevokeUISessionByIDEndsOneBrowser(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	tokenID, tokenPlaintext := newToken(t, s, []string{"hosts:read"}, nil)
+	doomed, _ := newSession(t, s, tokenID, false)
+	survivor, _ := newSession(t, s, tokenID, false)
+
+	var doomedID uuid.UUID
+	for _, sess := range sessionsOfToken(listSessions(t, s, doomed), tokenID) {
+		if sess.Current {
+			doomedID = sess.ID
+		}
+	}
+	if doomedID == uuid.Nil {
+		t.Fatal("could not identify the session to revoke")
+	}
+
+	actor := store.Identity{
+		Kind: store.ActorUser, Subject: "ops@example.com", Display: "ops@example.com",
+	}
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.RevokeUISessionByID(ctx, doomedID, actor)
+	}); err != nil {
+		t.Fatalf("RevokeUISessionByID: %v", err)
+	}
+
+	if _, err := s.ResolveSession(ctx, doomed); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("the revoked session still resolves: %v", err)
+	}
+	if _, err := s.ResolveSession(ctx, survivor); err != nil {
+		t.Errorf("revoking one session ended another: %v", err)
+	}
+	tokenSum := sha256.Sum256([]byte(tokenPlaintext))
+	if _, err := s.AuthenticateToken(ctx, tokenSum[:]); err != nil {
+		t.Errorf("revoking a session revoked the token it references: %v", err)
+	}
+
+	// Twice is ErrNotFound, matching RevokeAPIToken: an operator working
+	// through an incident is entitled to know whether they were the one who
+	// ended it.
+	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.RevokeUISessionByID(ctx, doomedID, actor)
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("second revoke = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRevokeUISessionByIDIsAttributedToTheOperator. An admin ending somebody
+// else's session and that person signing themselves out are different events.
+// An audit log that records them identically cannot answer the question anyone
+// asks of it afterwards.
+func TestRevokeUISessionByIDIsAttributedToTheOperator(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	cookie, _ := newSession(t, s, tokenID, false)
+
+	got := sessionsOfToken(listSessions(t, s, cookie), tokenID)
+	if len(got) != 1 {
+		t.Fatalf("listed %d sessions, want 1", len(got))
+	}
+	sessionID := got[0].ID
+
+	actor := store.Identity{
+		Kind: store.ActorUser, Subject: "ops@example.com", Display: "on-call",
+	}
+	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.RevokeUISessionByID(ctx, sessionID, actor)
+	}); err != nil {
+		t.Fatalf("RevokeUISessionByID: %v", err)
+	}
+
+	var records []store.AuditRecord
+	if err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		records, err = tx.ListAudit(ctx, store.AuditFilter{
+			Action: store.ActionSessionDestroyed, TargetType: "session",
+			TargetID: sessionID.String(), Limit: 10,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("%d audit entries for the revocation, want 1", len(records))
+	}
+	rec := records[0]
+	if rec.ActorType != store.ActorUser || rec.ActorDisplay != "on-call" {
+		t.Errorf("revocation attributed to %s/%s, want the operator who did it",
+			rec.ActorType, rec.ActorDisplay)
+	}
+	if !strings.Contains(string(rec.Meta), tokenID.String()) {
+		t.Errorf("the entry does not say whose session it was: %s", rec.Meta)
 	}
 }

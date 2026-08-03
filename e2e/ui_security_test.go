@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -32,34 +31,11 @@ import (
 // store.ResolveSession actually performed, and a block that really did move a
 // host's state.
 
-// uiSessions is the same adapter cmd/orbitd wires, duplicated here so the tests
-// exercise the real store methods rather than a stub of them.
-type uiSessions struct{ st *store.Store }
-
-func (u uiSessions) Create(ctx context.Context, tokenID uuid.UUID, readOnly bool,
-	ip *netip.Addr, userAgent string) (string, time.Time, error) {
-
-	var (
-		plaintext string
-		expiresAt time.Time
-	)
-	err := u.st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		var err error
-		plaintext, expiresAt, err = tx.CreateUISession(ctx, tokenID, readOnly, ip, userAgent)
-		return err
-	})
-	return plaintext, expiresAt, err
-}
-
-func (u uiSessions) Resolve(ctx context.Context, v string) (*store.Identity, error) {
-	return u.st.ResolveSession(ctx, v)
-}
-
-func (u uiSessions) Revoke(ctx context.Context, v string) error {
-	return u.st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		return tx.RevokeUISession(ctx, v)
-	})
-}
+// These tests use web.StoreSessions — the same adapter cmd/orbitd wires — rather
+// than a copy of it. A copy lived here until sessions grew a listing: it was
+// written to "exercise the real store methods", and the moment the interface
+// gained a method it became a second thing to keep in step, which is the exact
+// failure StoreSessions exists to prevent.
 
 // uiHarness is a running operator UI and a browser-shaped client for it.
 type uiHarness struct {
@@ -92,7 +68,7 @@ func (h *harness) serveWebWith(t *testing.T, notifier *notify.Notifier) *uiHarne
 		EnrollURL:  "https://orbit.example.com/enroll/v1/enroll",
 	})
 
-	ui, err := web.New(h.store, svc, uiSessions{h.store}, web.Config{Notifier: notifier},
+	ui, err := web.New(h.store, svc, web.StoreSessions(h.store), web.Config{Notifier: notifier},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("web.New: %v", err)
@@ -485,4 +461,196 @@ func (h *harness) createHostRow(t *testing.T, name string) uuid.UUID {
 		t.Fatalf("create host: %v", err)
 	}
 	return host.ID
+}
+
+//------------------------------------------------------------------------------
+// Listing and ending browser sessions
+//------------------------------------------------------------------------------
+
+// newBrowser is a second, independent browser against the same server: its own
+// cookie jar, signing in with the same token. That is the situation the session
+// list exists for — one credential, more than one browser holding it, and no
+// way to tell them apart from the token row alone.
+func (u *uiHarness) newBrowser(t *testing.T) *uiHarness {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &uiHarness{
+		harness: u.harness,
+		url:     u.url,
+		client: &http.Client{
+			Jar: jar,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+}
+
+// sessionIDs pulls the session ids off the rendered tokens page, from the forms
+// that would actually be submitted. Reading them out of the HTML rather than
+// out of the database is deliberate: it proves the page offers a control for
+// each session, which is the half a store-level test cannot see.
+func sessionIDs(html string) []string {
+	var out []string
+	rest := html
+	const marker = `action="/ui/sessions/`
+	for {
+		i := strings.Index(rest, marker)
+		if i < 0 {
+			return out
+		}
+		rest = rest[i+len(marker):]
+		j := strings.Index(rest, "/revoke")
+		if j < 0 {
+			return out
+		}
+		out = append(out, rest[:j])
+	}
+}
+
+// TestUISessionListShowsEveryBrowserAndEndsOne is the whole feature end to end:
+// two browsers on one token, both visible, one ended, the other and the token
+// itself untouched.
+//
+// The last part is the reason any of this exists. Before it, closing one
+// forgotten browser meant revoking the token — which also stops the operator's
+// shell, their CI, and anything else holding the same credential. An operator
+// facing that choice mid-incident does not close the browser.
+func TestUISessionListShowsEveryBrowserAndEndsOne(t *testing.T) {
+	h := setup(t)
+	first := h.serveWeb(t)
+	first.signInBrowser(t, true)
+
+	second := first.newBrowser(t)
+	second.signInBrowser(t, true)
+
+	page := body(t, first.get(t, "/ui/tokens"))
+	ids := sessionIDs(page)
+	if len(ids) < 2 {
+		t.Fatalf("the tokens page offers %d sign-out controls, want at least the "+
+			"2 browsers signed in\n%s", len(ids), page)
+	}
+	if !strings.Contains(page, "this browser") {
+		t.Error("no session is marked as the caller's own. Every row carries a " +
+			"sign-out button; without the mark, the likeliest use of one is an " +
+			"operator ending their own session mid-incident")
+	}
+
+	// Both browsers see the same rows, so the other one is whichever this
+	// browser did not claim as its own.
+	firstOwn := ownSessionID(t, first)
+	var other string
+	for _, id := range ids {
+		if id != firstOwn {
+			other = id
+			break
+		}
+	}
+	if other == "" {
+		t.Fatal("could not identify the other browser's session")
+	}
+
+	form := url.Values{"csrf_token": {csrfFrom(t, page)}}
+	resp := first.post(t, "/ui/sessions/"+other+"/revoke", form)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("revoke = %d\n%s", resp.StatusCode, body(t, resp))
+	}
+
+	// The other browser is out, on its next request.
+	resp = second.get(t, "/ui/tokens")
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("the revoked browser got %d, want a redirect to the login page",
+			resp.StatusCode)
+	}
+
+	// This one is not. That also settles the token: ResolveSession joins
+	// orbit.api_token on every request, so a session that still resolves is a
+	// token that was not revoked along with the browser.
+	if got := first.get(t, "/ui/tokens"); got.StatusCode != http.StatusOK {
+		t.Errorf("ending another session ended this one: %d", got.StatusCode)
+	}
+}
+
+// ownSessionID asks a browser which listed session is its own, by finding the
+// row the server marked. The mark comes from a cookie-hash comparison in
+// store.ListUISessions, so this also exercises that.
+func ownSessionID(t *testing.T, u *uiHarness) string {
+	t.Helper()
+	html := body(t, u.get(t, "/ui/tokens"))
+	// The badge word sits in the row before the form action, so walk rows.
+	for _, row := range strings.Split(html, "<tr>") {
+		if !strings.Contains(row, "this browser") {
+			continue
+		}
+		for _, id := range sessionIDs(row) {
+			return id
+		}
+	}
+	t.Fatal("no row is marked as this browser's own session")
+	return ""
+}
+
+// TestUIRevokingYourOwnSessionSaysSo. Ending the session you are using is
+// allowed — the operator may be on the twin of the browser they are trying to
+// close — but landing on a login page with no explanation reads as a bug, and
+// the generic "this action was not performed" message would be a lie: it was.
+func TestUIRevokingYourOwnSessionSaysSo(t *testing.T) {
+	h := setup(t)
+	u := h.serveWeb(t)
+	u.signInBrowser(t, true)
+
+	page := body(t, u.get(t, "/ui/tokens"))
+	own := ownSessionID(t, u)
+
+	form := url.Values{"csrf_token": {csrfFrom(t, page)}}
+	resp := u.post(t, "/ui/sessions/"+own+"/revoke", form)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("revoke own = %d\n%s", resp.StatusCode, body(t, resp))
+	}
+	loc := resp.Header.Get("Location")
+	if !strings.HasPrefix(loc, "/ui/login") {
+		t.Fatalf("Location = %q, want the login page", loc)
+	}
+	if !strings.Contains(loc, "note=") {
+		t.Error("sent to the login page with no explanation of why")
+	}
+
+	// And the session really is gone, not just redirected away from.
+	if got := u.get(t, "/ui/tokens"); got.StatusCode != http.StatusSeeOther {
+		t.Errorf("the session survived its own revocation: %d", got.StatusCode)
+	}
+}
+
+// TestUIReadOnlySessionCannotEndSessions. tokens:read shows the list;
+// tokens:write is what ends a session. A read-only session is the default at
+// sign-in, so this is the common case, not the edge one.
+func TestUIReadOnlySessionCannotEndSessions(t *testing.T) {
+	h := setup(t)
+	full := h.serveWeb(t)
+	full.signInBrowser(t, true)
+	target := ownSessionID(t, full)
+
+	ro := full.newBrowser(t)
+	ro.signInBrowser(t, false)
+
+	page := body(t, ro.get(t, "/ui/tokens"))
+	if strings.Contains(page, "/revoke") {
+		t.Error("a read-only session is offered sign-out controls it cannot use")
+	}
+
+	// And the control being absent is not the enforcement. Post anyway, with a
+	// valid CSRF token — the layout's sign-out form carries one on every page,
+	// so a read-only session has no trouble producing one. Hiding a button is
+	// presentation; the scope check is the control.
+	resp := ro.post(t, "/ui/sessions/"+target+"/revoke",
+		url.Values{"csrf_token": {csrfFrom(t, page)}})
+	if resp.StatusCode == http.StatusSeeOther {
+		t.Fatal("a read-only session ended another session")
+	}
+	if got := full.get(t, "/ui/tokens"); got.StatusCode != http.StatusOK {
+		t.Errorf("the targeted session was ended by a read-only caller: %d", got.StatusCode)
+	}
 }

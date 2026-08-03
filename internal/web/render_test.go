@@ -257,7 +257,23 @@ func fixtures(s *Server) map[string]*pageData {
 				CreatedAt: now.Add(-10 * 24 * time.Hour), LastUsedAt: &used, RevokedAt: &revoked,
 				Badge: badgeBad("USED AFTER REVOCATION"), UsedAfterRevocation: true,
 			},
-		}}),
+		}, Sessions: []sessionView{
+			{
+				ID: uuid.NewString(), TokenID: uuid.NewString(), TokenName: "ops",
+				Current: true, CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(10 * time.Hour),
+				LastSeenAt: now.Add(-30 * time.Second), From: "198.51.100.9",
+				Agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
+				Badge: badgeOK("this browser"),
+			},
+			{
+				// No address and no user agent, which is the row a template
+				// written against the happy case renders as an empty cell.
+				ID: uuid.NewString(), TokenID: uuid.NewString(), TokenName: "ops",
+				CreatedAt: now.Add(-9 * time.Hour), ExpiresAt: now.Add(3 * time.Hour),
+				LastSeenAt: now.Add(-20 * time.Minute),
+				Badge:      badgeWarn("full access"),
+			},
+		}, CanRevoke: true}),
 	}
 }
 

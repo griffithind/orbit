@@ -3,9 +3,12 @@ package web
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/griffithind/orbit/internal/store"
 )
@@ -156,6 +159,14 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) error {
 
 type tokensView struct {
 	Tokens []tokenView
+	// Sessions are the browsers signed in right now. On this page rather than
+	// one of its own because a session is a token wearing a cookie, and the two
+	// questions an operator has — what credentials exist, and what is holding
+	// one at this moment — are the same investigation.
+	Sessions []sessionView
+	// CanRevoke gates the sign-out controls. A read-only session sees the list
+	// and no buttons, which is the correct reading of tokens:read.
+	CanRevoke bool
 }
 
 type tokenView struct {
@@ -172,6 +183,26 @@ type tokenView struct {
 	UsedAfterRevocation bool
 }
 
+type sessionView struct {
+	ID        string
+	TokenID   string
+	TokenName string
+	ReadOnly  bool
+	// Current is this browser. It carries the sign-out control's warning and
+	// suppresses the "someone else is signed in" reading of the row.
+	Current    bool
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
+	// From is the sign-in address, empty when it was not recorded.
+	From string
+	// Agent is the browser's self-description: attacker-controlled text,
+	// escaped by html/template, shown because it is often the only thing that
+	// distinguishes two sessions on one token. Never treat it as identification.
+	Agent string
+	Badge badge
+}
+
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) error {
 	var tokens []store.APIToken
 	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
@@ -179,6 +210,11 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) error {
 		tokens, err = tx.ListAPITokens(ctx)
 		return err
 	})
+	if err != nil {
+		return err
+	}
+
+	sessions, err := s.sessions.List(r.Context(), cookieFrom(r.Context()))
 	if err != nil {
 		return err
 	}
@@ -215,10 +251,94 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) error {
 		v.Tokens = append(v.Tokens, tv)
 	}
 
+	for _, sess := range sessions {
+		sv := sessionView{
+			ID: sess.ID.String(), TokenID: sess.TokenID.String(),
+			TokenName: sess.TokenName, ReadOnly: sess.ReadOnly, Current: sess.Current,
+			CreatedAt: sess.CreatedAt, ExpiresAt: sess.ExpiresAt,
+			LastSeenAt: sess.LastSeenAt, Agent: sess.UserAgent,
+		}
+		if sess.CreatedIP != nil {
+			sv.From = sess.CreatedIP.String()
+		}
+		switch {
+		case sess.Current:
+			sv.Badge = badgeOK("this browser")
+		case sess.ReadOnly:
+			sv.Badge = badgeMuted("read-only")
+		default:
+			// Not a fault, and deliberately not styled as one. It is the row
+			// worth looking at twice: a browser somewhere else holding this
+			// token's full scopes.
+			sv.Badge = badgeWarn("full access")
+		}
+		v.Sessions = append(v.Sessions, sv)
+	}
+	v.CanRevoke = identityFrom(r.Context()).HasScope("tokens:write")
+
 	p := s.newPage(r, "API tokens")
 	if err := s.withNav(r.Context(), p, r.URL.Query().Get("network")); err != nil {
 		return err
 	}
 	p.Data = v
 	return s.render(w, r, "tokens.html", http.StatusOK, p)
+}
+
+// handleRevokeSession ends one browser session.
+//
+// Ending the caller's own is allowed rather than refused — signing a lost
+// browser out is the point, and the caller may well be on the lost browser's
+// twin — but it has to be noticed, or the operator lands on a login page with
+// no idea why. Hence the cookie clear and the redirect to the login form
+// carrying an explanation, instead of a bounce back to a page they can no
+// longer read.
+func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) error {
+	sessionID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		return store.ErrNotFound
+	}
+	id := identityFrom(r.Context())
+
+	// Whether this is the caller's own is decided from the same listing the
+	// button was rendered from, not from the form. A hidden field saying "this
+	// is me" would be caller-controlled, and the consequence of believing a
+	// false one is signing an operator out of a session they are still using.
+	own := false
+	sessions, err := s.sessions.List(r.Context(), cookieFrom(r.Context()))
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, sess := range sessions {
+		if sess.ID == sessionID {
+			found, own = true, sess.Current
+			break
+		}
+	}
+	if !found {
+		// Already gone, or never existed. Both are ErrNotFound for the reason
+		// every other credential lookup here is: this page is as much an oracle
+		// as an API.
+		return store.ErrNotFound
+	}
+
+	if err := s.sessions.RevokeByID(r.Context(), sessionID, *id); err != nil {
+		return err
+	}
+	s.log.Info("browser session revoked from the operator UI",
+		"session", sessionID, "actor", id.Display, "own", own)
+
+	if own {
+		// Not needLogin: that path exists for a POST that was REFUSED and says
+		// so ("This action was not performed"), which would be exactly backwards
+		// here. The action succeeded; what changed is that the caller no longer
+		// has a session to return to.
+		clearSessionCookie(w)
+		q := url.Values{"note": {"Signed out. That was the session you were using."}}
+		http.Redirect(w, r, "/ui/login?"+q.Encode(), http.StatusSeeOther)
+		return nil
+	}
+	return s.redirectWithNotice(w, r, "/ui/tokens",
+		"Session signed out. The token it used is untouched — revoke the token "+
+			"itself if the credential is what leaked.")
 }

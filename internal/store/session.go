@@ -82,6 +82,29 @@ const (
 	ActionSessionDestroyed = "session.destroyed"
 )
 
+// sessionLive is the SQL that decides whether a session row is usable.
+//
+// One string, embedded by both ResolveSession and ListUISessions, because the
+// two must agree exactly. A listing that applies a looser rule shows an
+// operator browsers that cannot make a request; a stricter one hides a browser
+// that can. Either way the page answering "who is signed in right now" is
+// wrong, and it would be wrong quietly — the drift only becomes visible when
+// someone acts on it.
+//
+// Written with the idle interval inlined rather than passed as a parameter so
+// that the two queries can keep their own placeholder numbering and still share
+// the text. The value comes from a compile-time constant; nothing
+// caller-supplied reaches it.
+//
+// It expects the session aliased s and its token aliased tok, already joined.
+var sessionLive = fmt.Sprintf(`
+		   s.revoked_at IS NULL
+		   AND s.expires_at > now()
+		   AND s.last_seen_at > now() - interval '%d seconds'
+		   AND tok.revoked_at IS NULL
+		   AND (tok.expires_at IS NULL OR tok.expires_at > now())`,
+	int(SessionIdleTimeout.Seconds()))
+
 // newSessionCookie generates a cookie value and its stored hash.
 //
 // 32 random bytes, SHA-256 stored, no pepper — store.NewAPIToken's reasoning
@@ -233,13 +256,9 @@ func (s *Store) ResolveSession(ctx context.Context, cookieValue string) (*Identi
 		  FROM orbit.api_token tok
 		 WHERE s.cookie_hash = $1
 		   AND tok.id = s.token_id
-		   AND s.revoked_at IS NULL
-		   AND s.expires_at > now()
-		   AND s.last_seen_at > now() - make_interval(secs => $2)
-		   AND tok.revoked_at IS NULL
-		   AND (tok.expires_at IS NULL OR tok.expires_at > now())
+		   AND`+sessionLive+`
 		RETURNING tok.id, tok.name, tok.scopes, s.expires_at, s.read_only`,
-		hashSessionCookie(cookieValue), SessionIdleTimeout.Seconds(),
+		hashSessionCookie(cookieValue),
 	).Scan(&id.TokenID, &id.Display, &id.Scopes, &id.ExpiresAt, &readOnly)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -301,6 +320,146 @@ func (t *Tx) RevokeUISession(ctx context.Context, cookieValue string) error {
 		Action:     ActionSessionDestroyed,
 		TargetType: "session", TargetID: sessionID.String(),
 	})
+}
+
+// UISession is one live browser session, as an operator sees it.
+//
+// No cookie, no hash, and no field derived from either: this struct is rendered
+// into a page, and the one thing that must never leave this package is anything
+// a reader could turn back into a credential.
+type UISession struct {
+	ID uuid.UUID
+
+	// TokenID and TokenName are the credential the session references. A
+	// session has no scopes of its own — see ResolveSession — so the token is
+	// the only honest answer to "what can this browser do".
+	TokenID   uuid.UUID
+	TokenName string
+
+	// ReadOnly narrows the token's scopes for this session only.
+	ReadOnly bool
+
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
+
+	// CreatedIP and UserAgent are what the browser looked like at sign-in.
+	// UserAgent is attacker-controlled text, truncated at insert and escaped at
+	// render; treat it as a hint, never as identification.
+	CreatedIP *netip.Addr
+	UserAgent string
+
+	// Current marks the caller's own session. Without it, the most likely
+	// outcome of putting a sign-out control on every row is an operator ending
+	// their own session in the middle of an incident and having to sign back in
+	// to finish what they were doing.
+	Current bool
+}
+
+// ListUISessions returns the browser sessions that are usable right now.
+//
+// currentCookie is the caller's own cookie value, or "" if there is none. It is
+// hashed and compared here rather than exposing the hashing to a caller, which
+// would put the scheme in a second place and make it something that can drift.
+//
+// LIVE sessions only, and by exactly the rule ResolveSession applies — the two
+// share sessionLive. Dead rows are excluded rather than shown greyed out, and
+// the distinction matters more than it looks: this list is the answer to "which
+// browsers can reach the control plane at this moment", and a row that cannot
+// is not a weaker yes, it is a no. The historical question — was there a
+// session from an address nobody recognises — is answered by the audit log,
+// which is durable, rather than by this table, which is pruned within twelve
+// hours of a session dying.
+//
+// Ordered by last activity, because the row an operator is looking for during
+// an incident is the one that just did something.
+func (t *Tx) ListUISessions(ctx context.Context, currentCookie string) ([]UISession, error) {
+	var currentHash []byte
+	if currentCookie != "" {
+		currentHash = hashSessionCookie(currentCookie)
+	}
+
+	rows, err := t.tx.Query(ctx, `
+		SELECT s.id, tok.id, tok.name, s.read_only,
+		       s.created_at, s.expires_at, s.last_seen_at,
+		       s.created_ip, coalesce(s.user_agent, ''),
+		       ($1::bytea IS NOT NULL AND s.cookie_hash = $1)
+		  FROM orbit.ui_session s
+		  JOIN orbit.api_token tok ON tok.id = s.token_id
+		 WHERE`+sessionLive+`
+		 ORDER BY s.last_seen_at DESC`, currentHash)
+	if err != nil {
+		return nil, mapErr(err, "list ui sessions")
+	}
+	defer rows.Close()
+
+	var out []UISession
+	for rows.Next() {
+		var sess UISession
+		if err := rows.Scan(&sess.ID, &sess.TokenID, &sess.TokenName, &sess.ReadOnly,
+			&sess.CreatedAt, &sess.ExpiresAt, &sess.LastSeenAt,
+			&sess.CreatedIP, &sess.UserAgent, &sess.Current); err != nil {
+			return nil, mapErr(err, "scan ui session")
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// RevokeUISessionByID ends a session an operator picked out of a list.
+//
+// The sibling of RevokeUISession, which takes a cookie value and is sign-out.
+// This one exists because the operator who most needs to end a session is
+// precisely the one who does not have its cookie: the laptop left in a cafe,
+// the browser on a machine that has since been reimaged. There is no path from
+// a listed session back to its cookie, by construction, so ending it has to be
+// possible by id or not at all.
+//
+// Attributed to the caller, not to the session's own token. An admin ending
+// somebody else's session and that person signing themselves out are different
+// events, and an audit log that records them identically cannot answer the only
+// question anyone asks of it afterwards.
+//
+// Does NOT touch the token, for the reason RevokeUISession does not: the
+// credential may also be in use by a shell, by CI, or by the operator's own
+// terminal, and ending a browser session must not take those with it. Killing
+// every session derived from a token is a different act with a different
+// control — RevokeAPIToken.
+//
+// Returns ErrNotFound for an unknown id or one already revoked.
+func (t *Tx) RevokeUISessionByID(ctx context.Context, id uuid.UUID, by Identity) error {
+	var (
+		tokenID   uuid.UUID
+		tokenName string
+	)
+	err := t.tx.QueryRow(ctx, `
+		UPDATE orbit.ui_session s
+		   SET revoked_at = now()
+		  FROM orbit.api_token tok
+		 WHERE s.id = $1
+		   AND s.revoked_at IS NULL
+		   AND tok.id = s.token_id
+		RETURNING tok.id, tok.name`, id).Scan(&tokenID, &tokenName)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("revoke ui session: %w", ErrNotFound)
+		}
+		return mapErr(err, "revoke ui session")
+	}
+
+	// Whose session it was, recorded in the entry rather than left to be
+	// recovered by joining a table that gets pruned twelve hours later.
+	meta, err := json.Marshal(map[string]any{
+		"token_id":   tokenID.String(),
+		"token_name": tokenName,
+		"by":         "operator",
+	})
+	if err != nil {
+		return fmt.Errorf("encode session revocation metadata: %w", err)
+	}
+	e := by.Audit(ActionSessionDestroyed, "session", id.String())
+	e.Meta = meta
+	return t.AppendAudit(ctx, e)
 }
 
 // AuditSessionDenied records a refused sign-in.
