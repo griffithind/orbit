@@ -3,10 +3,6 @@
 An open-source control plane for [Nebula](https://github.com/slackhq/nebula): host
 lifecycle, enrollment, config distribution, and PKI.
 
-> **Naming.** `orbit` and the module path `github.com/griffithind/orbit` are
-> placeholders. Rename before the first public commit; the module path appears
-> in every import.
-
 ---
 
 ## 1. Constraints imposed by Nebula

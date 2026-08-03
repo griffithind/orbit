@@ -18,9 +18,6 @@ which certificate. Orbit is the missing half, self-hosted.
 > methods in [docs/enrollment.md](docs/enrollment.md) §4–5, which are designed
 > and not built. There is no admin CLI — every example here is `curl`.
 
-> **Name is a placeholder.** Rename the module before the first public commit;
-> `github.com/griffithind/orbit` appears in every import path.
-
 ---
 
 ## Design documents
