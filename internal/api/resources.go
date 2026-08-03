@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -633,11 +635,37 @@ func formatTime(t *time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
+// handleListAudit serves the trail, narrowed by every filter the store
+// implements.
+//
+// A parameter the API accepts and drops is worse than one it does not offer at
+// all: the caller reads a full, unfiltered page as the answer to the question
+// they asked. "Nothing happened in that hour" is the wrong thing to conclude
+// during an incident, so an unparseable bound is a 400 that names it rather
+// than a silently wider window.
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	f := store.AuditFilter{
-		Action:     r.URL.Query().Get("action"),
-		TargetType: r.URL.Query().Get("target_type"),
-		TargetID:   r.URL.Query().Get("target_id"),
+		Action:     q.Get("action"),
+		TargetType: q.Get("target_type"),
+		TargetID:   q.Get("target_id"),
+	}
+
+	var ok bool
+	if f.Since, ok = auditTimeParam(w, q, "since"); !ok {
+		return
+	}
+	if f.Until, ok = auditTimeParam(w, q, "until"); !ok {
+		return
+	}
+	// An inverted window matches nothing, which reads exactly like a quiet
+	// period. Say which way round it is instead.
+	if !f.Since.IsZero() && !f.Until.IsZero() && f.Until.Before(f.Since) {
+		writeErr(w, http.StatusBadRequest, "until is before since, so no entry can match")
+		return
+	}
+	if f.Limit, ok = auditLimitParam(w, q); !ok {
+		return
 	}
 
 	var out []wire.AuditRecordResponse
@@ -666,6 +694,49 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// auditLimitMax is the ceiling store.ListAudit enforces. Past it the store does
+// not clamp to the ceiling, it drops back to the default page — so asking for
+// more than this returns fewer rows than asking for nothing, with nothing in
+// the response to say why. The API refuses rather than answer a question it was
+// not asked.
+const auditLimitMax = 1000
+
+// auditTimeParam parses an optional RFC3339 bound, writing a 400 and returning
+// false if it is present and unparseable.
+func auditTimeParam(w http.ResponseWriter, q url.Values, name string) (time.Time, bool) {
+	v := q.Get(name)
+	if v == "" {
+		return time.Time{}, true
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+			"%s must be an RFC3339 timestamp, e.g. \"2026-01-02T15:04:05Z\"", name))
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// auditLimitParam parses an optional row cap. Zero means "the store's default".
+func auditLimitParam(w http.ResponseWriter, q url.Values) (int, bool) {
+	v := q.Get("limit")
+	if v == "" {
+		return 0, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		writeErr(w, http.StatusBadRequest, "limit must be a positive integer")
+		return 0, false
+	}
+	if n > auditLimitMax {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+			"limit must be %d or fewer; a larger value returns the default page, not more",
+			auditLimitMax))
+		return 0, false
+	}
+	return n, true
 }
 
 //------------------------------------------------------------------------------

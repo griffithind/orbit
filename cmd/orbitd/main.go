@@ -325,7 +325,27 @@ func serve(args []string) error {
 		}
 		go node.Maintain(ctx, changes, *maintEvery)
 
-		overlaySrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		// Fewer timeouts than the public listener, because /agent/v1/watch parks
+		// for up to api.MaxWatchHold:
+		//
+		//   - No WriteTimeout. Its deadline is armed before the handler runs, so
+		//     a hold longer than the timeout means the response write fails and
+		//     the agent sees a dropped connection — indistinguishable from a
+		//     control plane failure, on the path the whole fleet depends on.
+		//   - No ReadTimeout either. net/http does clear the read deadline once
+		//     a request body is consumed, so it would survive a parked GET
+		//     today, but that is an implementation detail to bet the watch loop
+		//     on and it buys little here: this listener is reachable only from
+		//     inside the mesh, by certificate-verified peers, and slow headers
+		//     are already covered below.
+		//   - IdleTimeout is safe at any value: it applies between requests, not
+		//     to one in flight, so two minutes does not cap a five minute hold.
+		//     It is what reaps agents that vanished without closing.
+		overlaySrv := &http.Server{
+			Handler:           api.Observe(log, mux),
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+		}
 		go func() {
 			if err := overlaySrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("overlay agent listener stopped", "error", err)
@@ -372,10 +392,19 @@ func serve(args []string) error {
 	server.EnrollRoutes(publicMux)
 	server.AdminRoutes(publicMux)
 
+	// Full timeouts, which this listener can afford because nothing it serves is
+	// long-lived: enrollment and admin are request/response, and the request
+	// bodies are capped at 1 MiB. The write budget is generous on purpose —
+	// enrollment does a password hash and a signing operation — but bounded, so
+	// a stalled client cannot hold a connection open indefinitely on the one
+	// surface that is exposed to the internet.
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           publicMux,
+		Handler:           api.Observe(log, publicMux),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	go func() {

@@ -453,21 +453,31 @@ func (t *Tx) RetireCA(ctx context.Context, caID uuid.UUID) error {
 	return err
 }
 
-// ExpiredRetiringCAs returns CAs past their own NotAfter that are not yet
-// retired.
+// ExpiredInactiveCAs returns pending and retiring CAs past their own NotAfter.
 //
 // These are provably safe to retire without counting certificates: nebula
 // enforces leaf.NotAfter <= ca.NotAfter (cert/ca_pool.go checkCAConstraints),
 // so once a CA has expired nothing it ever signed can still be valid. Keeping
 // it in the trust bundle costs bytes in every host's configuration and can
 // never accept anything.
-func (t *Tx) ExpiredRetiringCAs(ctx context.Context, networkID uuid.UUID, now time.Time) ([]CA, error) {
+//
+// The active CA is excluded even when it has expired, which is why this is not
+// the shorter `state <> 'retired'`. Retiring the signer is a rotation step, not
+// cleanup, and doing it automatically is unsafe in both directions. If the CA
+// really has expired, retiring it buys nothing — issuance already fails at
+// ca.ValidityFor — but it erases which CA was signing, and ActivateCA promotes
+// only from 'pending' or 'retiring', so no API call undoes it. If it only looks
+// expired, because this process's clock is wrong, the sweep drops a live signer
+// out of every host's trust bundle and partitions the fleet. RetireCA refuses
+// the same transition for the same reason. sched.Sweep reports the state
+// instead and leaves the decision to an operator.
+func (t *Tx) ExpiredInactiveCAs(ctx context.Context, networkID uuid.UUID, now time.Time) ([]CA, error) {
 	rows, err := t.tx.Query(ctx,
 		`SELECT `+caCols+` FROM orbit.ca
-		  WHERE network_id = $1 AND state <> 'retired' AND not_after < $2`,
+		  WHERE network_id = $1 AND state IN ('pending', 'retiring') AND not_after < $2`,
 		networkID, now)
 	if err != nil {
-		return nil, mapErr(err, "expired retiring cas")
+		return nil, mapErr(err, "expired inactive cas")
 	}
 	defer rows.Close()
 

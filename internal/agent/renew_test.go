@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -105,6 +106,188 @@ func TestAssessUrgency(t *testing.T) {
 				t.Errorf("Assess = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// The control plane's RenewAfter.
+//
+// It was populated by the server and read by nobody, so a fleet-wide
+// certificate change — a CA rotation, a compromised signer — waited for every
+// host's own midpoint, a median of some seven hours on a day-long certificate.
+// The tests below fix the terms on which the agent may honour it: earlier only,
+// inside the window only, spread deterministically, and identical to the old
+// behaviour when the server has no opinion.
+
+// TestRenewAtWithoutAHintIsUnchanged is the compatibility floor: a zero
+// RenewAfter, which is what a server that does not set the field sends, must
+// schedule exactly as before.
+func TestRenewAtWithoutAHintIsUnchanged(t *testing.T) {
+	p := agent.DefaultRenewalPolicy()
+	nb := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	na := nb.Add(24 * time.Hour)
+
+	for _, seed := range []string{"host-a", "host-b", "host-c"} {
+		want := p.RenewAt(nb, na, seed)
+		if got := p.RenewAtWithHint(nb, na, seed, time.Time{}); !got.Equal(want) {
+			t.Errorf("seed %s: with a zero hint = %s, want the local schedule %s", seed, got, want)
+		}
+	}
+}
+
+// TestRenewAtHonoursAPullForward is the point of the feature.
+func TestRenewAtHonoursAPullForward(t *testing.T) {
+	p := agent.DefaultRenewalPolicy()
+	nb := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	na := nb.Add(24 * time.Hour)
+	hint := nb.Add(time.Hour) // the control plane wants renewal now, not at 12h
+
+	got := p.RenewAtWithHint(nb, na, "host-a", hint)
+	if got.Before(hint) {
+		t.Errorf("renewal at %s, before the instant the control plane named (%s)", got, hint)
+	}
+	if !got.Before(hint.Add(p.PullForwardSpread)) {
+		t.Errorf("renewal at %s is more than the %s spread past the hint", got, p.PullForwardSpread)
+	}
+	if local := p.RenewAt(nb, na, "host-a"); !got.Before(local) {
+		t.Errorf("renewal at %s did not move earlier than the local schedule %s", got, local)
+	}
+}
+
+// TestRenewAtHintNeverDelaysRenewal is the safety property that makes the field
+// safe to trust at all: a stale, wrong, or hostile control plane must not be
+// able to push a host toward expiry by claiming renewal is not due yet.
+func TestRenewAtHintNeverDelaysRenewal(t *testing.T) {
+	p := agent.DefaultRenewalPolicy()
+	nb := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	na := nb.Add(24 * time.Hour)
+	local := p.RenewAt(nb, na, "host-a")
+
+	for _, hint := range []time.Time{
+		nb.Add(23 * time.Hour), // late in the window
+		na.Add(-time.Second),   // the last possible instant
+		na.Add(time.Hour),      // past expiry: describes a dead certificate
+		na.Add(400 * 24 * time.Hour),
+	} {
+		got := p.RenewAtWithHint(nb, na, "host-a", hint)
+		if !got.Equal(local) {
+			t.Errorf("hint %s moved renewal to %s; a hint may only pull renewal earlier "+
+				"(local schedule is %s)", hint, got, local)
+		}
+	}
+}
+
+// TestRenewAtHintStaysInsideTheWindow covers the degenerate hints. Renewing
+// before NotBefore is meaningless; renewing at or after NotAfter means the host
+// dies without ever having tried.
+func TestRenewAtHintStaysInsideTheWindow(t *testing.T) {
+	p := agent.DefaultRenewalPolicy()
+	nb := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	na := nb.Add(24 * time.Hour)
+
+	for _, hint := range []time.Time{
+		nb.Add(-time.Hour),
+		nb.Add(-365 * 24 * time.Hour),
+		time.Unix(0, 0).UTC(),
+	} {
+		for i := 0; i < 50; i++ {
+			seed := string(rune('a'+i%26)) + string(rune('a'+i/26))
+			got := p.RenewAtWithHint(nb, na, seed, hint)
+			if got.Before(nb) {
+				t.Errorf("hint %s scheduled renewal at %s, before NotBefore %s", hint, got, nb)
+			}
+			if !got.Before(na) {
+				t.Errorf("hint %s scheduled renewal at %s, at or after NotAfter %s", hint, got, na)
+			}
+		}
+	}
+}
+
+// TestRenewAtHintSpreadsTheFleet is the rate limit. "Renew now" sent to a
+// thousand hosts must not become a thousand simultaneous signing requests, and
+// the offset must be deterministic so a restarting host does not redraw it.
+func TestRenewAtHintSpreadsTheFleet(t *testing.T) {
+	p := agent.DefaultRenewalPolicy()
+	nb := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	na := nb.Add(24 * time.Hour)
+	hint := nb.Add(time.Hour)
+
+	const hosts = 1000
+	perSecond := map[int64]int{}
+	for i := 0; i < hosts; i++ {
+		seed := fmt.Sprintf("host-%04d", i)
+		at := p.RenewAtWithHint(nb, na, seed, hint)
+
+		if at.Before(hint) || !at.Before(hint.Add(p.PullForwardSpread)) {
+			t.Fatalf("host %s renews at %s, outside [%s, +%s)", seed, at, hint, p.PullForwardSpread)
+		}
+		if again := p.RenewAtWithHint(nb, na, seed, hint); !again.Equal(at) {
+			t.Fatalf("host %s renews at %s then %s; the spread is not deterministic", seed, at, again)
+		}
+		perSecond[at.Unix()]++
+	}
+
+	// A thousand hosts over a minute is about seventeen a second. Ten times that
+	// in any one second would mean the spread is not spreading.
+	for sec, n := range perSecond {
+		if n > 170 {
+			t.Errorf("%d of %d hosts renew in the same second (%d); the spread is not bounding the rate",
+				n, hosts, sec)
+		}
+	}
+	if len(perSecond) < 30 {
+		t.Errorf("a thousand hosts landed in only %d distinct seconds across a %s spread",
+			len(perSecond), p.PullForwardSpread)
+	}
+}
+
+// TestRenewAtIgnoresAHintThatRestatesTheSchedule is the anti-stampede case, and
+// the reason the hint is compared against the un-jittered baseline rather than
+// against this host's own schedule.
+//
+// In steady state the server's RenewAfter IS the local baseline: both are the
+// certificate's midpoint. Treating that as a pull-forward would collapse an
+// hours-wide fleet spread onto one instant plus the pull-forward window — a
+// stampede introduced by the mechanism meant to avoid one.
+func TestRenewAtIgnoresAHintThatRestatesTheSchedule(t *testing.T) {
+	p := agent.DefaultRenewalPolicy()
+	nb := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	na := nb.Add(24 * time.Hour)
+	midpoint := nb.Add(12 * time.Hour) // what the server sends every day
+
+	seen := map[time.Time]int{}
+	for i := 0; i < 200; i++ {
+		seed := string(rune('a'+i%26)) + string(rune('a'+i/26))
+		got := p.RenewAtWithHint(nb, na, seed, midpoint)
+		if want := p.RenewAt(nb, na, seed); !got.Equal(want) {
+			t.Fatalf("seed %s: steady-state hint changed the schedule to %s, want %s", seed, got, want)
+		}
+		seen[got]++
+	}
+	if len(seen) < 100 {
+		t.Errorf("only %d distinct renewal times across 200 hosts; the hint collapsed the fleet spread",
+			len(seen))
+	}
+}
+
+// TestAssessHonoursAPullForward checks the decision the loop actually makes:
+// not due on the certificate alone, due once the control plane has asked.
+func TestAssessHonoursAPullForward(t *testing.T) {
+	p := agent.DefaultRenewalPolicy()
+	nb := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	na := nb.Add(24 * time.Hour)
+	hint := nb.Add(time.Hour)
+	now := hint.Add(p.PullForwardSpread) // past every host's spread offset
+
+	if got := p.Assess(now, nb, na, "host-a"); got != agent.NotDue {
+		t.Fatalf("without a hint, Assess = %v at one hour in, want NotDue", got)
+	}
+	if got := p.AssessWithHint(now, nb, na, "host-a", hint); got != agent.Due {
+		t.Errorf("with a pull-forward hint, Assess = %v, want Due", got)
+	}
+	// Urgency still describes the certificate, not the server's opinion: a hint
+	// must not make a fresh certificate look like one about to expire.
+	if got := p.AssessWithHint(na.Add(-time.Minute), nb, na, "host-a", hint); got != agent.Urgent {
+		t.Errorf("late in the window with a hint, Assess = %v, want Urgent", got)
 	}
 }
 

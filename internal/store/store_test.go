@@ -403,6 +403,158 @@ func TestAuditLogIsAppendOnly(t *testing.T) {
 	}
 }
 
+// TestHostRoleIsScopedToNetwork proves the database refuses to assign a host a
+// role belonging to a different network.
+//
+// Nothing in Go checks this: internal/api/admin.go parses role_id and
+// internal/store/host.go stores it, neither comparing role.network_id against
+// host.network_id. That is the right division of labour — an application-layer
+// check can be raced by a concurrent request, and a control plane that mints
+// identities cannot rest an isolation property on one — but it means the
+// constraint added in 0006_role_network_fk.sql is the only thing standing
+// between an operator typo and network B's firewall rules being rendered
+// verbatim into a network A host's config by enroll.renderFor.
+//
+// A foreign-key violation surfaces as ErrNotFound (mapErr, 23503), which is the
+// honest answer: no such role exists in this host's network.
+func TestHostRoleIsScopedToNetwork(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	netA := newNetwork(t, s, "10.42.0.0/16")
+	netB := newNetwork(t, s, "10.43.0.0/16")
+
+	var roleA, roleB store.Role
+	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		roleA = store.Role{NetworkID: netA.ID, Name: "web"}
+		if err := tx.CreateRole(ctx, &roleA); err != nil {
+			return err
+		}
+		roleB = store.Role{NetworkID: netB.ID, Name: "web"}
+		return tx.CreateRole(ctx, &roleB)
+	})
+	if err != nil {
+		t.Fatalf("CreateRole: %v", err)
+	}
+
+	// Baseline: a host with no role, and a host with a role from its own
+	// network, both insert. The constraint is composite and MATCH SIMPLE, so a
+	// NULL role_id skips it entirely — "a host may have no role" must survive.
+	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		h := store.Host{NetworkID: netA.ID, Name: "no-role"}
+		return tx.CreateHost(ctx, &h)
+	})
+	if err != nil {
+		t.Fatalf("CreateHost without a role: %v", err)
+	}
+
+	var hostA store.Host
+	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		hostA = store.Host{NetworkID: netA.ID, Name: "same-network", RoleID: &roleA.ID}
+		return tx.CreateHost(ctx, &hostA)
+	})
+	if err != nil {
+		t.Fatalf("CreateHost with a role from its own network: %v", err)
+	}
+
+	// Creation with another network's role.
+	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		h := store.Host{NetworkID: netA.ID, Name: "cross-network", RoleID: &roleB.ID}
+		return tx.CreateHost(ctx, &h)
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("CreateHost with network B's role = %v, want ErrNotFound", err)
+	}
+
+	// And the update path, which is what PATCH /v1/hosts/:id reaches through
+	// UpdateHostMeta. Closing only the insert would leave the hole open to any
+	// host that was created correctly and re-roled afterwards.
+	crossRole := roleB.ID.String()
+	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.UpdateHostMeta(ctx, hostA.ID, &crossRole, nil)
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("UpdateHostMeta to network B's role = %v, want ErrNotFound", err)
+	}
+
+	// The rejected update must not have taken effect.
+	err = s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		got, err := tx.GetHost(ctx, hostA.ID)
+		if err != nil {
+			return err
+		}
+		if got.RoleID == nil || *got.RoleID != roleA.ID {
+			t.Errorf("host role after the rejected update = %v, want %v", got.RoleID, roleA.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFutureTablesAreGrantedToAppRole covers 0005_default_privileges.sql.
+//
+// 0002's GRANT ... ON ALL TABLES was evaluated once and covered only the tables
+// that existed at that moment, so a table created by a later migration reached
+// production with no grant to orbit_app — a failure that shows up as a runtime
+// permission error rather than a migration failure. This asserts the standing
+// rule that replaced it, by creating a table the way a migration would and
+// checking the app role can use it without any explicit grant.
+func TestFutureTablesAreGrantedToAppRole(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+
+	admin, err := pgx.Connect(ctx, adminDSN())
+	if err != nil {
+		t.Skipf("connect as admin: %v", err)
+	}
+	defer admin.Close(ctx)
+
+	// Unique per run: packages run in parallel and this table is deployment-wide.
+	table := "orbit.grant_probe_" + uuid.NewString()[:8]
+	if _, err := admin.Exec(ctx,
+		"CREATE TABLE "+table+" (id bigserial PRIMARY KEY, v text)"); err != nil {
+		t.Fatalf("create probe table: %v", err)
+	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn, err := pgx.Connect(cctx, adminDSN())
+		if err != nil {
+			return
+		}
+		defer conn.Close(cctx)
+		_, _ = conn.Exec(cctx, "DROP TABLE IF EXISTS "+table)
+	})
+
+	// Deliberately no GRANT. Everything below comes from the default privileges.
+	for _, stmt := range []string{
+		"INSERT INTO " + table + " (v) VALUES ('x')",
+		"SELECT * FROM " + table,
+		"UPDATE " + table + " SET v = 'y'",
+		"DELETE FROM " + table,
+	} {
+		if _, err := s.Pool().Exec(ctx, stmt); err != nil {
+			t.Errorf("app role could not run %q on a newly created table: %v", stmt, err)
+		}
+	}
+
+	// The default rule grants UPDATE and DELETE, which is right for an ordinary
+	// table and wrong for an append-only one. Re-assert that adding it did not
+	// loosen the audit log, since that is the property it could plausibly break.
+	var upd, del bool
+	if err := s.Pool().QueryRow(ctx, `
+		SELECT has_table_privilege('orbit_app', 'orbit.audit_log', 'UPDATE'),
+		       has_table_privilege('orbit_app', 'orbit.audit_log', 'DELETE')`,
+	).Scan(&upd, &del); err != nil {
+		t.Fatalf("query audit_log privileges: %v", err)
+	}
+	if upd || del {
+		t.Errorf("orbit_app holds UPDATE=%v DELETE=%v on orbit.audit_log; want neither", upd, del)
+	}
+}
+
 //------------------------------------------------------------------------------
 // Revocation and convergence
 //------------------------------------------------------------------------------

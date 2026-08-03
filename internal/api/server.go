@@ -24,7 +24,6 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -112,7 +111,9 @@ func (s *Server) Handler() http.Handler {
 	s.EnrollRoutes(mux)
 	s.AgentRoutes(mux)
 	s.AdminRoutes(mux)
-	return logging(s.log, mux)
+	// The same wrapping production gets, so development and tests exercise the
+	// middleware rather than a path that only exists here.
+	return Observe(s.log, mux)
 }
 
 func (s *Server) EnrollRoutes(mux *http.ServeMux) {
@@ -185,6 +186,15 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 			// The operator's problem, not the agent's, and worth shouting about.
 			s.log.Error("enrollment failed: network has no active CA", "error", err)
 			writeErr(w, http.StatusServiceUnavailable, "network has no active certificate authority")
+		case errors.Is(err, ca.ErrOutsideCAValidity):
+			// An expired active CA. The maintenance sweep deliberately leaves it
+			// in place rather than retiring it (retirement is a rotation step and
+			// cannot be undone through the API), so this state persists until an
+			// operator acts — and without this branch it would surface as a
+			// generic 500 with the actual cause visible only in the server log.
+			s.log.Error("enrollment failed: the active CA cannot issue", "error", err)
+			writeErr(w, http.StatusServiceUnavailable,
+				"the network's certificate authority cannot issue: "+err.Error())
 		default:
 			s.log.Error("enrollment failed", "error", err)
 			writeErr(w, http.StatusInternalServerError, "enrollment failed")
@@ -272,12 +282,34 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 			BlocklistEpoch: req.BlocklistEpoch,
 			NebulaVersion:  req.NebulaVersion,
 			AgentVersion:   req.AgentVersion,
+
+			// The revert fields are what let a recorded epoch move backwards —
+			// the one exception to monotonicity, and the reason convergence can
+			// stop reporting a host as converged on a generation its guard has
+			// since thrown away. Dropping them here would leave the agent
+			// reporting a revert that the control plane silently ignores, which
+			// is exactly the failure this whole path exists to close.
+			RevertedFromConfigEpoch:    req.RevertedFromConfigEpoch,
+			RevertedFromBlocklistEpoch: req.RevertedFromBlocklistEpoch,
+			QuarantinedConfigEpoch:     req.QuarantinedConfigEpoch,
 		})
 	})
 	if err != nil {
 		s.log.Error("agent report failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+
+	// Counted and logged only for an actual revert. A pushed generation that
+	// severs the fleet is invisible in every other channel: the hosts that
+	// reverted look merely "behind", and the CA rotation gate would pass.
+	if req.RevertedFromConfigEpoch != 0 {
+		s.cfg.Metrics.ConfigReverted()
+		s.log.Warn("host reverted a pushed generation; it could not reach the control plane after applying",
+			"host", id.HostID,
+			"revertedFrom", req.RevertedFromConfigEpoch,
+			"nowAt", req.ConfigEpoch,
+			"quarantined", req.QuarantinedConfigEpoch)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -363,27 +395,6 @@ func hashToken(token string) []byte {
 // timing information about a secret.
 func constantTimeEqual(a, b []byte) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1
-}
-
-func logging(log *slog.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(rec, r)
-		log.Debug("request",
-			"method", r.Method, "path", r.URL.Path,
-			"status", rec.status, "durationMs", time.Since(start).Milliseconds())
-	})
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (r *statusRecorder) WriteHeader(code int) {
-	r.status = code
-	r.ResponseWriter.WriteHeader(code)
 }
 
 // handleRecoveryChallenge starts the proof-of-possession exchange.

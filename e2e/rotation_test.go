@@ -1,11 +1,14 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -324,6 +327,140 @@ func TestSweepRetiresExpiredCAs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestSweepLeavesAnExpiredActiveCAAlone is the other half of the same rule.
+//
+// An expired *active* CA is broken whatever the sweep does — ca.ValidityFor
+// refuses to sign against it — so the only choice is which failure an operator
+// is left holding. Force-retiring it trades "CA %q expired at %s", which names
+// the CA and the moment, for a bare "network has no active CA"; it erases the
+// record of what was signing; and it is not undoable through the API, because
+// ActivateCA promotes only pending and retiring CAs. So the sweep leaves it,
+// keeps it in the trust bundle, and says so at Error.
+//
+// The pending CA in the same network is the control: expired non-signers are
+// still cleaned up, which is the half that was always meant to be automatic.
+func TestSweepLeavesAnExpiredActiveCAAlone(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	const activePEM = "-----BEGIN NEBULA CERTIFICATE-----\nexpired-signer\n-----END NEBULA CERTIFICATE-----\n"
+
+	var netID, activeID, pendingID uuid.UUID
+	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		// A network of its own: ca_one_active_per_network means an expired
+		// active CA cannot be staged alongside the harness's live one.
+		net := store.Network{
+			Name:  "expired-signer-" + uuid.NewString()[:8],
+			CIDRs: []netip.Prefix{netip.MustParsePrefix("10.43.0.0/16")},
+		}
+		if err := tx.CreateNetwork(ctx, &net); err != nil {
+			return err
+		}
+		netID = net.ID
+
+		active := store.CA{
+			NetworkID: net.ID, Name: "expired-signer", Fingerprint: uuid.NewString(),
+			CertPEM: activePEM, SignerRef: "file://k", Curve: "CURVE25519",
+			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-2 * time.Hour),
+			State: store.CAActive,
+		}
+		if err := tx.CreateCA(ctx, &active); err != nil {
+			return err
+		}
+		activeID = active.ID
+
+		pending := store.CA{
+			NetworkID: net.ID, Name: "expired-pending", Fingerprint: uuid.NewString(),
+			CertPEM: "pending-pem", SignerRef: "file://k", Curve: "CURVE25519",
+			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-2 * time.Hour),
+			State: store.CAPending,
+		}
+		if err := tx.CreateCA(ctx, &pending); err != nil {
+			return err
+		}
+		pendingID = pending.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stage an expired active CA: %v", err)
+	}
+
+	var logs bytes.Buffer
+	runner := sched.New(h.store, sched.Config{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	stats, err := runner.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if stats.ExpiredActiveCAs == 0 {
+		t.Error("sweep did not report a network signing with an expired CA")
+	}
+
+	err = h.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		a, err := tx.GetCA(ctx, activeID)
+		if err != nil {
+			return err
+		}
+		if a.State != store.CAActive {
+			t.Errorf("expired active CA state = %q, want it left active for an operator", a.State)
+		}
+		p, err := tx.GetCA(ctx, pendingID)
+		if err != nil {
+			return err
+		}
+		if p.State != store.CARetired {
+			t.Errorf("expired pending CA state = %q, want retired", p.State)
+		}
+
+		// Retiring the signer would have taken it out of here, and the bundle is
+		// the only thing that says which CA the network was meant to be using.
+		bundle, err := tx.TrustBundlePEM(ctx, netID)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(bundle, activePEM) {
+			t.Error("expired active CA was dropped from the trust bundle")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The state is only tolerable because it is loud. An operator who is not
+	// told has a network that stops issuing certificates and no line to grep.
+	line := logLineFor(logs.String(), netID.String(), "active certificate authority has expired")
+	if line == "" {
+		t.Fatalf("the expired signer was not reported at all:\n%s", logs.String())
+	}
+	if !strings.Contains(line, "level=ERROR") {
+		t.Errorf("expired active CA was reported below Error, so nothing pages: %s", line)
+	}
+	if !strings.Contains(line, "expired-signer") {
+		t.Errorf("report does not name the CA, leaving nothing to act on: %s", line)
+	}
+	t.Logf("reported: %s", line)
+}
+
+// logLineFor returns the first captured line containing every substring. The
+// sweep covers every network in the database, including whatever other tests
+// left behind, so an assertion has to pick out its own network's line.
+func logLineFor(out string, want ...string) string {
+	for _, line := range strings.Split(out, "\n") {
+		found := true
+		for _, w := range want {
+			if !strings.Contains(line, w) {
+				found = false
+				break
+			}
+		}
+		if found {
+			return line
+		}
+	}
+	return ""
 }
 
 func countPEMBlocks(s string) int {

@@ -79,6 +79,24 @@ type State struct {
 	// automatic rollback safe rather than a way to flap forever.
 	QuarantinedConfigEpoch int64     `json:"quarantined_config_epoch,omitempty"`
 	QuarantinedUntil       time.Time `json:"quarantined_until,omitempty"`
+
+	// PendingRevertFromConfigEpoch and PendingRevertFromBlocklistEpoch are the
+	// epochs a revert moved away from, held until the control plane has been
+	// told.
+	//
+	// Persisted, and retried on the next successful control-plane call, because
+	// this is the report most likely to be lost and the one that matters most: the
+	// guard fires precisely because the control plane was unreachable, and a
+	// reload is asynchronous, so the report immediately following a revert goes
+	// out over a data plane that may not be back yet. Losing it leaves the control
+	// plane counting this host as converged on a generation it threw away, and
+	// while the quarantine holds the agent applies nothing — so there is no later
+	// report to correct the record.
+	//
+	// Zero once reported, and cleared by the next apply, which supersedes the
+	// revert entirely.
+	PendingRevertFromConfigEpoch    int64 `json:"pending_revert_from_config_epoch,omitempty"`
+	PendingRevertFromBlocklistEpoch int64 `json:"pending_revert_from_blocklist_epoch,omitempty"`
 }
 
 // ControlURL is the endpoint the agent should talk to for steady-state work.
@@ -202,6 +220,16 @@ type Loop struct {
 	// problem does not become a hot loop against the control plane.
 	lastRenewAttempt time.Time
 
+	// serverRenewAfter is the control plane's view of when this host should
+	// renew, refreshed from every poll and watch response.
+	//
+	// In memory only, and deliberately not in State: it is a hint the very next
+	// response restates, and persisting it would add exactly the kind of cached
+	// value State's documentation exists to warn about — one that can outlive the
+	// certificate it describes and disagree with what is on disk. Losing it
+	// across a restart costs one poll interval.
+	serverRenewAfter time.Time
+
 	// now is injectable for tests.
 	now func() time.Time
 }
@@ -284,6 +312,12 @@ func (l *Loop) markApplied(prevConfig, prevBlock int64) {
 	l.State.PrevBlocklistEpoch = prevBlock
 	l.State.UnconfirmedSince = now
 	l.State.ConfirmAfter = now.Add(g.MinConfirm)
+
+	// A newer generation supersedes any revert this host has not yet reported:
+	// the epoch it names is no longer what the control plane holds, so retrying
+	// it could only describe a state that has since been overtaken.
+	l.State.PendingRevertFromConfigEpoch = 0
+	l.State.PendingRevertFromBlocklistEpoch = 0
 }
 
 // markReachable records a successful control-plane call.
@@ -316,7 +350,7 @@ func (l *Loop) checkGuard(ctx context.Context) {
 		return
 	}
 
-	broken := l.State.ConfigEpoch
+	broken, brokenBlock := l.State.ConfigEpoch, l.State.BlocklistEpoch
 	l.Log.Error("control plane unreachable since applying a new generation; reverting",
 		"unconfirmedFor", unconfirmed.Round(time.Second),
 		"configEpoch", broken, "revertingTo", l.State.PrevConfigEpoch)
@@ -334,6 +368,8 @@ func (l *Loop) checkGuard(ctx context.Context) {
 	l.State.ConfirmAfter = time.Time{}
 	l.State.QuarantinedConfigEpoch = broken
 	l.State.QuarantinedUntil = l.clock().Add(g.Quarantine)
+	l.State.PendingRevertFromConfigEpoch = broken
+	l.State.PendingRevertFromBlocklistEpoch = brokenBlock
 	if err := WriteState(l.Layout.Dir, l.State); err != nil {
 		l.Log.Error("persist agent state failed", "error", err)
 	}
@@ -341,6 +377,34 @@ func (l *Loop) checkGuard(ctx context.Context) {
 	l.Log.Warn("quarantined the generation that broke connectivity; "+
 		"it will not be re-applied until an operator investigates",
 		"configEpoch", broken, "until", l.State.QuarantinedUntil)
+
+	// Tell the control plane, best effort and last.
+	//
+	// Last, because a revert must not depend on anything remote: this call
+	// happens precisely when the control plane may be unreachable — that is what
+	// triggered the revert — so it is expected to fail about as often as it
+	// succeeds, and a failure must not prevent or undo a rollback that has
+	// already put a working generation back on disk. The pending marker is on
+	// disk before the attempt for the same reason a state file is written before
+	// anything remote is touched: a crash here must not lose the fact that this
+	// host owes the control plane a correction.
+	//
+	// Best effort, but not optional: until it lands, the control plane still
+	// believes this host converged on a configuration it no longer runs, and the
+	// CA rotation gate reads exactly that number. A whole fleet can revert in
+	// unison and still show 100% converged.
+	l.report(ctx)
+}
+
+// quarantinedEpoch is the generation this host is currently refusing, or zero.
+//
+// Read-only, unlike quarantined(), which expires the quarantine as a side
+// effect. Reporting must not be able to change what the guard decides.
+func (l *Loop) quarantinedEpoch() int64 {
+	if l.State.QuarantinedConfigEpoch == 0 || l.clock().After(l.State.QuarantinedUntil) {
+		return 0
+	}
+	return l.State.QuarantinedConfigEpoch
 }
 
 // quarantined reports whether a generation is the one that already broke this
@@ -419,6 +483,16 @@ func (l *Loop) CurrentWindow() (notBefore, notAfter time.Time, err error) {
 	return CertificateWindow(string(b))
 }
 
+// noteRenewHint records the control plane's view of when this host should renew.
+//
+// Every state and watch response carries it, so the hint tracks the certificate
+// the server currently holds for this host and needs no invalidation of its own:
+// once a renewal lands, the next response restates it as the new certificate's
+// schedule. That self-correction is why honouring the hint cannot loop.
+func (l *Loop) noteRenewHint(resp *wire.StateResponse) {
+	l.serverRenewAfter = resp.RenewAfter
+}
+
 // maybeRenew renews the certificate if the policy says it is due.
 func (l *Loop) maybeRenew(ctx context.Context) error {
 	notBefore, notAfter, err := l.CurrentWindow()
@@ -427,10 +501,10 @@ func (l *Loop) maybeRenew(ctx context.Context) error {
 	}
 
 	now := l.clock()
-	urgency := l.Policy.Assess(now, notBefore, notAfter, l.State.HostID)
+	urgency := l.Policy.AssessWithHint(now, notBefore, notAfter, l.State.HostID, l.serverRenewAfter)
 	if urgency == NotDue {
 		l.Log.Debug("certificate not due for renewal",
-			"renewAt", l.Policy.RenewAt(notBefore, notAfter, l.State.HostID),
+			"renewAt", l.Policy.RenewAtWithHint(notBefore, notAfter, l.State.HostID, l.serverRenewAfter),
 			"notAfter", notAfter)
 		return nil
 	}
@@ -518,6 +592,13 @@ func (l *Loop) doRenew(ctx context.Context) error {
 		l.Log.Error("persist agent state failed", "error", err)
 	}
 
+	// Adopt the new certificate's schedule immediately rather than waiting for
+	// the next poll to restate it. A pull-forward hint that outlived the
+	// certificate it was about would say "renew now" about a certificate just
+	// issued, and the only thing standing between that and a renewal loop would
+	// be MinRetry.
+	l.serverRenewAfter = resp.RenewAfter
+
 	l.adoptEndpoints(resp.AgentEndpoints)
 	l.Log.Info("certificate renewed",
 		"notAfter", resp.NotAfter, "renewAfter", resp.RenewAfter,
@@ -551,6 +632,8 @@ func (l *Loop) poll(ctx context.Context) error {
 	}
 
 	l.markReachable()
+	l.noteRenewHint(resp)
+	l.retryPendingRevert(ctx)
 
 	if resp.Config == "" {
 		l.Log.Debug("no configuration change",
@@ -588,18 +671,78 @@ func (l *Loop) poll(ctx context.Context) error {
 
 // report tells the control plane what this host has applied.
 //
-// Called only after a successful apply, which is what makes the control plane's
-// convergence figure mean "in effect" rather than "downloaded". A failure here
-// is logged but not propagated: the host is correctly configured either way, and
-// the next tick will report again.
+// Sent after a successful apply — never after a fetch, which is what makes the
+// control plane's convergence figure mean "in effect" rather than "downloaded" —
+// and after a revert, which is the same statement in the other direction. A
+// failure is logged but not propagated: the host is correctly configured either
+// way, and the next tick reports again.
 func (l *Loop) report(ctx context.Context) {
-	if err := l.Client.Report(ctx, wire.ReportRequest{
-		ConfigEpoch:    l.State.ConfigEpoch,
-		BlocklistEpoch: l.State.BlocklistEpoch,
-		AgentVersion:   Version,
-	}); err != nil {
+	req := l.reportRequest()
+	revert := req.RevertedFromConfigEpoch != 0 || req.RevertedFromBlocklistEpoch != 0
+
+	if err := l.Client.Report(ctx, req); err != nil {
+		if revert {
+			// Louder than an ordinary failed report: this is the one whose loss
+			// leaves the control plane counting a reverted host as converged. It
+			// stays pending and goes out again on the next call that gets through.
+			l.Log.Error("could not tell the control plane about the revert; "+
+				"it may still count this host as converged on the reverted generation",
+				"error", err, "revertedFrom", req.RevertedFromConfigEpoch,
+				"nowAt", l.State.ConfigEpoch)
+			return
+		}
 		l.Log.Warn("report failed", "error", err)
+		return
 	}
+
+	if revert {
+		// The server accepted the report. Whether it actually lowered anything is
+		// its decision — a duplicate that no longer matches what it holds is a
+		// no-op there — so a delivered report is exactly the right condition for
+		// dropping the marker, and it is what stops a lost response from making
+		// the agent retry forever.
+		l.Log.Info("reported the revert to the control plane",
+			"revertedFrom", req.RevertedFromConfigEpoch, "nowAt", l.State.ConfigEpoch)
+		l.State.PendingRevertFromConfigEpoch = 0
+		l.State.PendingRevertFromBlocklistEpoch = 0
+		if err := WriteState(l.Layout.Dir, l.State); err != nil {
+			l.Log.Error("persist agent state failed", "error", err)
+		}
+	}
+}
+
+// reportRequest describes this host's current state to the control plane.
+//
+// The reverted-from epochs are what let the server accept a lower number at all:
+// it requires them to match what it currently holds, so a duplicate of this
+// report cannot lower anything a second time, and a report that merely carries a
+// smaller number cannot lower anything at all.
+func (l *Loop) reportRequest() wire.ReportRequest {
+	return wire.ReportRequest{
+		ConfigEpoch:                l.State.ConfigEpoch,
+		BlocklistEpoch:             l.State.BlocklistEpoch,
+		AgentVersion:               Version,
+		RevertedFromConfigEpoch:    l.State.PendingRevertFromConfigEpoch,
+		RevertedFromBlocklistEpoch: l.State.PendingRevertFromBlocklistEpoch,
+		// Sent on every report, not only after a revert. A quarantine is
+		// otherwise invisible server-side: a host refusing a generation and a
+		// host that is merely slow are the same observation — an applied epoch
+		// that is behind — and an operator needs opposite responses to them.
+		QuarantinedConfigEpoch: l.quarantinedEpoch(),
+	}
+}
+
+// retryPendingRevert re-sends a revert report the control plane never received.
+//
+// Called from the poll and watch paths rather than only after an apply, because
+// a quarantined host applies nothing: without this the single attempt made at
+// revert time — over a data plane that had just been reloaded and may not have
+// been back yet — would be the only one this host ever makes.
+func (l *Loop) retryPendingRevert(ctx context.Context) {
+	if l.State.PendingRevertFromConfigEpoch == 0 && l.State.PendingRevertFromBlocklistEpoch == 0 {
+		return
+	}
+	l.report(ctx)
 }
 
 // Version identifies the agent to the control plane.
@@ -650,7 +793,7 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 		}
 
 		if push {
-			changed, err := l.watchOnce(ctx, opts.Hold)
+			outcome, err := l.watchOnce(ctx, opts.Hold)
 			if err != nil {
 				var apiErr *APIError
 				if errors.As(err, &apiErr) && apiErr.Status == 503 {
@@ -663,8 +806,26 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 				}
 				l.Log.Warn("watch failed, retrying", "error", err)
 				l.sleep(ctx, opts.Interval, opts.Jitter)
+				continue
 			}
-			_ = changed
+
+			// Only watchIdle may reconnect immediately: the server held that
+			// request for the full hold period, so the loop is paced by the
+			// server and the next watch costs one connection per hold.
+			//
+			// watchRefused must not. The server answers a watch the moment this
+			// host's known epoch is behind, and refusing a generation is what
+			// keeps it behind — for the entire quarantine window. Reconnecting
+			// straight away turns that window into a hot loop: watch, instant
+			// answer, refuse, watch, at full speed, per host, fleet-wide, costing
+			// the server a notifier subscribe and a full state read every pass.
+			// Backing off to the poll interval is the same throttle
+			// lastRenewAttempt applies to a failing renewal, for the same reason:
+			// a condition the control plane cannot resolve by answering faster is
+			// not worth asking about faster.
+			if outcome == watchRefused {
+				l.sleep(ctx, opts.Interval, opts.Jitter)
+			}
 			continue
 		}
 
@@ -676,22 +837,44 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 	return ctx.Err()
 }
 
+// watchOutcome is what a completed watch actually did.
+//
+// Three states, not a bool: "nothing was offered" and "something was offered and
+// refused" look identical to a caller holding only "did I apply anything", and
+// they need opposite pacing. Conflating them is what made a quarantined host spin
+// against the control plane at full speed.
+type watchOutcome int
+
+const (
+	// watchIdle means the hold expired with nothing new. The server paced this
+	// request; reconnecting immediately is correct.
+	watchIdle watchOutcome = iota
+	// watchApplied means a new generation was installed.
+	watchApplied
+	// watchRefused means the server offered a generation this host will not
+	// apply. The server will keep offering it, immediately, for as long as the
+	// refusal stands, so the agent must pace itself.
+	watchRefused
+)
+
 // watchOnce performs one long poll and applies whatever it returns.
-func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (bool, error) {
+func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome, error) {
 	resp, err := l.Client.Watch(ctx, l.State.ConfigEpoch, l.State.BlocklistEpoch, hold)
 	if err != nil {
 		l.failover(err)
-		return false, err
+		return watchIdle, err
 	}
 	l.markReachable()
+	l.noteRenewHint(resp)
+	l.retryPendingRevert(ctx)
 
 	if resp.Config == "" {
-		return false, nil // hold expired with nothing new
+		return watchIdle, nil // hold expired with nothing new
 	}
 	if l.quarantined(resp.ConfigEpoch) {
 		l.Log.Warn("refusing a quarantined generation",
 			"configEpoch", resp.ConfigEpoch, "until", l.State.QuarantinedUntil)
-		return false, nil
+		return watchRefused, nil
 	}
 
 	prevConfig, prevBlock := l.State.ConfigEpoch, l.State.BlocklistEpoch
@@ -703,7 +886,7 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (bool, error) 
 		CABundle:    resp.CABundle,
 		Certificate: resp.Certificate,
 	}); err != nil {
-		return false, fmt.Errorf("apply pushed update: %w", err)
+		return watchIdle, fmt.Errorf("apply pushed update: %w", err)
 	}
 
 	l.State.ConfigEpoch = resp.ConfigEpoch
@@ -713,7 +896,7 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (bool, error) 
 		l.Log.Error("persist agent state failed", "error", err)
 	}
 	l.report(ctx)
-	return true, nil
+	return watchApplied, nil
 }
 
 // sleep waits for d, randomised by ±jitter, or until ctx ends.

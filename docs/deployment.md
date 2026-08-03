@@ -8,7 +8,7 @@ Running Orbit on one ordinary VM. Unit files are in [`deploy/`](../deploy).
 
 | Piece | Needs |
 |---|---|
-| Postgres 14+ | local is fine; the control plane is the only client |
+| Postgres 15+ | local is fine; the control plane is the only client. 15 is the floor: the schema uses `ON DELETE SET NULL (column)`, which 14 cannot parse |
 | `orbitd` | a public TLS endpoint for enrollment; an overlay address on each network it serves |
 | A lighthouse | **a stable public IP and an open UDP port** — the one hard requirement, and `orbitd` can be it |
 | Managed hosts | outbound UDP; no inbound, no public address |
@@ -430,6 +430,8 @@ something happened, the log line tells you to which host.
 | `certificate is overdue for renewal` | a host has stopped rotating; it will drop off at expiry |
 | `host recovered after certificate expiry` | renewal is broken for that host — recovery is not routine |
 | `CA activated before convergence` | someone forced a rotation; hosts were cut off |
+| `active certificate authority has expired` | the network's signer outlived itself; enrollment and renewal fail until a replacement CA is created and activated. The sweep deliberately does not retire it — retiring is a rotation step and cannot be undone through the API |
+| `host reverted a pushed generation` | that host applied a config and then could not reach the control plane, so its guard rolled back. More than one means the push severed the fleet |
 | `reverted to the previous generation` | a pushed config broke a host and it rolled back |
 | `CA key written UNENCRYPTED` | fix before anything else |
 | `epoch listener dropped` | push is down; agents fell back to polling |

@@ -14,6 +14,7 @@ package sched
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -66,6 +67,10 @@ type Stats struct {
 	CertificatesOverdue int
 	ReplicasPruned      int64
 	CAsRetired          int
+
+	// ExpiredActiveCAs is how many networks are nominally signing with a CA
+	// that has outlived itself. Reported, never acted on; see Sweep.
+	ExpiredActiveCAs int
 }
 
 type Runner struct {
@@ -158,17 +163,19 @@ func (r *Runner) Sweep(ctx context.Context) (Stats, error) {
 			}
 			stats.ReplicasPruned += r2
 
-			// Retire CAs that have outlived their own validity.
+			// Retire pending and retiring CAs that have outlived their own
+			// validity.
 			//
 			// Safe without counting certificates: nebula enforces
 			// leaf.NotAfter <= ca.NotAfter, so once a CA has expired nothing it
 			// ever signed can still verify. Leaving it in the trust bundle costs
 			// bytes in every host's configuration and can never accept anything.
 			//
-			// This is the only automatic CA state change. Retiring a *live* CA
-			// stays manual, because that decision can strand hosts that have not
-			// renewed and belongs to an operator.
-			expired, err := tx.ExpiredRetiringCAs(ctx, networkID, now)
+			// This is the only automatic CA state change, and it deliberately
+			// cannot touch the active CA — see store.ExpiredInactiveCAs.
+			// Retiring the signer is a rotation step, and rotation belongs to an
+			// operator.
+			expired, err := tx.ExpiredInactiveCAs(ctx, networkID, now)
 			if err != nil {
 				return err
 			}
@@ -179,6 +186,33 @@ func (r *Runner) Sweep(ctx context.Context) (Stats, error) {
 				stats.CAsRetired++
 				r.log.Info("retired an expired certificate authority",
 					"network", networkID, "ca", c.Name, "notAfter", c.NotAfter)
+			}
+
+			// An active CA past its own NotAfter is left exactly where it is,
+			// and shouted about instead.
+			//
+			// Nothing is salvageable either way: ca.ValidityFor refuses to issue
+			// against an expired CA, so enrollment and renewal are already
+			// failing. What retiring it would add is a second, quieter failure —
+			// the network reports "no active CA" instead of naming the one that
+			// expired, and the promotion path back is gone, because ActivateCA
+			// accepts only pending and retiring CAs. This is the one state the
+			// sweep can see before every host's certificate runs out behind it,
+			// so it has to be legible rather than tidied away.
+			active, err := tx.GetActiveCA(ctx, networkID)
+			switch {
+			case errors.Is(err, store.ErrNoActived):
+				// Not this sweep's to diagnose: a network with no signer at all
+				// is already reported on every enrollment attempt, and a network
+				// that has never had one is a normal half-finished bootstrap.
+			case err != nil:
+				return err
+			case !active.NotAfter.After(now):
+				stats.ExpiredActiveCAs++
+				r.log.Error("active certificate authority has expired; enrollment and renewal are failing until a replacement is activated",
+					"network", networkID, "ca", active.Name, "caID", active.ID,
+					"notAfter", active.NotAfter,
+					"expiredFor", now.Sub(active.NotAfter).Round(time.Minute))
 			}
 
 			// Certificates past their renewal point that the agent has not
@@ -225,14 +259,16 @@ func (r *Runner) Sweep(ctx context.Context) (Stats, error) {
 	}
 
 	if stats.BlocklistPruned > 0 || stats.CredentialsPruned > 0 ||
-		stats.CertificatesOverdue > 0 || stats.ReplicasPruned > 0 || stats.CAsRetired > 0 {
+		stats.CertificatesOverdue > 0 || stats.ReplicasPruned > 0 ||
+		stats.CAsRetired > 0 || stats.ExpiredActiveCAs > 0 {
 		r.log.Info("maintenance sweep complete",
 			"networks", stats.Networks,
 			"blocklistPruned", stats.BlocklistPruned,
 			"credentialsPruned", stats.CredentialsPruned,
 			"certificatesOverdue", stats.CertificatesOverdue,
 			"replicasPruned", stats.ReplicasPruned,
-			"casRetired", stats.CAsRetired)
+			"casRetired", stats.CAsRetired,
+			"expiredActiveCAs", stats.ExpiredActiveCAs)
 	} else {
 		r.log.Debug("maintenance sweep complete, nothing to do", "networks", stats.Networks)
 	}

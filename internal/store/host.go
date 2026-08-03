@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -114,31 +115,129 @@ type AgentReport struct {
 	BlocklistEpoch int64
 	NebulaVersion  string
 	AgentVersion   string
+
+	// RevertedFromConfigEpoch and RevertedFromBlocklistEpoch name the generation
+	// the host was running before its guard reverted it. They are the only way a
+	// recorded epoch may move backwards; see RecordAgentReport.
+	RevertedFromConfigEpoch    int64
+	RevertedFromBlocklistEpoch int64
+
+	// QuarantinedConfigEpoch is a generation the agent is refusing to apply.
+	// Recorded in the revert's audit entry so an operator can see which push the
+	// host rejected, rather than inferring it from a host that is merely behind.
+	QuarantinedConfigEpoch int64
 }
+
+// ActionConfigReverted is the audit action for a host whose guard put the
+// previous generation back.
+//
+// Declared here rather than beside its siblings in audit.go because this is the
+// only place that writes it, and because the alternative — reusing
+// ActionHostUpdated — would file an automatic, agent-initiated rollback under
+// the same name as an operator editing a host. The one question this entry
+// exists to answer ("which push severed hosts, and how many?") is a `WHERE
+// action = ...` away only if the action is its own.
+const ActionConfigReverted = "host.config_reverted"
 
 // RecordAgentReport stores what a host has actually applied.
 //
-// The epochs move forward only. An agent that reports a lower epoch than we
-// already recorded is either replaying or has been rolled back; either way,
-// letting it lower the number would make a network look less converged than it
-// is and could stall a CA rotation waiting on a value that keeps regressing.
+// The epochs move forward only, with one audited exception.
+//
+// Monotonic is the right default: an agent that reports a lower epoch than we
+// already recorded is usually replaying, or its reports arrived out of order,
+// and letting either lower the number would make a network look less converged
+// than it is and could stall a CA rotation waiting on a value that keeps
+// regressing.
+//
+// The exception is the unreachable-guard. When a host applies a configuration
+// that severs its own path back here, the guard reverts it and the host really
+// is no longer running what it last reported. Keeping the higher number then is
+// not conservatism, it is a lie in the one direction that matters: the
+// convergence gate whose entire purpose is stopping a CA rotation from
+// partitioning the fleet would pass on evidence that every host converged on a
+// generation every host has since thrown away.
+//
+// So a lowering is accepted only when the agent names the epoch it reverted FROM
+// and that name matches what we currently hold. Two properties follow, and both
+// are load-bearing:
+//
+//   - A replayed revert report is a no-op. Once the lowering has been applied
+//     the stored epoch no longer equals RevertedFrom, so a duplicate cannot
+//     regress the host a second time.
+//   - A report that merely carries a smaller number still cannot lower anything.
+//     Regression stays impossible except as a deliberate, matched statement.
+//
+// The whole decision is one statement so it cannot interleave, and the row is
+// locked first so the value the CASE compares against is the value we audit.
+//
+// The audit entry is written here rather than returned for the caller to write.
+// The caller is the agent report handler, which has no other reason to open the
+// audit path, and an audit record that can be dropped by forgetting to call
+// something is not an audit record. Writing it inside the caller's transaction
+// is the same guarantee AppendAudit exists to give: the regression and the
+// evidence for it commit together or not at all.
 func (t *Tx) RecordAgentReport(ctx context.Context, hostID uuid.UUID, r AgentReport) error {
-	tag, err := t.tx.Exec(ctx, `
-		UPDATE orbit.host
-		   SET applied_config_epoch    = greatest(applied_config_epoch, $2),
-		       applied_blocklist_epoch = greatest(applied_blocklist_epoch, $3),
-		       nebula_version = coalesce(nullif($4, ''), nebula_version),
-		       agent_version  = coalesce(nullif($5, ''), agent_version),
+	var (
+		name string
+		wasConfig, wasBlock,
+		nowConfig, nowBlock int64
+	)
+	err := t.tx.QueryRow(ctx, `
+		WITH locked AS (
+			SELECT id, name,
+			       applied_config_epoch    AS was_config,
+			       applied_blocklist_epoch AS was_block
+			  FROM orbit.host WHERE id = $1 FOR UPDATE
+		)
+		UPDATE orbit.host h
+		   SET applied_config_epoch = CASE
+		           WHEN $6 <> 0 AND locked.was_config = $6 AND $2 < locked.was_config
+		           THEN $2
+		           ELSE greatest(locked.was_config, $2) END,
+		       applied_blocklist_epoch = CASE
+		           WHEN $7 <> 0 AND locked.was_block = $7 AND $3 < locked.was_block
+		           THEN $3
+		           ELSE greatest(locked.was_block, $3) END,
+		       nebula_version = coalesce(nullif($4, ''), h.nebula_version),
+		       agent_version  = coalesce(nullif($5, ''), h.agent_version),
 		       last_seen_at   = now()
-		 WHERE id = $1`,
-		hostID, r.ConfigEpoch, r.BlocklistEpoch, r.NebulaVersion, r.AgentVersion)
+		  FROM locked
+		 WHERE h.id = locked.id
+		RETURNING locked.name, locked.was_config, locked.was_block,
+		          h.applied_config_epoch, h.applied_blocklist_epoch`,
+		hostID, r.ConfigEpoch, r.BlocklistEpoch, r.NebulaVersion, r.AgentVersion,
+		r.RevertedFromConfigEpoch, r.RevertedFromBlocklistEpoch,
+	).Scan(&name, &wasConfig, &wasBlock, &nowConfig, &nowBlock)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
 		return mapErr(err, "record agent report")
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+
+	if nowConfig >= wasConfig && nowBlock >= wasBlock {
+		return nil
 	}
-	return nil
+
+	// A regression got through, which by construction means the guard reverted.
+	// Nobody watching convergence would otherwise learn that a number went down.
+	meta, err := json.Marshal(map[string]any{
+		"was_config_epoch":         wasConfig,
+		"was_blocklist_epoch":      wasBlock,
+		"applied_config_epoch":     nowConfig,
+		"applied_blocklist_epoch":  nowBlock,
+		"quarantined_config_epoch": r.QuarantinedConfigEpoch,
+		"agent_version":            r.AgentVersion,
+	})
+	if err != nil {
+		return fmt.Errorf("encode revert audit metadata: %w", err)
+	}
+	return t.AppendAudit(ctx, AuditEntry{
+		ActorType: ActorAgent, ActorID: hostID.String(), ActorDisplay: name,
+		Action:     ActionConfigReverted,
+		TargetType: "host", TargetID: hostID.String(),
+		Meta: meta,
+	})
 }
 
 //------------------------------------------------------------------------------
