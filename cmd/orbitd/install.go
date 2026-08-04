@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -22,7 +25,12 @@ type controlPlaneInstall struct {
 	UnitPath string
 	Env      string
 	Unit     string
-	Unit0644 bool
+
+	// StateDir and CAKey are reported back so describe can name the two paths
+	// the service account must own. Neither is chowned here: bootstrap runs as
+	// root and the key it just wrote is still being used by this process.
+	StateDir string
+	CAKey    string
 }
 
 // planControlPlane renders the env file and the unit.
@@ -64,8 +72,8 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-User=orbit
-Group=orbit
+User=%s
+Group=%s
 
 EnvironmentFile=%s
 
@@ -102,13 +110,15 @@ ReadWritePaths=%s
 
 [Install]
 WantedBy=multi-user.target
-`, controlPlaneEnvPath, orbitdPath(), lh, mesh, enrollURL, filepath.Dir(caKey))
+`, serviceUser, serviceUser, controlPlaneEnvPath, orbitdPath(), lh, mesh, enrollURL, filepath.Dir(caKey))
 
 	return controlPlaneInstall{
 		EnvPath:  controlPlaneEnvPath,
 		UnitPath: controlPlaneUnitPath,
 		Env:      env,
 		Unit:     unit,
+		StateDir: filepath.Dir(caKey),
+		CAKey:    caKey,
 	}
 }
 
@@ -136,6 +146,15 @@ func orbitdPath() string {
 // files: the unit names paths and flags an operator should be able to read, and
 // the env file holds a database password.
 func (c controlPlaneInstall) write() error {
+	// The account the unit runs as, before the unit that names it.
+	//
+	// Nothing else created it, and systemd refuses to start a unit whose User
+	// does not exist — so `-write-unit` produced a unit that could never start,
+	// and the failure arrived as "Failed to determine user credentials", which
+	// names neither this flag nor the missing account.
+	if err := ensureServiceUser(serviceUser); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(c.EnvPath), 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(c.EnvPath), err)
 	}
@@ -151,14 +170,63 @@ func (c controlPlaneInstall) write() error {
 	return nil
 }
 
+// serviceUser is the unqualified account the control plane runs as. A system
+// account with no login shell and no home: it needs to read two files and write
+// one directory.
+const serviceUser = "orbit"
+
+// ensureServiceUser creates the account if it is missing.
+//
+// Idempotent, and tolerant of the several ways a distribution can spell this:
+// useradd on RHEL and Debian families, adduser on Alpine. A host that already
+// has the account — because bootstrap ran before, or because a package made it
+// — is left alone.
+func ensureServiceUser(name string) error {
+	if _, err := user.Lookup(name); err == nil {
+		return nil
+	}
+
+	// -r system account, -s nologin, -M no home. The CA key's directory is
+	// created and chowned separately, so this account owns nothing at creation.
+	cmds := [][]string{
+		{"useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", name},
+		{"adduser", "-S", "-D", "-H", "-s", "/sbin/nologin", name},
+	}
+	var last error
+	for _, argv := range cmds {
+		path, err := exec.LookPath(argv[0])
+		if err != nil {
+			continue
+		}
+		if out, err := exec.Command(path, argv[1:]...).CombinedOutput(); err != nil {
+			last = fmt.Errorf("%s: %w: %s", argv[0], err, strings.TrimSpace(string(out)))
+			continue
+		}
+		return nil
+	}
+	if last == nil {
+		last = errors.New("no useradd or adduser on this host")
+	}
+	return fmt.Errorf("create the %q service account (the unit runs as it): %w", name, last)
+}
+
 // describe is what bootstrap prints when it has written the files.
 func (c controlPlaneInstall) describe() string {
 	return strings.TrimSpace(fmt.Sprintf(`
+created user %s  (system account the unit runs as)
 wrote %s  (0600 — database password and enrollment pepper)
 wrote %s  (0644)
 
-Start it:
+Give the service account its state directory and the CA key:
+
+  install -d -o %s -g %s -m 0750 %s
+  chown %s:%s %s && chmod 0600 %s
+
+Then start it:
 
   systemctl daemon-reload && systemctl enable --now orbit-control
-  curl -fsS localhost:8080/readyz`, c.EnvPath, c.UnitPath))
+  curl -fsS localhost:8080/readyz`,
+		serviceUser, c.EnvPath, c.UnitPath,
+		serviceUser, serviceUser, c.StateDir,
+		serviceUser, serviceUser, c.CAKey, c.CAKey))
 }

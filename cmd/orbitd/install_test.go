@@ -115,3 +115,50 @@ func TestSecretsAreNotInTheUnit(t *testing.T) {
 		t.Error("the env file is missing what the unit expects it to provide")
 	}
 }
+
+// TestTheUnitRunsAsTheAccountBootstrapCreates.
+//
+// This is the regression. The unit named User=orbit and nothing created that
+// account, so `-write-unit` produced a unit systemd would refuse to start with
+// "Failed to determine user credentials" — a message naming neither the flag
+// nor the missing user. write() now creates it, and this ties the two together
+// so changing one without the other fails here rather than on a fresh host.
+func TestTheUnitRunsAsTheAccountBootstrapCreates(t *testing.T) {
+	c := planControlPlane("net-id", "postgres://x", "pep",
+		"https://orbit.example.com/enroll/v1/enroll", "10.42.0.1",
+		"203.0.113.10:4242", "/var/lib/orbit/ca.key")
+
+	var user, group string
+	for _, line := range strings.Split(c.Unit, "\n") {
+		if v, ok := strings.CutPrefix(line, "User="); ok {
+			user = v
+		}
+		if v, ok := strings.CutPrefix(line, "Group="); ok {
+			group = v
+		}
+	}
+	if user != serviceUser {
+		t.Errorf("the unit runs as %q but bootstrap creates %q; one of them is wrong "+
+			"and the host finds out at systemctl enable", user, serviceUser)
+	}
+	if group != serviceUser {
+		t.Errorf("Group=%q, want %q", group, serviceUser)
+	}
+}
+
+// TestDescribeNamesWhatMustBeChowned. bootstrap runs as root and the key it just
+// wrote is still open, so it does not chown anything itself — which makes the
+// instructions the only thing standing between an operator and a service that
+// cannot read its own CA key.
+func TestDescribeNamesWhatMustBeChowned(t *testing.T) {
+	c := planControlPlane("net-id", "postgres://x", "pep",
+		"https://orbit.example.com/enroll/v1/enroll", "10.42.0.1", "",
+		"/var/lib/orbit/ca.key")
+
+	got := c.describe()
+	for _, want := range []string{"/var/lib/orbit/ca.key", "/var/lib/orbit", serviceUser} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the instructions do not name %q:\n%s", want, got)
+		}
+	}
+}

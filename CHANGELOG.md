@@ -9,6 +9,19 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## Unreleased
+
+### Fixed
+
+- **`orbitd bootstrap -write-unit` produced a unit that could not start.** The
+  generated unit runs as `User=orbit` and nothing created that account, so
+  `systemctl enable --now orbit-control` failed with "Failed to determine user
+  credentials" — a message naming neither the flag nor the missing user.
+  Bootstrap now creates the system account, and prints the two `chown` commands
+  the service needs to read its CA key and write its state directory. Found
+  while writing a fresh-host runbook for v0.3.0; on v0.3.0 the workaround is one
+  `useradd --system` before `systemctl enable`.
+
 ## v0.3.0
 
 The deployment path was the worst part of Orbit, and this release rewrites it.
