@@ -9,6 +9,33 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.3.5
+
+### Fixed
+
+- **A wrong `--public-ip` on the first run was permanent.** The setup script
+  reused `.env` wholesale, which is right for secrets and wrong for addresses: a
+  first run with the usage text's example address wrote it in, and every later
+  run reused it however many times the correct one was passed. The control plane
+  then advertised a lighthouse nobody could reach — hosts enrolled fine, never
+  completed a handshake, and every agent call timed out, which reads as a
+  firewall problem. Addresses passed on the command line now win; secrets and
+  the network id are still preserved.
+
+  Correcting `.env` is only half of it, so the script now says the other half
+  out loud: `-lighthouse` is a seed that applies once, at host-record creation,
+  and after that the RECORD is what agents are told to dial. A changed address
+  on an already-bootstrapped network needs
+  `orbit host set <control-plane> -static-addrs <addr>`, and hosts that enrolled
+  against the old one cannot receive that correction over an overlay they never
+  joined — they have to re-enroll.
+
+- **v0.3.4 was tagged on a red test.** The compose check added in v0.3.2 only
+  understood *published* ports, so it flagged the admin CLI reaching a control
+  plane that binds 8080 directly under host networking. The compose file was
+  correct; the test was not. It now accounts for both ways a port reaches the
+  host, and still fails on the original bug.
+
 ## v0.3.4
 
 ### Added

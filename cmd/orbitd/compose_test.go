@@ -29,6 +29,7 @@ type composeFile struct {
 		Ports       []string          `yaml:"ports"`
 		Entrypoint  []string          `yaml:"entrypoint"`
 		Profiles    []string          `yaml:"profiles"`
+		Command     []string          `yaml:"command"`
 	} `yaml:"services"`
 }
 
@@ -56,13 +57,34 @@ func loadCompose(t *testing.T) composeFile {
 func TestHostNetworkedServicesCanReachWhatTheirDSNsName(t *testing.T) {
 	c := loadCompose(t)
 
-	published := map[string]string{} // port -> the service publishing it
+	// Two ways a port ends up on the host, and the first version of this test
+	// knew only one — which made it flag the admin CLI reaching a control plane
+	// that was listening perfectly well.
+	//
+	//   1. A bridged service PUBLISHES it.
+	//   2. A host-networked service BINDS it directly, by way of a flag in its
+	//      own command. There is no `ports:` entry for that and there cannot be.
+	reachable := map[string]string{} // port -> the service providing it
 	for name, svc := range c.Services {
 		for _, p := range svc.Ports {
 			// "127.0.0.1:5432:5432" -> host address, host port, container port.
 			parts := strings.Split(p, ":")
 			if len(parts) == 3 {
-				published[parts[1]] = name
+				reachable[parts[1]] = name
+			}
+		}
+		if svc.NetworkMode != "host" {
+			continue
+		}
+		for _, arg := range svc.Command {
+			// -addr=0.0.0.0:8080, -ui-addr=127.0.0.1:8081, and so on.
+			if !strings.Contains(arg, "addr=") {
+				continue
+			}
+			if i := strings.LastIndex(arg, ":"); i >= 0 {
+				if port := arg[i+1:]; port != "" {
+					reachable[port] = name
+				}
 			}
 		}
 	}
@@ -73,9 +95,10 @@ func TestHostNetworkedServicesCanReachWhatTheirDSNsName(t *testing.T) {
 		}
 		for key, val := range svc.Environment {
 			for _, port := range loopbackPorts(val) {
-				if _, ok := published[port]; !ok {
+				if _, ok := reachable[port]; !ok {
 					t.Errorf("service %q is on host networking and %s names "+
-						"127.0.0.1:%s, but nothing publishes that port on the host.\n"+
+						"127.0.0.1:%s, but no service publishes or binds that port on "+
+						"the host.\n"+
 						"A host-networked service is off the compose network, so it "+
 						"cannot reach another service by name — every command against "+
 						"this address fails with 'connection refused' while the target "+

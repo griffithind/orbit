@@ -19,7 +19,7 @@
 set -euo pipefail
 
 REPO_URL=${ORBIT_REPO_URL:-https://github.com/griffithind/orbit}
-VERSION=${ORBIT_VERSION:-0.3.4}
+VERSION=${ORBIT_VERSION:-0.3.5}
 DIR=${ORBIT_DIR:-/opt/orbit}
 NETWORK=prod
 CIDR=10.42.0.0/16
@@ -120,11 +120,37 @@ echo "orbit v$VERSION at $DIR"
 #------------------------------------------------------------------------------
 say "Secrets"
 
-# Generated once and never regenerated. Rotating POSTGRES_APP_PASSWORD here
-# would leave the database expecting the old one and the control plane unable to
-# connect, with nothing saying why.
+# SECRETS are generated once and never regenerated: rotating
+# POSTGRES_APP_PASSWORD here would leave the database expecting the old one and
+# the control plane unable to connect, with nothing saying why.
+#
+# ADDRESSES are the opposite, and conflating the two cost a real deployment an
+# hour. A first run with the wrong --public-ip — the example address from the
+# usage text, say — wrote it into .env, and every re-run reused it however many
+# times the correct one was passed. The control plane then advertises a
+# lighthouse nobody can reach, hosts enroll fine and never complete a handshake,
+# and nothing in the output says the address is wrong.
+#
+# So: what is passed on the command line wins, every time.
 if [ -f .env ]; then
-    echo "reusing the existing .env"
+    echo "reusing the secrets in .env"
+    ADDR_CHANGED=0
+    for kv in "ORBIT_PUBLIC_ADDR=${PUBLIC_IP}:4242" \
+              "ORBIT_ENROLL_URL=$ENROLL_URL" \
+              "ORBIT_OVERLAY_ADDR=$OVERLAY_ADDR" \
+              "ORBIT_VERSION=$VERSION"; do
+        key=${kv%%=*}
+        old=$(sed -n "s|^$key=||p" .env | head -1)
+        if [ "$old" != "${kv#*=}" ]; then
+            echo "  $key: ${old:-<unset>} -> ${kv#*=}"
+            if [ "$key" = ORBIT_PUBLIC_ADDR ]; then ADDR_CHANGED=1; fi
+        fi
+        if grep -q "^$key=" .env; then
+            sed -i "s|^$key=.*|$kv|" .env
+        else
+            printf '%s\n' "$kv" >> .env
+        fi
+    done
 else
     umask 077
     cat > .env <<EOF
@@ -156,6 +182,33 @@ set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
+
+# Correcting .env is only half of a changed public address.
+#
+# -lighthouse is a SEED: it applies when the control plane's host record is
+# first created, and after that the record is the source of truth — exactly as
+# it is for every other host. So a corrected address in .env reaches nebula's
+# own config and NOT the address this control plane advertises to agents, and
+# hosts go on dialling somewhere nothing answers. They enroll fine and never
+# complete a handshake, which looks like a firewall problem and is not.
+if [ "${ADDR_CHANGED:-0}" = 1 ] && [ -n "${ORBIT_NETWORK:-}" ]; then
+    cat >&2 <<EOF
+
+WARNING: the public address changed on a network that is already bootstrapped.
+
+.env is updated, but the control plane's HOST RECORD still advertises the old
+one, and that record — not this file — is what agents are told to dial. Fix it
+with an admin token:
+
+  docker compose run --rm -e ORBIT_TOKEN=<token> orbit host ls
+  docker compose run --rm -e ORBIT_TOKEN=<token> \
+      orbit host set <control-plane-name> -static-addrs ${PUBLIC_IP}:4242
+
+Hosts that already enrolled against the old address cannot receive that
+correction over an overlay they never joined; re-enroll them.
+
+EOF
+fi
 
 #------------------------------------------------------------------------------
 say "Image"
