@@ -9,6 +9,25 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## Unreleased
+
+### Added
+
+- **`scripts/setup-control-plane.sh`** — one script that takes a fresh
+  RHEL-family host to a running control plane: docker, firewall, secrets,
+  migration, bootstrap, and start. Safe to re-run; secrets already in `.env` are
+  reused rather than regenerated, because rotating the database password after
+  the role exists locks the control plane out of its own data with nothing
+  saying why.
+
+  It sets `ca-pass` to uid 65532 rather than root. Compose bind-mounts a
+  file-backed secret with the host's ownership and mode, so a passphrase left
+  `0600 root` is unreadable by a container running as nonroot — and the failure
+  is "permission denied" on a path that looks correct from a root shell.
+
+  It also falls back to `docker compose build` when no image can be pulled,
+  since the publish job is newer than the compose file that pulls from it.
+
 ## v0.3.1
 
 Three defects in the deployment paths v0.3.0 introduced, all found by walking a
