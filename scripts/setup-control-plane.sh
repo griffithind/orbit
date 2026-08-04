@@ -19,7 +19,7 @@
 set -euo pipefail
 
 REPO_URL=${ORBIT_REPO_URL:-https://github.com/griffithind/orbit}
-VERSION=${ORBIT_VERSION:-0.3.3}
+VERSION=${ORBIT_VERSION:-0.3.4}
 DIR=${ORBIT_DIR:-/opt/orbit}
 NETWORK=prod
 CIDR=10.42.0.0/16
@@ -286,14 +286,23 @@ fi
 
 cat <<EOF
 
-Add a host, from your laptop:
+Add a host. From here, using the admin CLI in the same image:
+
+  cd $PWD
+  docker compose run --rm -e ORBIT_TOKEN=<admin token> \
+      orbit host create -name macbook -addr 10.42.0.10 -role default
+  docker compose run --rm -e ORBIT_TOKEN=<admin token> orbit host code macbook
+
+(or put ORBIT_TOKEN in .env and drop the -e). From your laptop instead:
 
   export ORBIT_URL=http://${PUBLIC_IP}:8080
   export ORBIT_TOKEN=<the admin token>
   export ORBIT_NETWORK=$NETWORK
-
   orbit host create -name macbook -addr 10.42.0.10 -role default
   orbit host code macbook
+
+Then on the machine joining, with the code that printed:
+
   sudo orbit agent install -url http://${PUBLIC_IP}:8080 -code orb_1_... -network $NETWORK
 
 -role default matters: a host with no role gets outbound-only, so nothing can

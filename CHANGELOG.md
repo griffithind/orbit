@@ -9,6 +9,27 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.3.4
+
+### Added
+
+- **The admin CLI is reachable from compose.** Both binaries have always been in
+  the image, and `orbit` was effectively unreachable: the obvious command,
+  `docker compose run --rm orbitd orbit host code web-01`, swallows `orbit` as
+  an argument to orbitd's entrypoint and prints orbitd's usage — which reads
+  exactly like the binary not being in the image at all.
+
+  There is now an `orbit` service sharing the same image, behind a `cli` profile
+  so `docker compose up` does not try to run a command that exits as though it
+  were a service. `docker compose run` enables a targeted service's profile by
+  itself, so nothing needs a `--profile` flag:
+
+      docker compose run --rm orbit host create -name web-01 -addr 10.42.0.7 -role default
+      docker compose run --rm orbit host code web-01
+
+  It runs on host networking and defaults `ORBIT_URL` to the control plane
+  beside it, so the common case needs only a token.
+
 ## v0.3.3
 
 ### Fixed

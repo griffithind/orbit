@@ -27,6 +27,8 @@ type composeFile struct {
 		NetworkMode string            `yaml:"network_mode"`
 		Environment map[string]string `yaml:"environment"`
 		Ports       []string          `yaml:"ports"`
+		Entrypoint  []string          `yaml:"entrypoint"`
+		Profiles    []string          `yaml:"profiles"`
 	} `yaml:"services"`
 }
 
@@ -163,5 +165,32 @@ func TestTheSetupScriptsSecretsAreIgnored(t *testing.T) {
 				"on the control plane, so a stray `git add -A` there commits the "+
 				"mesh's CA passphrase or an admin token to a public repository.", path)
 		}
+	}
+}
+
+// TestTheAdminCLIIsReachable.
+//
+// Both binaries have always been in the image, and the CLI was effectively
+// unreachable: `docker compose run --rm orbitd orbit host code web-01` swallows
+// "orbit" as an argument to orbitd's entrypoint and prints orbitd's usage —
+// which reads exactly like the binary not being in the image at all.
+//
+// A service of its own fixes that, and it must stay behind a profile: without
+// one, `docker compose up -d` tries to start a CLI that runs and exits, and
+// restarts it forever.
+func TestTheAdminCLIIsReachable(t *testing.T) {
+	c := loadCompose(t)
+
+	svc, ok := c.Services["orbit"]
+	if !ok {
+		t.Fatal("no `orbit` service; the admin CLI in the image can only be reached " +
+			"through an --entrypoint override nobody will guess")
+	}
+	if len(svc.Entrypoint) == 0 || !strings.HasSuffix(svc.Entrypoint[0], "/orbit") {
+		t.Errorf("the orbit service's entrypoint is %v, so it would run orbitd", svc.Entrypoint)
+	}
+	if len(svc.Profiles) == 0 {
+		t.Error("the orbit service has no profile, so `docker compose up` will try to " +
+			"run it as a long-lived service and restart it every time it exits")
 	}
 }

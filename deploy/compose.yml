@@ -8,6 +8,11 @@
 #   5. docker compose up -d
 #
 # Steps 2 and 3 print things you need. Everything else is this file.
+#
+# The admin CLI is in the same image and needs no second install:
+#
+#   docker compose run --rm orbit host create -name web-01 -addr 10.42.0.7 -role default
+#   docker compose run --rm orbit host code web-01
 
 name: orbit
 
@@ -79,6 +84,35 @@ services:
       - -enroll-url=${ORBIT_ENROLL_URL:?set ORBIT_ENROLL_URL in .env}
       - -mesh=${ORBIT_NETWORK:-}=${ORBIT_OVERLAY_ADDR:-10.42.0.1}
       - -lighthouse=${ORBIT_PUBLIC_ADDR:?set ORBIT_PUBLIC_ADDR in .env, as host:4242}
+
+  # The admin CLI, from the same image.
+  #
+  # It was always in the image and effectively unreachable: `docker compose run
+  # --rm orbitd orbit host code web-01` swallows "orbit" as an argument to
+  # orbitd's entrypoint and prints orbitd's usage, which reads exactly like the
+  # binary not being there.
+  #
+  # A profile so `docker compose up` does not try to start it — it is a command
+  # that runs and exits, not a service. `docker compose run` enables a targeted
+  # service's profile on its own, so no --profile flag is needed:
+  #
+  #   docker compose run --rm orbit host create -name web-01 -addr 10.42.0.7 -role default
+  #   docker compose run --rm orbit host code web-01
+  #   docker compose run --rm orbit converge
+  #
+  # host networking so 127.0.0.1:8080 is the control plane next to it, and so
+  # ORBIT_URL needs no value in the common case.
+  orbit:
+    profiles: [cli]
+    image: ghcr.io/griffithind/orbit:${ORBIT_VERSION:-latest}
+    network_mode: host
+    entrypoint: ["/usr/local/bin/orbit"]
+    environment:
+      ORBIT_URL: ${ORBIT_ADMIN_URL:-http://127.0.0.1:8080}
+      # Pass with -e on the command line, or put it in .env. Neither is worse
+      # than the database password already there.
+      ORBIT_TOKEN: ${ORBIT_TOKEN:-}
+      ORBIT_NETWORK: ${ORBIT_NETWORK:-}
 
 secrets:
   ca-pass:
