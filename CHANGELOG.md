@@ -9,6 +9,147 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.3.0
+
+The deployment path was the worst part of Orbit, and this release rewrites it.
+A managed host is now **one binary and one service** — no separate `nebula` to
+install, no version to keep in step, no per-network unit. The control plane
+generates its own unit and env file. There is an install script and a container
+image.
+
+It also adds the first diagnostics: `orbit status`, `orbit peers` and
+`orbit why`.
+
+**This release is breaking.** Read the upgrade notes at the bottom before
+taking it — hosts running v0.2.x template units need a deliberate step.
+
+### Nebula runs inside the agent
+
+`orbit agent run` no longer supervises a stock `nebula` process; it links Nebula
+as a library and runs one instance per joined network in-process. Nebula is
+unforked, at the version pinned in `go.mod`.
+
+What this buys: one artifact per host, no `PATH` to get wrong, no `-restart`
+spec naming a systemd instance, and no skew between the configuration Orbit
+renders and the binary that loads it. Validation before an apply is now exact
+rather than a guess about a host binary's version.
+
+What it costs, stated plainly: an agent crash now takes the data plane with it,
+where two processes under two units failed independently. Nebula's security
+fixes also ship on Orbit's release cadence rather than on yours.
+
+What it does **not** cost is the property people usually mean by "the data plane
+survives": a control plane outage still leaves every host holding its
+certificate and its tunnels, because nothing in that path involves the control
+plane.
+
+`orbit agent run` no longer accepts `-nebula`, `-reload` or `-restart`.
+
+### One process and one unit for every network
+
+A host on three networks used to run three agents under three template unit
+instances. It now runs one process under one unit, `orbit-agent.service`,
+serving every network under `/var/lib/orbit`.
+
+The templated unit was wrong in a way that looked right: a systemd template is
+one shared file, so baking a directory into it meant installing a second network
+silently repointed the first network's instance at the second's directory — two
+healthy-looking units serving one network. The unit now names no network at all,
+and adding one is enrolling into a new directory.
+
+### The agent recovers on its own
+
+- A network whose setup fails is retried with backoff instead of being skipped
+  for the life of the process. A directory not yet mounted was previously
+  permanent until somebody noticed.
+- One broken network no longer stops the others.
+- Nebula is healed on every tick: an instance that failed to start at boot, or
+  died since, is restarted rather than waiting for a new generation that on a
+  settled network never comes.
+- A control plane outage leaves the agent polling and saying so, rather than
+  exiting.
+
+### Installing and running it
+
+- **`orbit agent install`** enrolls a host, writes the service definition, and
+  starts it — systemd on Linux, a LaunchDaemon on macOS. `orbit agent uninstall`
+  reverses it.
+- **`orbitd bootstrap -write-unit`** writes `/etc/orbit/orbit.env` (0600, holding
+  the DSN and the enrollment pepper) and `/etc/systemd/system/orbit-control.service`
+  from values bootstrap already knows. Assembling those by hand is where a real
+  deployment produced an empty `ORBIT_NETWORK`, which systemd expanded to
+  `-mesh =10.42.0.1` and reported as sixty lines of flag help.
+- **`scripts/install.sh`** detects the platform, verifies against `SHA256SUMS`,
+  and installs to `/usr/local/bin`. It enrolls nothing and starts nothing.
+- **A container image and `deploy/compose.yml`** for the control plane, which
+  removes `pg_hba`, firewalld, SELinux, unit files and the CA key's file mode
+  from the problem.
+
+### Diagnostics
+
+When a tunnel did not come up, the answer used to be "read the logs" — a poor
+answer on a host whose problem is that it cannot reach whatever would tell it.
+
+- **`orbit status`** — every network this host joined, whether its data plane is
+  up and why not, when it last reached the control plane, and which states it is
+  stuck in. A network that failed to start appears carrying its error.
+- **`orbit peers`** — the tunnels this host actually holds, from Nebula's own
+  hostmap. The one thing the control plane cannot tell you.
+- **`orbit why <peer>`** — identity, path and policy reported separately,
+  because an expired certificate, a missing tunnel and a denying rule look
+  identical from `ping`. A denial carries the near misses.
+- **`orbit why <src> <dst>`** — against the control plane, both directions from
+  the stored policy. Nebula enforces outbound on the sender and inbound on the
+  receiver, so a flow passes only if both agree, and no single host can compute
+  that.
+
+These read a root-owned unix socket at `/var/lib/orbit/agent.sock`, read-only.
+The rule matching is shared between the agent and the server so the two cannot
+give contradictory answers, and it is cross-checked against two real Nebula
+instances exchanging real TCP connections.
+
+### Fixes
+
+- **A host stayed `enrolled` forever.** The transition to `active` was written
+  on one side and never triggered from the other, so a host that had enrolled,
+  applied its configuration and reported back still showed as never having run.
+- **The control plane did not report its own applied configuration.** It is a
+  mesh member like any other host, and convergence counted it as permanently
+  behind.
+- **Unbounded shutdown waits** in `mesh.Node.Close` and `Store.Close`. A CI job
+  found the first by hanging for ten minutes; the second turned a failed startup
+  into what looked like a hang with no error anywhere.
+
+### Documentation
+
+- `docs/policy-model.md` — what Nebula's firewall actually enforces, with file
+  references; what a certificate can carry; measured costs of address-compiled
+  policy at fleet scale; and where the policy model can go.
+- `docs/diagnostics.md` — the status socket and the commands on it.
+
+### Upgrading from v0.2.x
+
+**Managed hosts.** The per-network template units are gone. On each host:
+
+```bash
+systemctl disable --now 'orbit-agent@*'   # whatever instances exist
+systemctl disable --now 'nebula@*'        # the supervised nebula, if any
+sudo orbit agent install -url https://<control-plane> -code <new-code> -network <slug>
+```
+
+`agent install` writes the new single unit and starts it. Existing directories
+under `/var/lib/orbit` are picked up as they are; a host already enrolled does
+not need a new certificate, only the new unit — but minting a fresh enrollment
+code is the simplest way to be sure the state file matches this version.
+
+**The control plane.** `orbitd` is compatible in place. Re-running
+`orbitd bootstrap -write-unit` on an existing network regenerates the unit and
+env file without touching the database. Hand edits to either are lost, which is
+the intended behaviour.
+
+**Removed flags.** `orbit agent run -nebula`, `-reload` and `-restart` no longer
+exist. Anything passing them fails at startup rather than silently ignoring them.
+
 ## v0.2.1
 
 Fixes three bugs found by deploying v0.2.0 to a real host. All three are on the
