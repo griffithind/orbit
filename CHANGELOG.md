@@ -11,6 +11,17 @@ without one.
 
 ## Unreleased
 
+### Fixed
+
+- **The compose file could never reach its own database.** `orbitd` runs with
+  `network_mode: host`, which takes it off the compose network — so it cannot
+  resolve `postgres` by service name, and the only address the two share is the
+  host's loopback. Postgres published nothing, so every `orbitd` command failed
+  with `connection refused` against a database the same run had just reported
+  healthy. Postgres now publishes `127.0.0.1:5432` — loopback only, because the
+  bare `5432:5432` form binds every interface and Docker's port rules bypass
+  firewalld.
+
 ### Added
 
 - **`scripts/setup-control-plane.sh`** — one script that takes a fresh

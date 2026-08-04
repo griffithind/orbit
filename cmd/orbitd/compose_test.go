@@ -1,0 +1,128 @@
+package main
+
+import (
+	"os"
+	"strings"
+	"testing"
+
+	"go.yaml.in/yaml/v3"
+)
+
+// deploy/compose.yml, checked for the one thing that made it unrunnable.
+//
+// orbitd runs with network_mode: host, which is not optional — nebula
+// advertises the address it believes it is reachable at, and behind a bridge
+// NAT it would hand every managed host a container address nobody can dial.
+//
+// The consequence is easy to miss: a host-networked service is OFF the compose
+// network, so it cannot resolve another service by name and can only reach one
+// through a published port on the host. The file shipped with DSNs pointing at
+// 127.0.0.1:5432 and a Postgres that published nothing, so every orbitd command
+// failed with "connection refused" against a database the same compose run had
+// just reported healthy.
+
+type composeFile struct {
+	Services map[string]struct {
+		NetworkMode string            `yaml:"network_mode"`
+		Environment map[string]string `yaml:"environment"`
+		Ports       []string          `yaml:"ports"`
+	} `yaml:"services"`
+}
+
+func loadCompose(t *testing.T) composeFile {
+	t.Helper()
+	b, err := os.ReadFile("../../deploy/compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c composeFile
+	if err := yaml.Unmarshal(b, &c); err != nil {
+		t.Fatalf("deploy/compose.yml does not parse: %v", err)
+	}
+	if len(c.Services) == 0 {
+		t.Fatal("deploy/compose.yml declares no services")
+	}
+	return c
+}
+
+// TestHostNetworkedServicesCanReachWhatTheirDSNsName.
+//
+// For every service on host networking, every 127.0.0.1:<port> its environment
+// names must be published on 127.0.0.1 by some service — because that is the
+// only way the two can meet once one of them has left the compose network.
+func TestHostNetworkedServicesCanReachWhatTheirDSNsName(t *testing.T) {
+	c := loadCompose(t)
+
+	published := map[string]string{} // port -> the service publishing it
+	for name, svc := range c.Services {
+		for _, p := range svc.Ports {
+			// "127.0.0.1:5432:5432" -> host address, host port, container port.
+			parts := strings.Split(p, ":")
+			if len(parts) == 3 {
+				published[parts[1]] = name
+			}
+		}
+	}
+
+	for name, svc := range c.Services {
+		if svc.NetworkMode != "host" {
+			continue
+		}
+		for key, val := range svc.Environment {
+			for _, port := range loopbackPorts(val) {
+				if _, ok := published[port]; !ok {
+					t.Errorf("service %q is on host networking and %s names "+
+						"127.0.0.1:%s, but nothing publishes that port on the host.\n"+
+						"A host-networked service is off the compose network, so it "+
+						"cannot reach another service by name — every command against "+
+						"this address fails with 'connection refused' while the target "+
+						"reports healthy.", name, key, port)
+				}
+			}
+		}
+	}
+}
+
+// TestNothingIsPublishedOnEveryInterface.
+//
+// "5432:5432" binds 0.0.0.0, which would put Postgres on the public internet —
+// and docker's published ports bypass firewalld, so firewall-cmd would not save
+// it. Every published port must name an address.
+func TestNothingIsPublishedOnEveryInterface(t *testing.T) {
+	c := loadCompose(t)
+
+	for name, svc := range c.Services {
+		for _, p := range svc.Ports {
+			if len(strings.Split(p, ":")) < 3 {
+				t.Errorf("service %q publishes %q, which binds every interface. "+
+					"Docker's port rules bypass firewalld, so this is reachable from "+
+					"the internet whatever firewall-cmd says. Name an address: "+
+					"\"127.0.0.1:%s\".", name, p, p)
+			}
+		}
+	}
+}
+
+// loopbackPorts pulls the ports out of any 127.0.0.1:<port> or
+// localhost:<port> in a value, which in practice means the DSNs.
+func loopbackPorts(s string) []string {
+	var out []string
+	for _, host := range []string{"127.0.0.1:", "localhost:"} {
+		rest := s
+		for {
+			i := strings.Index(rest, host)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(host):]
+			end := strings.IndexFunc(rest, func(r rune) bool { return r < '0' || r > '9' })
+			if end < 0 {
+				end = len(rest)
+			}
+			if end > 0 {
+				out = append(out, rest[:end])
+			}
+		}
+	}
+	return out
+}
