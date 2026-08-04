@@ -3,6 +3,7 @@
 #   1. Put a passphrase in ./ca-pass and a database password in ./.env
 #   2. docker compose run --rm orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
 #   3. docker compose run --rm orbitd bootstrap -network prod -cidr 10.42.0.0/16
+#      (the CA key lands in the cakey volume; the image works there by default)
 #   4. Put the printed network id in ./.env as ORBIT_NETWORK
 #   5. docker compose up -d
 #

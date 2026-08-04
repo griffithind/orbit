@@ -13,6 +13,15 @@ without one.
 
 ### Fixed
 
+- **The container wrote the CA key into a throwaway container.** `orbitd
+  bootstrap` defaults `-ca-key` to the relative path `ca.key`, and the image set
+  no `WORKDIR`, so it resolved under `/home/nonroot` rather than in the
+  `/var/lib/orbit` volume — meaning `docker compose run --rm orbitd bootstrap`
+  wrote the mesh's root CA key into a container that was then deleted. Nothing
+  fails at the time: the network works until the first certificate renewal, at
+  which point nothing can issue one and every host has to re-enrol by hand. The
+  image now works in the volume and owns it, so the default is correct.
+
 - **Nothing published the container image.** `deploy/compose.yml` names
   `ghcr.io/griffithind/orbit`, and no workflow ever built or pushed it — so
   `docker compose up -d` failed on the pull and only `--build` worked. A compose
