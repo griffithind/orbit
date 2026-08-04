@@ -13,6 +13,14 @@ without one.
 
 ### Fixed
 
+- **Nothing published the container image.** `deploy/compose.yml` names
+  `ghcr.io/griffithind/orbit`, and no workflow ever built or pushed it — so
+  `docker compose up -d` failed on the pull and only `--build` worked. A compose
+  file naming an image that does not exist is worse than one with no image at
+  all, because the failure reads as a registry problem. The release workflow now
+  builds and pushes linux/amd64 and linux/arm64 to GHCR, tagged with both
+  spellings of the version (`0.3.1` and `v0.3.1`) plus `latest`.
+
 - **`orbitd bootstrap -write-unit` produced a unit that could not start.** The
   generated unit runs as `User=orbit` and nothing created that account, so
   `systemctl enable --now orbit-control` failed with "Failed to determine user

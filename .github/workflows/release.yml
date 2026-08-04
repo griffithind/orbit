@@ -10,6 +10,9 @@ on:
 
 permissions:
   contents: write
+  # The container image goes to this repository's package registry, which is
+  # what deploy/compose.yml already names.
+  packages: write
 
 jobs:
   # The tag is not trusted to mean the code is good. A release is cut only from
@@ -226,3 +229,58 @@ jobs:
             --notes-file "$notes" \
             --verify-tag \
             dist/*
+
+  # The container image deploy/compose.yml pulls.
+  #
+  # It existed as a Dockerfile and a compose file that named
+  # ghcr.io/griffithind/orbit, and nothing published it — so `docker compose up
+  # -d` failed on the pull and only `--build` worked. A compose file naming an
+  # image that does not exist is worse than one with no image at all, because
+  # the failure looks like a registry problem.
+  #
+  # After build, not in parallel: an image published for a release whose
+  # binaries failed to build would be the only artifact of a release that does
+  # not exist.
+  image:
+    name: image
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # linux/amd64 and linux/arm64, the two platforms orbitd is published for.
+      # VERSION is stamped from the tag exactly as the binaries are, so
+      # `orbitd version` inside the container matches the release it came from.
+      # Both spellings of the version. compose.yml's ORBIT_VERSION and
+      # install.sh's --version are un-prefixed (0.3.1), the git tag is not
+      # (v0.3.1), and an operator should not have to know which convention this
+      # particular field follows.
+      - name: version tags
+        id: v
+        run: |
+          set -eu
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "bare=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.v.outputs.bare }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.v.outputs.bare }}
+            ghcr.io/${{ github.repository }}:${{ steps.v.outputs.tag }}
+            ghcr.io/${{ github.repository }}:latest
