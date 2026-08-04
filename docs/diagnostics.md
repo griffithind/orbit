@@ -1,6 +1,7 @@
 # Orbit — Diagnostics
 
-Design for `orbit status`, `orbit peers` and `orbit why`.
+The agent status socket, and the commands built on it: `orbit status`,
+`orbit peers`, and `orbit why` in both its local and bidirectional forms.
 
 ---
 
@@ -60,6 +61,12 @@ GET /v1/networks/{slug}/peers
 GET /v1/networks/{slug}/explain?peer=&proto=&port=
 ```
 
+and one on the control plane's admin API, for the bidirectional form:
+
+```
+GET /v1/networks/{ref}/reachability?src=&dst=&proto=&port=     policy:read
+```
+
 `/v1/status` returns, per network: the slug, the agent's state, the certificate
 (name, groups, networks, not-after), the applied and available config and
 blocklist epochs, the time and outcome of the last poll, the last error if any,
@@ -101,10 +108,14 @@ protocol and port — and if none, say so plainly.
 
 ### 4.1 Reading the policy layer honestly
 
-The agent holds the *rendered* Nebula configuration, not a `policy.Ruleset`.
-The explainer parses the firewall section back out of the applied configuration,
-which is better than consulting what we believe we sent: it explains what is
-actually in force, including anything an operator added in `ModeFragment`.
+> Two things in this section were wrong and are corrected in §6.3: Nebula does
+> the parsing, and the cross-check needs no build tag. The reasoning below is
+> kept because the conclusion — that the matcher must be held honest by
+> observation rather than by promise — is what drove the design.
+
+The agent holds the *rendered* Nebula configuration, not a `policy.Ruleset`. It
+asks about what is actually in force, including anything an operator added in
+`ModeFragment`, rather than about what we believe we sent.
 
 Matching mirrors the grammar in [policy-model.md §1.2](policy-model.md):
 
@@ -112,14 +123,13 @@ Matching mirrors the grammar in [policy-model.md §1.2](policy-model.md):
 proto AND port AND (ca_sha OR ca_name) AND local_cidr AND (group OR host OR cidr)
 ```
 
-**This is a second implementation of Nebula's matcher, and second
+**The matcher is a second implementation of Nebula's, and second
 implementations drift.** `FirewallTable.match` is unexported and
 `Firewall.Drop` needs a `*HostInfo` we cannot construct, so there is no way to
-delegate. The mitigation is a cross-check rather than a promise: an e2e test,
-built with Nebula's `e2e_testing` tag, establishes real tunnels, sends a corpus
-of packets across a matrix of protocols, ports and group memberships, and
-asserts that the explainer's verdict agrees with whether the packet actually
-arrived. A divergence is a test failure, not a support ticket.
+delegate the verdict. The mitigation is a cross-check rather than a promise:
+`e2e/why_test.go` boots two real Nebula instances, opens real TCP connections
+across a matrix of ports, and asserts the explainer agreed with what happened.
+A divergence is a test failure, not a support ticket.
 
 ### 4.2 What a local answer cannot know
 
@@ -146,12 +156,17 @@ knows what policy says and nothing about whether a handshake completed.
 ## 5. Commands
 
 ```
-orbit status                      # all networks, one screen
-orbit peers [-network <slug>]     # hostmap table
-orbit why <peer> [-proto] [-port] # local explanation
+orbit status                        # all networks, one screen
+orbit peers [-network <slug>]       # hostmap table
+orbit why <peer>      [-proto] [-port]   # this host: identity, path, its own rules
+orbit why <src> <dst> [-proto] [-port]   # the control plane: both directions
 ```
 
-`-json` on all three. The human format is the default because these are read by
+`orbit why` dispatches on the number of operands rather than on a mode flag,
+because it is one question — may these two talk — asked from the two places
+that can answer parts of it.
+
+`-json` on all of them. The human format is the default because these are read by
 people under time pressure; the JSON is for scripts and for `bugreport` later.
 
 `orbit status` with no agent running must say "the agent is not running" and
@@ -169,10 +184,10 @@ diagnose a broken host, so its own failure mode has to be legible.
 3. ~~The explainer, its cross-check test, and node-local `orbit why`.~~
    **Built.** `internal/agent/explain.go`, `e2e/why_test.go`,
    `cmd/orbit/why.go`.
-4. Control-plane `orbit why <src> <dst>`, which needs no new agent surface —
-   it reads compiled rulesets the server already has. **Not built**: until it
-   is, `orbit why` says so in its own output rather than implying the answer
-   is complete.
+4. ~~Control-plane `orbit why <src> <dst>`.~~ **Built.**
+   `internal/api/reachability.go` and `whyBetween` in `cmd/orbit/why.go`.
+
+All four are done.
 
 ### 6.1 What step 1 settled
 
@@ -259,3 +274,39 @@ that sends an operator looking in the wrong place, so `Decision` carries
 **Policy is answerable with the data plane down.** The rules are on disk, so
 the one layer that does not need a running Nebula still answers — which matters
 because the host somebody runs this against is usually the broken one.
+
+### 6.4 What step 4 settled
+
+**One matcher, two callers, in its own package.** The node-local command and
+the control-plane command answer different questions about the same rules, and
+if they came from different code an operator could be told one thing by the
+server and the opposite by the machine — worse than either command existing.
+So the matcher moved to `internal/fwmatch`, and `e2e/reachability_test.go`
+asserts the two agree over a matrix of protocols and ports, with a real agent
+running the configuration the control plane rendered.
+
+Only the OUTBOUND half is comparable between them, and the test says so. That
+is src's own table, which both ends can see; the server's inbound half is dst's
+table, which src has no access to at all. That asymmetry is the reason the
+bidirectional command needed to exist.
+
+**Compiled rules go back through nebula's parser.** `nebulacfg.FirewallYAML`
+renders a compiled `policy.Ruleset` into a firewall section, and
+`fwmatch.LoadRulesFromString` reads it back. Converting `policy.Rule` to a
+matcher rule field by field would have re-implemented the port-range and
+protocol parsing this whole arrangement exists to avoid — and it would have let
+the server's answer drift from the agent's in exactly the place nobody would
+look. It also means a compiler bug that emits something nebula cannot read
+surfaces here rather than at four hundred hosts.
+
+**Both halves print even when one settles it.** Which END denies a flow decides
+whose policy an operator has to change, so a bare "DENIED" is not an answer.
+
+**A network on per-role rules is not a denial.** There is no document to
+compile, and reporting an empty ruleset would render as "denied" and send
+somebody to edit a policy that is not in force.
+
+**The server's caveat mirrors the agent's.** The node-local command says it can
+only see one direction; this one says it describes what the stored policy
+MEANS, not what any host has applied or whether a tunnel is up. Neither
+substitutes for the other, and both say so.

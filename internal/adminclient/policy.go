@@ -88,3 +88,23 @@ func (e *APIError) FirewallSourceChange() wire.FirewallSourceChangeError {
 	_ = json.Unmarshal(e.Body, &body)
 	return body
 }
+
+// Reachability answers whether src may reach dst, in both directions.
+//
+// The complete policy answer, which no host can give: a machine knows its own
+// rules and cannot read its peer's. It says nothing about whether a tunnel is
+// up — that is `orbit why` on the host itself — so the two commands answer
+// different questions and neither substitutes for the other.
+//
+// policy:read, because it stores nothing and proposes nothing.
+func (c *Client) Reachability(ctx context.Context, ref, src, dst, proto, port string) (Result[wire.ReachabilityResponse], error) {
+	q := url.Values{"src": {src}, "dst": {dst}}
+	if proto != "" {
+		q.Set("proto", proto)
+	}
+	if port != "" {
+		q.Set("port", port)
+	}
+	return send[wire.ReachabilityResponse](ctx, c, http.MethodGet,
+		"/v1/networks/"+url.PathEscape(ref)+"/reachability", q, nil)
+}

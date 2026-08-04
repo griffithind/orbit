@@ -20,8 +20,8 @@ import (
 	"github.com/slackhq/nebula/overlay"
 	"github.com/slackhq/nebula/service"
 
-	"github.com/griffithind/orbit/internal/agent"
 	orbitca "github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/fwmatch"
 )
 
 // The cross-check that keeps `orbit why` honest.
@@ -299,7 +299,7 @@ func TestExplainerAgreesWithNebulaOnOutbound(t *testing.T) {
 	}
 	waitForTunnel(t, cliSvc, 443)
 
-	_, out, err := agent.LoadRules(cliCfg)
+	_, out, err := fwmatch.LoadRules(cliCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestExplainerAgreesWithNebulaOnOutbound(t *testing.T) {
 	// lets group and host rules be decided at all.
 	var allowed, denied bool
 	for _, p := range ports {
-		q := agent.Query{
+		q := fwmatch.Query{
 			PeerAddr:      netip.MustParseAddr(lighthouseAddr),
 			LocalAddr:     netip.MustParseAddr(clientAddr),
 			Proto:         firewall.ProtoTCP,
@@ -317,7 +317,7 @@ func TestExplainerAgreesWithNebulaOnOutbound(t *testing.T) {
 			PeerName:      "lighthouse",
 			PeerGroups:    []string{"lh", "infra"},
 		}
-		predicted := agent.Decide(out, q).Allowed
+		predicted := fwmatch.Decide(out, q).Allowed
 		actual := reachable(t, cliSvc, lighthouseAddr, p)
 		t.Logf("tcp/%-5d predicted=%-5v actual=%v", p, predicted, actual)
 		allowed, denied = allowed || actual, denied || !actual
@@ -365,14 +365,14 @@ func TestExplainerAgreesWithNebulaOnInbound(t *testing.T) {
 	}
 	waitForTunnel(t, cliSvc, 443)
 
-	in, _, err := agent.LoadRules(lhCfg)
+	in, _, err := fwmatch.LoadRules(lhCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var allowed, denied bool
 	for _, p := range ports {
-		q := agent.Query{
+		q := fwmatch.Query{
 			PeerAddr:      netip.MustParseAddr(clientAddr),
 			LocalAddr:     netip.MustParseAddr(lighthouseAddr),
 			Proto:         firewall.ProtoTCP,
@@ -381,7 +381,7 @@ func TestExplainerAgreesWithNebulaOnInbound(t *testing.T) {
 			PeerName:      "client",
 			PeerGroups:    []string{"app", "edge"},
 		}
-		predicted := agent.Decide(in, q).Allowed
+		predicted := fwmatch.Decide(in, q).Allowed
 		actual := reachable(t, cliSvc, lighthouseAddr, p)
 		t.Logf("tcp/%-5d predicted=%-5v actual=%v", p, predicted, actual)
 		allowed, denied = allowed || actual, denied || !actual
@@ -435,7 +435,7 @@ firewall:
 		t.Fatal(err)
 	}
 
-	_, out, err := agent.LoadRules(path)
+	_, out, err := fwmatch.LoadRules(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -73,6 +73,10 @@ func (s *Server) resourceRoutes() []route {
 		// scope should match the operation being rehearsed, not the fact that
 		// nothing was written this time.
 		a("POST /v1/networks/{ref}/policy/check", "policy:write", s.handleCheckPolicy),
+		// The bidirectional reachability answer. policy:read, not policy:write:
+		// it stores nothing and proposes nothing, it reads what is already in
+		// force — which is what makes it usable from an on-call token.
+		a("GET /v1/networks/{ref}/reachability", "policy:read", s.handleReachability),
 
 		a("POST /v1/roles", "roles:write", s.handleCreateRole),
 		a("GET /v1/roles", "roles:read", s.handleListRoles),

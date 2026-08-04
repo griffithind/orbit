@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/fwmatch"
+	"github.com/griffithind/orbit/internal/wire"
 )
 
 // The status socket reads from goroutines that are still running.
@@ -204,7 +206,7 @@ func TestWhyRendersADenialWithTheNearMisses(t *testing.T) {
 	out = &buf
 	t.Cleanup(func() { out = prev })
 
-	reaches := agent.Rule{Proto: 6, StartPort: 22, EndPort: 22, CIDR: "10.42.0.9/32"}
+	reaches := fwmatch.Rule{Proto: 6, StartPort: 22, EndPort: 22, CIDR: "10.42.0.9/32"}
 	printWhy(agent.Explanation{
 		Network:      "prod",
 		Peer:         "10.42.0.9",
@@ -221,17 +223,17 @@ func TestWhyRendersADenialWithTheNearMisses(t *testing.T) {
 		Running:       true,
 		TunnelUp:      true,
 		CurrentRemote: "203.0.113.7:4242",
-		Outbound: agent.Decision{
+		Outbound: fwmatch.Decision{
 			Considered: 4,
-			Near: []agent.RuleOutcome{
-				{Rule: reaches, Outcome: agent.Misses, Reason: "port"},
+			Near: []fwmatch.RuleOutcome{
+				{Rule: reaches, Outcome: fwmatch.Misses, Reason: "port"},
 			},
 		},
-		Inbound: agent.Decision{
+		Inbound: fwmatch.Decision{
 			Considered: 4,
-			Matched: []agent.RuleOutcome{{
-				Rule:    agent.Rule{Proto: 0, StartPort: 0, EndPort: 0, CIDR: "10.42.0.0/16"},
-				Outcome: agent.Matches,
+			Matched: []fwmatch.RuleOutcome{{
+				Rule:    fwmatch.Rule{Proto: 0, StartPort: 0, EndPort: 0, CIDR: "10.42.0.0/16"},
+				Outcome: fwmatch.Matches,
 			}},
 			Allowed: true,
 		},
@@ -268,8 +270,8 @@ func TestWhySaysWhatItCannotDecide(t *testing.T) {
 	printWhy(agent.Explanation{
 		Network: "prod", PeerResolved: "10.42.0.9", Proto: "tcp", Port: "443",
 		PeerKnown: false, Running: true,
-		Outbound: agent.Decision{Considered: 2, Undecidable: true},
-		Inbound:  agent.Decision{Considered: 2, Undecidable: true},
+		Outbound: fwmatch.Decision{Considered: 2, Undecidable: true},
+		Inbound:  fwmatch.Decision{Considered: 2, Undecidable: true},
 	})
 
 	got := buf.String()
@@ -278,6 +280,61 @@ func TestWhySaysWhatItCannotDecide(t *testing.T) {
 	}
 	if strings.Contains(got, "no rule permits") {
 		t.Errorf("an undecidable question rendered as a denial:\n%s", got)
+	}
+}
+
+// TestReachabilityRendersBothEndsEvenWhenOneSettlesIt.
+//
+// Which END denies a flow decides whose policy an operator has to change, so a
+// bare "DENIED" is not an answer. Both halves print every time.
+func TestReachabilityRendersBothEndsEvenWhenOneSettlesIt(t *testing.T) {
+	var buf bytes.Buffer
+	prev := out
+	out = &buf
+	t.Cleanup(func() { out = prev })
+
+	printReachability(newRenderer(), wire.ReachabilityResponse{
+		Network: "prod",
+		Src:     wire.PolicyCheckHost{Name: "web-01", OverlayAddrs: []string{"10.42.0.7"}},
+		Dst:     wire.PolicyCheckHost{Name: "db-01", OverlayAddrs: []string{"10.42.0.9"}},
+		Proto:   "tcp", Port: "5432",
+		FirewallSource: "policy", PolicyVersion: 12,
+		Allowed: false,
+		Outbound: fwmatch.Decision{
+			Considered: 3, Allowed: true,
+			Matched: []fwmatch.RuleOutcome{{
+				Rule:    fwmatch.Rule{Proto: 6, StartPort: 5432, EndPort: 5432, CIDR: "10.42.0.9/32"},
+				Outcome: fwmatch.Matches,
+			}},
+		},
+		Inbound: fwmatch.Decision{
+			Considered: 2,
+			Near: []fwmatch.RuleOutcome{{
+				Rule:    fwmatch.Rule{Proto: 6, StartPort: 443, EndPort: 443, CIDR: "10.42.0.7/32"},
+				Outcome: fwmatch.Misses, Reason: "port",
+			}},
+		},
+	})
+
+	got := buf.String()
+	t.Log("\n" + got)
+
+	for _, want := range []string{
+		"web-01", "db-01", "DENIED",
+		"outbound", "allowed by", // the sender permits it
+		"inbound", "no rule permits", // and the receiver does not — that is the fix site
+		"port 443", // the near miss on the receiver
+		"policy version 12",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the answer is missing %q:\n%s", want, got)
+		}
+	}
+
+	// And it must not imply it knows what the hosts are running.
+	if !strings.Contains(got, "stored policy means") {
+		t.Errorf("the output does not distinguish configured intent from what is "+
+			"actually applied:\n%s", got)
 	}
 }
 

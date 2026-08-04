@@ -91,6 +91,13 @@ sudo orbit peers                       # the tunnels it actually holds
 sudo orbit why 10.42.0.9 -port 5432    # and why it can or cannot reach one
 ```
 
+From your laptop, the same question with two hosts is answered by the control
+plane, in both directions at once:
+
+```bash
+orbit why web-01 db-01 -proto tcp -port 5432
+```
+
 `status` is the agent's own view; `peers` is nebula's hostmap, which is the one
 thing the control plane cannot tell you; `why` separates an expired
 certificate from a missing tunnel from a denying rule, which all look identical

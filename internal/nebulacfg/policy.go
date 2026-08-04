@@ -1,6 +1,10 @@
 package nebulacfg
 
 import (
+	"fmt"
+
+	"go.yaml.in/yaml/v3"
+
 	"github.com/griffithind/orbit/internal/policy"
 )
 
@@ -63,4 +67,24 @@ func ruleFromPolicy(r policy.Rule) Rule {
 		CIDR:      r.CIDR,
 		LocalCIDR: r.LocalCIDR,
 	}
+}
+
+// FirewallYAML renders a firewall section on its own.
+//
+// It exists so a compiled ruleset can be handed back to NEBULA'S OWN parser
+// rather than interpreted a second time. internal/fwmatch answers reachability
+// questions by collecting rules through nebula.AddFirewallRulesFromConfig, and
+// this is what lets the control plane ask those questions about a ruleset it
+// has just compiled and never written to a file.
+//
+// The alternative — converting policy.Rule to a matcher rule field by field —
+// would re-implement the port-range and protocol parsing that this whole
+// arrangement exists to avoid, and would let the server's answer drift from the
+// agent's.
+func FirewallYAML(fw *Firewall) (string, error) {
+	out, err := yaml.Marshal(map[string]any{"firewall": fw})
+	if err != nil {
+		return "", fmt.Errorf("render firewall: %w", err)
+	}
+	return string(out), nil
 }

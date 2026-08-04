@@ -10,6 +10,8 @@ package wire
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/griffithind/orbit/internal/fwmatch"
 )
 
 // EnrollRequest is posted to the public enroll endpoint.
@@ -1220,4 +1222,38 @@ type AuditRecordResponse struct {
 	TargetID     string          `json:"target_id,omitempty"`
 	Meta         json.RawMessage `json:"meta,omitempty"`
 	SourceIP     string          `json:"source_ip,omitempty"`
+}
+
+// ReachabilityResponse answers "may src reach dst on this port".
+//
+// The bidirectional answer, which no node-local command can give: a host knows
+// its own rules and cannot read its peer's. Both halves are compiled from the
+// STORED policy, so this says what the network's configuration means — not
+// whether a tunnel happens to be up, which only the hosts know.
+type ReachabilityResponse struct {
+	Network string          `json:"network"`
+	Src     PolicyCheckHost `json:"src"`
+	Dst     PolicyCheckHost `json:"dst"`
+	Proto   string          `json:"proto"`
+	Port    string          `json:"port"`
+
+	// FirewallSource is "policy" or "role". A network still on per-role rules
+	// has no policy document to compile, and saying so is the answer rather
+	// than reporting an empty ruleset as a denial.
+	FirewallSource string `json:"firewall_source"`
+	PolicyVersion  int64  `json:"policy_version,omitempty"`
+
+	// Allowed is the whole question: nebula enforces outbound on the sender and
+	// inbound on the receiver, so the flow passes only if BOTH agree.
+	Allowed bool `json:"allowed"`
+
+	// Outbound is src's table judged against dst; Inbound is dst's table judged
+	// against src. Separate, because which end denies it decides which host's
+	// policy an operator has to change.
+	Outbound fwmatch.Decision `json:"outbound"`
+	Inbound  fwmatch.Decision `json:"inbound"`
+
+	// Note carries anything that bounds the answer — a network with no policy,
+	// a mode where one direction is not enforced.
+	Note string `json:"note,omitempty"`
 }
