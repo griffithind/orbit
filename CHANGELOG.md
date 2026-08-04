@@ -9,7 +9,11 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
-## Unreleased
+## v0.3.1
+
+Three defects in the deployment paths v0.3.0 introduced, all found by walking a
+fresh host rather than by a test. Nothing else changed: same binaries, same
+behaviour once running.
 
 ### Fixed
 
