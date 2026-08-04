@@ -173,8 +173,7 @@ chmod 0600 /var/lib/orbit/ca.key
 `0600` is required rather than tidy: a key with any group or other bit set is
 refused at load, so a `0644` key fails at startup instead of quietly working.
 
-**No TPM?** Cloud VMs frequently have none — Linode does not expose one. Use
-`--with-key=host`. That still keeps the passphrase out of `ps` and out of
+**No TPM?** Many cloud VMs expose none. Use `--with-key=host`. That still keeps the passphrase out of `ps` and out of
 anything that logs the environment, but it will not protect a stolen disk image,
 which is the threat `host+tpm2` exists for. Know which one you have.
 
@@ -386,7 +385,7 @@ orbit audit -action token.created
 ```
 
 ```
-system  iraklisk  token.created  {"via":"orbitd token create","name":"break-glass"}
+system  ops-admin  token.created  {"via":"orbitd token create","name":"break-glass"}
 ```
 
 An offline-created token is attributed to `system`, not to a user: there is no
