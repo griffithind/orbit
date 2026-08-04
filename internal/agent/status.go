@@ -262,6 +262,9 @@ type StatusServer struct {
 	// Peers answers for one network. ErrUnknownNetwork becomes a 404; anything
 	// else is a 500.
 	Peers func(ctx context.Context, network string) (PeerReport, error)
+
+	// Explain answers whether traffic to a peer would pass.
+	Explain func(ctx context.Context, network string, req ExplainRequest) (Explanation, error)
 }
 
 // ErrUnknownNetwork is a slug this host has not joined.
@@ -307,6 +310,29 @@ func (s *StatusServer) Serve(ctx context.Context) error {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		default:
 			writeStatusJSON(w, rep)
+		}
+	})
+	mux.HandleFunc("GET /v1/networks/{slug}/explain", func(w http.ResponseWriter, r *http.Request) {
+		if s.Explain == nil {
+			http.Error(w, "explain is not served here", http.StatusNotFound)
+			return
+		}
+		q := r.URL.Query()
+		ex, err := s.Explain(r.Context(), r.PathValue("slug"), ExplainRequest{
+			Peer:  q.Get("peer"),
+			Proto: q.Get("proto"),
+			Port:  q.Get("port"),
+		})
+		switch {
+		case errors.Is(err, ErrUnknownNetwork):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case err != nil:
+			// A bad protocol, an unresolvable peer: the caller's question was
+			// malformed, not the agent's state. 400 so the CLI can map it to a
+			// usage exit rather than telling somebody their agent is broken.
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			writeStatusJSON(w, ex)
 		}
 	})
 
@@ -392,6 +418,27 @@ func FetchPeers(ctx context.Context, path, network string) (PeerReport, error) {
 	return rep, err
 }
 
+// FetchExplain asks a running agent whether traffic to a peer would pass.
+func FetchExplain(ctx context.Context, path, network string, req ExplainRequest) (Explanation, error) {
+	q := url.Values{}
+	q.Set("peer", req.Peer)
+	if req.Proto != "" {
+		q.Set("proto", req.Proto)
+	}
+	if req.Port != "" {
+		q.Set("port", req.Port)
+	}
+	var ex Explanation
+	err := fetch(ctx, path,
+		"/v1/networks/"+url.PathEscape(network)+"/explain?"+q.Encode(), &ex)
+	return ex, err
+}
+
+// ErrBadQuestion is a request the agent could not make sense of — an unknown
+// protocol, a peer that resolves to nothing. Distinct from a broken agent
+// because the remedy is to retype the command.
+var ErrBadQuestion = errors.New("the question could not be answered as asked")
+
 // fetch is the only client of the socket, so the wire format has exactly one
 // implementation on each side and no caller hand-rolls a unix transport.
 func fetch(ctx context.Context, path, route string, into any) error {
@@ -433,6 +480,10 @@ func fetch(ctx context.Context, path, route string, into any) error {
 		// would leave the caller printing "404" at somebody who mistyped a slug.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("%w: %s", ErrUnknownNetwork, strings.TrimSpace(string(body)))
+	}
+	if resp.StatusCode == http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("%w: %s", ErrBadQuestion, strings.TrimSpace(string(body)))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("agent returned %s", resp.Status)

@@ -74,6 +74,8 @@ func main() {
 		err = statusCmd(ctx, os.Args[2:])
 	case "peers":
 		err = peersCmd(ctx, os.Args[2:])
+	case "why":
+		err = whyCmd(ctx, os.Args[2:])
 	case "audit":
 		err = auditCmd(ctx, os.Args[2:])
 	case "version", "-version", "--version":
@@ -115,6 +117,7 @@ func usage() {
   agent      install, uninstall, enroll, run, recover — what runs ON a managed host
   status     what the agent on THIS host is doing, on every network it joined
   peers      the tunnels THIS host actually has, from nebula's own hostmap
+  why        why THIS host can or cannot reach a peer
   version    print the build version
 
 Every command takes -json, which emits the API response verbatim.

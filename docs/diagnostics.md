@@ -166,12 +166,13 @@ diagnose a broken host, so its own failure mode has to be legible.
    `internal/agent/status.go` and `cmd/orbit/status.go`.
 2. ~~`/v1/networks/{slug}/peers` and `orbit peers`.~~ **Built.**
    `Embedded.Peers` and `cmd/orbit/peers.go`.
-3. The explainer, its cross-check test, and node-local `orbit why`.
+3. ~~The explainer, its cross-check test, and node-local `orbit why`.~~
+   **Built.** `internal/agent/explain.go`, `e2e/why_test.go`,
+   `cmd/orbit/why.go`.
 4. Control-plane `orbit why <src> <dst>`, which needs no new agent surface —
-   it reads compiled rulesets the server already has.
-
-Step 3 is where the risk is, and it should not ship without the cross-check in
-4.1.
+   it reads compiled rulesets the server already has. **Not built**: until it
+   is, `orbit why` says so in its own output rather than implying the answer
+   is complete.
 
 ### 6.1 What step 1 settled
 
@@ -222,3 +223,39 @@ One thing came for free and was worth taking: `Embedded` had recorded *why*
 nebula last exited since it was written, and nothing read it. `Status` now
 carries it, so "nebula NOT running" arrives with the bound port or the refused
 configuration attached instead of sending the reader to a log.
+
+### 6.3 What step 3 settled
+
+**Nebula parses; Orbit only matches.** §4.1 assumed the explainer would read
+the firewall section out of the applied YAML. It does not, and it should not:
+that would be *two* re-implementations, and the parser is the larger and
+fiddlier one — port ranges, `port: fragment`, the `group`/`groups` flattening,
+ICMP's coerced ports, the `local_cidr` default that depends on unsafe networks.
+
+`nebula.AddFirewallRulesFromConfig` is exported and takes any
+`nebula.FirewallInterface`, so handing it a collector makes **nebula** the
+parser. Every quirk above stays upstream's problem and stays correct when
+upstream changes it. Only the matching is ours, which is a much smaller and
+better-specified surface than §4.1 assumed.
+
+**The cross-check runs without root.** §4.1 proposed Nebula's `e2e_testing`
+build tag; that turned out unnecessary. `overlay.NewUserDeviceFromConfig` plus
+`service.New` boots a full Nebula instance on a userspace stack, so
+`e2e/why_test.go` runs *two* of them, opens real TCP connections between them
+through real firewall tables, and asserts the explainer predicted what
+happened. `Drop` does not care what the device is, so the firewall under test
+is the real one. It runs in ordinary CI.
+
+The test also asserts its own matrix produced **both** verdicts. A tunnel that
+never came up would make every port unreachable, the explainer would agree on
+"no" everywhere, and the test would go green having compared nothing.
+
+**Undecidable is not denied.** Without a tunnel there is no peer certificate on
+this host, so a rule selecting by group, host or CA cannot be evaluated at all.
+Reporting that as a denial would be a confident wrong answer in the direction
+that sends an operator looking in the wrong place, so `Decision` carries
+`Undecidable` separately from `Allowed`.
+
+**Policy is answerable with the data plane down.** The rules are on disk, so
+the one layer that does not need a running Nebula still answers — which matters
+because the host somebody runs this against is usually the broken one.

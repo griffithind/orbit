@@ -1,0 +1,562 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/slackhq/nebula"
+	"github.com/slackhq/nebula/config"
+	"github.com/slackhq/nebula/firewall"
+)
+
+// Explaining whether this host may reach a peer.
+//
+// # Why nebula parses the rules and Orbit only matches them
+//
+// The obvious implementation reads the firewall section out of the applied YAML
+// and interprets it. That is two re-implementations, not one: the parser AND
+// the matcher, and the parser is the larger and fiddlier of the two — port
+// ranges, `port: fragment`, the group/groups flattening, ICMP's coerced ports,
+// the proto names, the local_cidr default that depends on whether this host
+// routes unsafe networks.
+//
+// nebula exports both halves of what is needed to avoid that.
+// AddFirewallRulesFromConfig reads the config and calls AddRule on any
+// FirewallInterface, so handing it a collector makes NEBULA the parser and
+// leaves Orbit only the matching. Every quirk above is then upstream's problem
+// and stays correct when upstream changes it.
+//
+// # What is still a second implementation, and how it is held honest
+//
+// The matching is ours. FirewallTable.match is unexported and Firewall.Drop
+// needs a *HostInfo whose fields are unexported, so there is no way to delegate
+// the verdict itself. Second implementations drift, and a diagnostic that
+// confidently reports the wrong answer is worse than none.
+//
+// The mitigation is a cross-check rather than a promise: e2e/why_test.go boots
+// two real nebula instances on userspace devices, opens real TCP connections
+// across a matrix of ports, and asserts the explainer agrees with what actually
+// happened. A divergence is a test failure, not a support ticket.
+//
+// # What a local answer cannot know
+//
+// Our outbound rules are half the story: the peer enforces its own inbound
+// rules against our certificate, and nothing on this host can read them. And
+// without a tunnel there is no peer certificate here, so any rule selecting by
+// group, host or CA cannot be evaluated at all. Both are reported as such
+// rather than guessed — see Unknown.
+
+// Rule is one firewall rule, exactly as nebula parsed it.
+type Rule struct {
+	Incoming  bool     `json:"incoming"`
+	Proto     uint8    `json:"proto"`
+	StartPort int32    `json:"start_port"`
+	EndPort   int32    `json:"end_port"`
+	Groups    []string `json:"groups,omitempty"`
+	Host      string   `json:"host,omitempty"`
+	CIDR      string   `json:"cidr,omitempty"`
+	LocalCIDR string   `json:"local_cidr,omitempty"`
+	CAName    string   `json:"ca_name,omitempty"`
+	CASha     string   `json:"ca_sha,omitempty"`
+}
+
+// String renders a rule the way an operator would have written it.
+func (r Rule) String() string {
+	parts := []string{"proto " + protoName(r.Proto), "port " + portRange(r.StartPort, r.EndPort)}
+	if len(r.Groups) > 0 {
+		parts = append(parts, "groups ["+strings.Join(r.Groups, " ")+"]")
+	}
+	if r.Host != "" {
+		parts = append(parts, "host "+r.Host)
+	}
+	if r.CIDR != "" {
+		parts = append(parts, "cidr "+r.CIDR)
+	}
+	if r.LocalCIDR != "" {
+		parts = append(parts, "local_cidr "+r.LocalCIDR)
+	}
+	if r.CAName != "" {
+		parts = append(parts, "ca_name "+r.CAName)
+	}
+	if r.CASha != "" {
+		parts = append(parts, "ca_sha "+r.CASha)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func protoName(p uint8) string {
+	switch p {
+	case firewall.ProtoAny:
+		return "any"
+	case firewall.ProtoTCP:
+		return "tcp"
+	case firewall.ProtoUDP:
+		return "udp"
+	case firewall.ProtoICMP, firewall.ProtoICMPv6:
+		return "icmp"
+	}
+	return fmt.Sprint(p)
+}
+
+func portRange(start, end int32) string {
+	switch {
+	case start == firewall.PortAny:
+		return "any"
+	case start == firewall.PortFragment:
+		return "fragment"
+	case start == end:
+		return fmt.Sprint(start)
+	}
+	return fmt.Sprintf("%d-%d", start, end)
+}
+
+// ruleCollector is a nebula.FirewallInterface that records instead of enforcing.
+type ruleCollector struct{ rules []Rule }
+
+var _ nebula.FirewallInterface = (*ruleCollector)(nil)
+
+func (rc *ruleCollector) AddRule(incoming bool, proto uint8, startPort, endPort int32,
+	groups []string, host, cidr, localCidr, caName, caSha string) error {
+	rc.rules = append(rc.rules, Rule{
+		Incoming: incoming, Proto: proto, StartPort: startPort, EndPort: endPort,
+		Groups: slices.Clone(groups), Host: host, CIDR: cidr,
+		LocalCIDR: localCidr, CAName: caName, CASha: caSha,
+	})
+	return nil
+}
+
+// LoadRules reads the firewall out of the configuration nebula is running.
+//
+// configArg is Layout.NebulaConfigArg — a file in authoritative mode and a
+// directory in fragment mode — so in fragment mode this returns the operator's
+// rules alongside Orbit's. That is deliberate: the question is what is in
+// force, not what Orbit believes it sent.
+func LoadRules(configArg string) (inbound, outbound []Rule, err error) {
+	// Discarded: config loading logs at info, and this runs inside a request
+	// whose output is a diagnosis, not a log stream.
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	c := config.NewC(quiet)
+	if err := c.Load(configArg); err != nil {
+		return nil, nil, fmt.Errorf("load %s: %w", configArg, err)
+	}
+
+	var in, out ruleCollector
+	if err := nebula.AddFirewallRulesFromConfig(quiet, true, c, &in); err != nil {
+		return nil, nil, fmt.Errorf("firewall.inbound: %w", err)
+	}
+	if err := nebula.AddFirewallRulesFromConfig(quiet, false, c, &out); err != nil {
+		return nil, nil, fmt.Errorf("firewall.outbound: %w", err)
+	}
+	return in.rules, out.rules, nil
+}
+
+// Query is one question: may this traffic pass?
+type Query struct {
+	// PeerAddr is the other end. For an outbound question it is the
+	// destination; for inbound, the source. Either way it is what nebula's
+	// rules match with host:, cidr: and groups:.
+	PeerAddr netip.Addr
+
+	// LocalAddr is this host's own overlay address, which local_cidr matches.
+	LocalAddr netip.Addr
+
+	// Proto is a firewall.Proto* constant, and Port the DESTINATION port in
+	// both directions (firewall/packet.go). firewall.PortAny asks the weaker
+	// question "is any traffic at all permitted".
+	Proto uint8
+	Port  int32
+
+	// PeerCertKnown is false when this host has no verified certificate for the
+	// peer, which is the case whenever there is no tunnel. Rules selecting by
+	// group, host or CA are then unevaluable, and saying so is the whole point
+	// of carrying this flag.
+	PeerCertKnown bool
+	PeerName      string
+	PeerGroups    []string
+	PeerCAName    string
+	PeerCASha     string
+}
+
+// Outcome is a rule's relationship to a query.
+type Outcome string
+
+const (
+	// Matches: this rule permits the traffic.
+	Matches Outcome = "matches"
+	// Unknown: this rule might permit it, but deciding needs the peer's
+	// certificate and this host does not have one.
+	Unknown Outcome = "unknown"
+	// Misses: this rule does not permit it. Reason says which term failed.
+	Misses Outcome = "misses"
+)
+
+// RuleOutcome is one rule judged against one query.
+type RuleOutcome struct {
+	Rule    Rule    `json:"rule"`
+	Outcome Outcome `json:"outcome"`
+	Reason  string  `json:"reason,omitempty"`
+}
+
+// Decision is the answer for one direction.
+type Decision struct {
+	// Allowed is true only when a rule definitely matches. A query that could
+	// not be decided is Allowed false with Undecidable true — never a quiet
+	// "denied", which would be a confident wrong answer in the direction that
+	// sends an operator looking in the wrong place.
+	Allowed     bool `json:"allowed"`
+	Undecidable bool `json:"undecidable,omitempty"`
+
+	// Matched are the rules that permit it. Near are rules that reach this peer
+	// but fail on protocol or port — the near misses, which are what an
+	// operator wants when the answer is no.
+	Matched []RuleOutcome `json:"matched,omitempty"`
+	Near    []RuleOutcome `json:"near,omitempty"`
+
+	// Considered is how many rules were in this direction's table at all.
+	Considered int `json:"considered"`
+}
+
+// Decide judges a query against one direction's rules.
+func Decide(rules []Rule, q Query) Decision {
+	d := Decision{Considered: len(rules)}
+	for _, r := range rules {
+		oc, reason := judge(r, q)
+		switch oc {
+		case Matches:
+			d.Matched = append(d.Matched, RuleOutcome{Rule: r, Outcome: oc})
+		case Unknown:
+			d.Undecidable = true
+			d.Near = append(d.Near, RuleOutcome{Rule: r, Outcome: oc, Reason: reason})
+		default:
+			// Only rules that could reach this peer are worth showing. A rule
+			// naming a different host is noise; one naming THIS host on the
+			// wrong port is the answer.
+			if reachesPeer(r, q) {
+				d.Near = append(d.Near, RuleOutcome{Rule: r, Outcome: oc, Reason: reason})
+			}
+		}
+	}
+	d.Allowed = len(d.Matched) > 0
+	if d.Allowed {
+		// A definite match settles it; an unevaluable rule elsewhere in the
+		// table cannot make an allowed flow less allowed.
+		d.Undecidable = false
+	}
+	return d
+}
+
+// judge is the match, mirroring the grammar at nebula firewall.go:88:
+//
+//	proto AND port AND (ca_sha OR ca_name) AND local_cidr AND (group OR host OR cidr)
+func judge(r Rule, q Query) (Outcome, string) {
+	if !protoMatches(r.Proto, q.Proto) {
+		return Misses, "protocol"
+	}
+	if !portMatches(r, q.Port) {
+		return Misses, "port"
+	}
+	if r.CAName != "" || r.CASha != "" {
+		if !q.PeerCertKnown {
+			return Unknown, "needs the peer's certificate to check the issuing CA"
+		}
+		if r.CASha != "" && r.CASha != q.PeerCASha && r.CAName != q.PeerCAName {
+			return Misses, "issuing CA"
+		}
+		if r.CASha == "" && r.CAName != q.PeerCAName {
+			return Misses, "issuing CA"
+		}
+	}
+	if !localCIDRMatches(r.LocalCIDR, q.LocalAddr) {
+		return Misses, "local_cidr"
+	}
+	return selectorMatches(r, q)
+}
+
+func protoMatches(rule, want uint8) bool {
+	if rule == firewall.ProtoAny {
+		return true
+	}
+	// ICMP and ICMPv6 share a table in nebula and a name in the config.
+	if isICMP(rule) && isICMP(want) {
+		return true
+	}
+	return rule == want
+}
+
+func isICMP(p uint8) bool { return p == firewall.ProtoICMP || p == firewall.ProtoICMPv6 }
+
+func portMatches(r Rule, want int32) bool {
+	if r.StartPort == firewall.PortAny {
+		return true
+	}
+	// "Any port" as a QUESTION is weaker than a rule's "any": it asks whether
+	// anything at all is permitted, so every rule answers it.
+	if want == firewall.PortAny {
+		return true
+	}
+	return want >= r.StartPort && want <= r.EndPort
+}
+
+// localCIDRMatches handles the empty case the way nebula does when this host
+// routes no unsafe networks, which is every host Orbit issues for today:
+// firewallLocalCIDR.addRule treats "" as "any" unless unsafe networks exist.
+func localCIDRMatches(localCIDR string, local netip.Addr) bool {
+	if localCIDR == "" || localCIDR == "any" {
+		return true
+	}
+	p, err := netip.ParsePrefix(localCIDR)
+	if err != nil {
+		return false
+	}
+	return local.IsValid() && p.Contains(local)
+}
+
+// selectorMatches is the (group OR host OR cidr) term.
+func selectorMatches(r Rule, q Query) (Outcome, string) {
+	if isAnySelector(r) {
+		return Matches, ""
+	}
+
+	// cidr first: it needs nothing but the address, so a rule that matches on
+	// it is decidable even with no tunnel. This is also why Orbit compiles
+	// policy to cidr — see docs/policy-model.md.
+	if r.CIDR != "" {
+		if p, err := netip.ParsePrefix(r.CIDR); err == nil && p.Contains(q.PeerAddr) {
+			return Matches, ""
+		}
+	}
+
+	needsCert := r.Host != "" || len(r.Groups) > 0
+	if needsCert && !q.PeerCertKnown {
+		return Unknown, "needs the peer's certificate to check its name or groups"
+	}
+	if r.Host != "" && r.Host == q.PeerName {
+		return Matches, ""
+	}
+	if len(r.Groups) > 0 && hasAllGroups(q.PeerGroups, r.Groups) {
+		return Matches, ""
+	}
+	return Misses, "selector"
+}
+
+func isAnySelector(r Rule) bool {
+	if len(r.Groups) == 0 && r.Host == "" && r.CIDR == "" {
+		return true
+	}
+	return slices.Contains(r.Groups, "any") || r.Host == "any" || r.CIDR == "any"
+}
+
+// hasAllGroups is AND within one rule's group list, matching nebula
+// firewall.go:859. Separate rules OR together, which the caller's loop does.
+func hasAllGroups(have, want []string) bool {
+	for _, g := range want {
+		if !slices.Contains(have, g) {
+			return false
+		}
+	}
+	return len(want) > 0
+}
+
+// reachesPeer reports whether a rule's selector could ever name this peer,
+// which decides whether a miss is worth showing to an operator.
+func reachesPeer(r Rule, q Query) bool {
+	oc, _ := selectorMatches(r, q)
+	return oc != Misses
+}
+
+// ExplainRequest is what the caller asked.
+type ExplainRequest struct {
+	// Peer is an overlay address, or the name of a peer this host currently has
+	// a tunnel with. A name is only resolvable through the hostmap, so a peer
+	// that has never connected must be named by address — which is exactly the
+	// case somebody is usually asking about.
+	Peer  string
+	Proto string
+	Port  string
+}
+
+// Explanation is the whole answer, in the three layers that fail independently.
+type Explanation struct {
+	Network string `json:"network"`
+	Peer    string `json:"peer"`
+	Proto   string `json:"proto"`
+	Port    string `json:"port"`
+
+	// Identity.
+	Certificate  *CertStatus `json:"certificate,omitempty"`
+	CertExpired  bool        `json:"cert_expired,omitempty"`
+	PeerResolved string      `json:"peer_resolved,omitempty"`
+	PeerName     string      `json:"peer_name,omitempty"`
+	PeerGroups   []string    `json:"peer_groups,omitempty"`
+	PeerKnown    bool        `json:"peer_known"`
+
+	// Path.
+	Running       bool     `json:"running"`
+	Detail        string   `json:"detail,omitempty"`
+	TunnelUp      bool     `json:"tunnel_up"`
+	Handshaking   bool     `json:"handshaking,omitempty"`
+	CurrentRemote string   `json:"current_remote,omitempty"`
+	RelaysToMe    []string `json:"relays_to_me,omitempty"`
+
+	// Policy, for the two directions this host can actually answer for.
+	Outbound Decision `json:"outbound"`
+	Inbound  Decision `json:"inbound"`
+}
+
+// Explain answers whether this host may reach a peer, and whether it would
+// accept the reply.
+//
+// It deliberately does NOT return an error for a peer with no tunnel, an
+// expired certificate, or a stopped nebula. Every one of those is the answer,
+// and failing would deny the caller the diagnosis they asked for.
+func Explain(eng *Embedded, layout Layout, req ExplainRequest) (Explanation, error) {
+	proto, err := ParseProto(req.Proto)
+	if err != nil {
+		return Explanation{}, err
+	}
+	port, err := parseQueryPort(req.Port)
+	if err != nil {
+		return Explanation{}, err
+	}
+
+	ex := Explanation{
+		Network: layout.Network,
+		Peer:    req.Peer,
+		Proto:   protoName(proto),
+		Port:    portRange(port, port),
+	}
+
+	// Identity: ours, from disk, because an expired certificate explains
+	// everything downstream of it and is invisible from a connectivity test.
+	var local netip.Addr
+	if cs, err := ReadCertStatus(layout.Paths.Cert); err == nil {
+		ex.Certificate = cs
+		ex.CertExpired = cs.Expired(nowFunc())
+		if len(cs.Networks) > 0 {
+			if p, err := netip.ParsePrefix(cs.Networks[0]); err == nil {
+				local = p.Addr()
+			}
+		}
+	}
+
+	// Path.
+	established, pending, peersErr := eng.Peers()
+	if peersErr == nil {
+		ex.Running = true
+	} else if st, err := eng.Status(context.Background()); err == nil {
+		ex.Detail = st.Detail
+		if ex.Detail == "" {
+			ex.Detail = peersErr.Error()
+		}
+	}
+
+	peerAddr, matched := resolvePeer(req.Peer, established, pending)
+	if !peerAddr.IsValid() {
+		return ex, fmt.Errorf("%q is neither an overlay address nor a peer with a tunnel; "+
+			"name it by address", req.Peer)
+	}
+	ex.PeerResolved = peerAddr.String()
+
+	if matched != nil {
+		ex.PeerName, ex.PeerGroups = matched.Name, matched.Groups
+		ex.CurrentRemote, ex.RelaysToMe = matched.CurrentRemote, matched.RelaysToMe
+		ex.PeerKnown = matched.Name != ""
+		ex.TunnelUp = containsPeer(established, peerAddr)
+		ex.Handshaking = !ex.TunnelUp
+	}
+
+	// Policy.
+	inbound, outbound, err := LoadRules(eng.ConfigArg)
+	if err != nil {
+		return ex, err
+	}
+	q := Query{
+		PeerAddr:      peerAddr,
+		LocalAddr:     local,
+		Proto:         proto,
+		Port:          port,
+		PeerCertKnown: ex.PeerKnown,
+		PeerName:      ex.PeerName,
+		PeerGroups:    ex.PeerGroups,
+	}
+	ex.Outbound = Decide(outbound, q)
+	ex.Inbound = Decide(inbound, q)
+	return ex, nil
+}
+
+// nowFunc is a seam for tests that need a certificate to be expired.
+var nowFunc = time.Now
+
+// resolvePeer accepts an address or a name, preferring established tunnels.
+func resolvePeer(want string, established, pending []Peer) (netip.Addr, *Peer) {
+	if addr, err := netip.ParseAddr(want); err == nil {
+		for _, set := range [][]Peer{established, pending} {
+			for i, p := range set {
+				if slices.Contains(p.VpnAddrs, want) {
+					return addr, &set[i]
+				}
+			}
+		}
+		// A valid address with no tunnel is the ordinary case for the question
+		// "why can I not reach this", so it is answerable, not an error.
+		return addr, nil
+	}
+
+	for _, set := range [][]Peer{established, pending} {
+		for i, p := range set {
+			if p.Name == want && len(p.VpnAddrs) > 0 {
+				addr, err := netip.ParseAddr(p.VpnAddrs[0])
+				if err == nil {
+					return addr, &set[i]
+				}
+			}
+		}
+	}
+	return netip.Addr{}, nil
+}
+
+func containsPeer(peers []Peer, addr netip.Addr) bool {
+	for _, p := range peers {
+		if slices.Contains(p.VpnAddrs, addr.String()) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseQueryPort(s string) (int32, error) {
+	switch strings.ToLower(s) {
+	case "", "any":
+		return firewall.PortAny, nil
+	case "fragment":
+		return firewall.PortFragment, nil
+	}
+	n, err := strconv.ParseUint(s, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("port %q is not in [0,65535]", s)
+	}
+	return int32(n), nil
+}
+
+// ParseProto turns a CLI protocol name into nebula's constant.
+func ParseProto(s string) (uint8, error) {
+	switch strings.ToLower(s) {
+	case "", "any":
+		return firewall.ProtoAny, nil
+	case "tcp":
+		return firewall.ProtoTCP, nil
+	case "udp":
+		return firewall.ProtoUDP, nil
+	case "icmp":
+		return firewall.ProtoICMP, nil
+	}
+	return 0, fmt.Errorf("unknown protocol %q: nebula supports any, tcp, udp and icmp", s)
+}

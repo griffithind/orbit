@@ -336,6 +336,83 @@ func TestPeersOnAnUnknownNetworkIsNotAnAgentFailure(t *testing.T) {
 	}
 }
 
+// TestWhyExplainsPolicyWithTheDataPlaneDown is the property that makes `orbit
+// why` useful on a broken host: the rules are on disk, so policy can be
+// answered even when nebula never started. A command that could only explain a
+// working host would be no help on the host somebody actually runs it against.
+func TestWhyExplainsPolicyWithTheDataPlaneDown(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	root := shortTempDir(t)
+	h.enrollIntoDir(t, ts, "asker", "10.42.93.7", filepath.Join(root, "prod"))
+	h.startAgent(t, root)
+
+	res := h.cliEnv(t, nil, "why", "10.42.93.9", "-root", root, "-proto", "tcp", "-port", "443", "-json")
+	if res.code != 0 {
+		t.Fatalf("why exited %d\n%s", res.code, res.stderr)
+	}
+	var ex agent.Explanation
+	if err := json.Unmarshal([]byte(res.stdout), &ex); err != nil {
+		t.Fatalf("parse explanation: %v\n%s", err, res.stdout)
+	}
+
+	if ex.Running {
+		t.Error("reported a running nebula that cannot start without a tun device")
+	}
+	if ex.TunnelUp {
+		t.Error("reported a tunnel to a host that does not exist")
+	}
+	// The point of the test: the policy layer answered anyway.
+	if ex.Outbound.Considered == 0 && ex.Inbound.Considered == 0 {
+		t.Error("no rules were considered in either direction; the rules are on disk " +
+			"and should be readable whether or not nebula is running")
+	}
+	if ex.Certificate == nil || ex.Certificate.Name != "asker" {
+		t.Errorf("the explanation does not carry this host's own certificate: %+v", ex.Certificate)
+	}
+	// And it must not claim to know a peer it has never spoken to, because
+	// that is what bounds which rules it can decide.
+	if ex.PeerKnown {
+		t.Error("claimed to know the certificate of a peer with no tunnel")
+	}
+
+	human := h.cliEnv(t, nil, "why", "10.42.93.9", "-root", root)
+	if !strings.Contains(human.stdout, "outbound") || !strings.Contains(human.stdout, "identity") {
+		t.Errorf("the human output is missing a layer:\n%s", human.stdout)
+	}
+	// The half it cannot see has to be stated, every time.
+	if !strings.Contains(human.stdout, "one direction of two") {
+		t.Errorf("the output does not say the peer's inbound rules are unreadable "+
+			"from here:\n%s", human.stdout)
+	}
+}
+
+// TestWhyRejectsAQuestionItCannotAnswer. A bad protocol is a mistake in the
+// command, not a state of the host, and must not be reported as one.
+func TestWhyRejectsAQuestionItCannotAnswer(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	root := shortTempDir(t)
+	h.enrollIntoDir(t, ts, "asker2", "10.42.93.8", filepath.Join(root, "prod"))
+	h.startAgent(t, root)
+
+	res := h.cliEnv(t, nil, "why", "10.42.93.9", "-root", root, "-proto", "sctp")
+	if res.code != 2 {
+		t.Errorf("exit %d, want 2 (usage)\n%s", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "sctp") {
+		t.Errorf("the error does not name the protocol given:\n%s", res.stderr)
+	}
+
+	// A peer that is neither an address nor a known name is the same class.
+	bad := h.cliEnv(t, nil, "why", "not-a-host", "-root", root)
+	if bad.code != 2 {
+		t.Errorf("an unresolvable peer exited %d, want 2\n%s", bad.code, bad.stderr)
+	}
+}
+
 // TestStatusWithoutAnAgentSaysSo. The command's own failure has to be legible:
 // it is asked precisely when things are broken, and a dial error naming a
 // socket path is not an answer to "is the agent running".

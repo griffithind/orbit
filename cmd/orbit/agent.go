@@ -331,6 +331,9 @@ func runCmd(args []string) error {
 			Peers: func(ctx context.Context, network string) (agent.PeerReport, error) {
 				return peerReport(ctx, network, slots)
 			},
+			Explain: func(ctx context.Context, network string, req agent.ExplainRequest) (agent.Explanation, error) {
+				return explain(network, req, slots)
+			},
 		}
 		go func() {
 			if err := srv.Serve(ctx); err != nil {
@@ -458,6 +461,28 @@ func peerReport(ctx context.Context, network string, slots []*netSlot) (agent.Pe
 		return rep, nil
 	}
 	return agent.PeerReport{}, fmt.Errorf("%w: %s", agent.ErrUnknownNetwork, network)
+}
+
+// explain answers a reachability question for one network.
+func explain(network string, req agent.ExplainRequest, slots []*netSlot) (agent.Explanation, error) {
+	for _, s := range slots {
+		if filepath.Base(s.dir) != network {
+			continue
+		}
+		s.mu.Lock()
+		nl := s.nl
+		s.mu.Unlock()
+
+		if nl == nil {
+			// Joined but not started. Not a 404 — the network exists — and not
+			// an explanation either, because the rules that would answer it are
+			// whatever the unreadable directory holds.
+			return agent.Explanation{Network: network},
+				fmt.Errorf("%s has not started; `orbit status` has the reason", network)
+		}
+		return agent.Explain(nl.engine, nl.loop.Layout, req)
+	}
+	return agent.Explanation{}, fmt.Errorf("%w: %s", agent.ErrUnknownNetwork, network)
 }
 
 // setupBackoff bounds how fast a network that cannot be set up is retried.

@@ -192,6 +192,95 @@ func TestPeerTableCarriesWhatAnOperatorNeeds(t *testing.T) {
 	}
 }
 
+// TestWhyRendersADenialWithTheNearMisses.
+//
+// A denial is only useful if it says what nearly matched: a rule that reaches
+// this peer on the wrong port is one edit from the answer, and a table with no
+// near misses says the peer is not named anywhere. Rendered here because a
+// populated firewall on a live host needs a tun device.
+func TestWhyRendersADenialWithTheNearMisses(t *testing.T) {
+	var buf bytes.Buffer
+	prev := out
+	out = &buf
+	t.Cleanup(func() { out = prev })
+
+	reaches := agent.Rule{Proto: 6, StartPort: 22, EndPort: 22, CIDR: "10.42.0.9/32"}
+	printWhy(agent.Explanation{
+		Network:      "prod",
+		Peer:         "10.42.0.9",
+		PeerResolved: "10.42.0.9",
+		PeerName:     "db-01",
+		PeerKnown:    true,
+		PeerGroups:   []string{"env-prod"},
+		Proto:        "tcp",
+		Port:         "5432",
+		Certificate: &agent.CertStatus{
+			Name: "web-01", Groups: []string{"env-prod"},
+			NotAfter: time.Now().Add(29 * 24 * time.Hour),
+		},
+		Running:       true,
+		TunnelUp:      true,
+		CurrentRemote: "203.0.113.7:4242",
+		Outbound: agent.Decision{
+			Considered: 4,
+			Near: []agent.RuleOutcome{
+				{Rule: reaches, Outcome: agent.Misses, Reason: "port"},
+			},
+		},
+		Inbound: agent.Decision{
+			Considered: 4,
+			Matched: []agent.RuleOutcome{{
+				Rule:    agent.Rule{Proto: 0, StartPort: 0, EndPort: 0, CIDR: "10.42.0.0/16"},
+				Outcome: agent.Matches,
+			}},
+			Allowed: true,
+		},
+	})
+
+	got := buf.String()
+	t.Log("\n" + got)
+
+	for _, want := range []string{
+		"web-01",            // our identity
+		"db-01",             // theirs, which we only know because there is a tunnel
+		"tunnel up, direct", // the path layer
+		"no rule permits",   // the verdict
+		"port 22",           // the near miss, so the operator sees what to edit
+		"(port)",            // and which term failed
+		"allowed by",        // the other direction, which did match
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the explanation is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestWhySaysWhatItCannotDecide. Without a tunnel there is no peer certificate
+// here, so a group rule is unevaluable — and reporting that as "denied" would
+// be a confident wrong answer in the direction that sends an operator looking
+// in the wrong place.
+func TestWhySaysWhatItCannotDecide(t *testing.T) {
+	var buf bytes.Buffer
+	prev := out
+	out = &buf
+	t.Cleanup(func() { out = prev })
+
+	printWhy(agent.Explanation{
+		Network: "prod", PeerResolved: "10.42.0.9", Proto: "tcp", Port: "443",
+		PeerKnown: false, Running: true,
+		Outbound: agent.Decision{Considered: 2, Undecidable: true},
+		Inbound:  agent.Decision{Considered: 2, Undecidable: true},
+	})
+
+	got := buf.String()
+	if !strings.Contains(got, "cannot be decided") {
+		t.Errorf("an undecidable question rendered as something else:\n%s", got)
+	}
+	if strings.Contains(got, "no rule permits") {
+		t.Errorf("an undecidable question rendered as a denial:\n%s", got)
+	}
+}
+
 // TestSocketRootFollowsAnExplicitDirectory. A caller that put a network
 // somewhere of its own gets the socket beside it — otherwise a test or a
 // container binds into a /var/lib/orbit that may not exist.

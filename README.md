@@ -86,13 +86,15 @@ To see what a host is doing — every network it joined, whether its data plane 
 up, when it last reached the control plane — ask the agent on that host:
 
 ```bash
-sudo orbit status
-sudo orbit peers
+sudo orbit status                      # every network this host joined
+sudo orbit peers                       # the tunnels it actually holds
+sudo orbit why 10.42.0.9 -port 5432    # and why it can or cannot reach one
 ```
 
-`status` is the agent's own view; `peers` is nebula's hostmap — the tunnels
-this host actually holds, which is the one thing the control plane cannot tell
-you.
+`status` is the agent's own view; `peers` is nebula's hostmap, which is the one
+thing the control plane cannot tell you; `why` separates an expired
+certificate from a missing tunnel from a denying rule, which all look identical
+from `ping`.
 
 [docs/deployment.md](docs/deployment.md) has the whole of it — bring-up order,
 sealing the CA key to a TPM, backups, alerts, and what survives an outage.
@@ -212,7 +214,7 @@ detail and says plainly what has and has not been measured.
 | [docs/enrollment.md](docs/enrollment.md) | Enrollment methods, wire protocol, renewal, recovery, attack analysis |
 | [docs/policy-model.md](docs/policy-model.md) | How Nebula's firewall enforces, what a certificate can carry, and how policy compiles |
 | [docs/revocation.md](docs/revocation.md) | How blocking propagates, and how to measure it |
-| [docs/diagnostics.md](docs/diagnostics.md) | The agent status socket, and the design for `orbit peers` and `orbit why` |
+| [docs/diagnostics.md](docs/diagnostics.md) | The agent status socket behind `orbit status`, `peers` and `why` |
 
 Start with `design.md` §1. It documents six properties of Nebula's certificate
 code that every other decision here follows from, with file references — most
