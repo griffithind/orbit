@@ -9,7 +9,11 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
-## Unreleased
+## v0.3.2
+
+Deployment fixes and a secrets-handling fix, all found by running v0.3.1 on a
+real host. The compose file could not reach its own database, so this is the
+first release where `docker compose up` actually works.
 
 ### Fixed
 

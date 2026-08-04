@@ -19,7 +19,7 @@
 set -euo pipefail
 
 REPO_URL=${ORBIT_REPO_URL:-https://github.com/griffithind/orbit}
-VERSION=${ORBIT_VERSION:-0.3.1}
+VERSION=${ORBIT_VERSION:-0.3.2}
 DIR=${ORBIT_DIR:-/opt/orbit}
 NETWORK=prod
 CIDR=10.42.0.0/16
