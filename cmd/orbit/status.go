@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"strings"
@@ -38,14 +39,16 @@ func statusCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		// The command exists to diagnose a broken host, so its own failure has
 		// to be legible: a dial error naming a socket path is not an answer to
-		// "is the agent running".
-		if err == agent.ErrNoAgent {
+		// "is the agent running". This one adds the next step, which the shared
+		// handler cannot, because only this command is the one an operator
+		// reaches for first.
+		if errors.Is(err, agent.ErrNoAgent) {
 			return fail(exitUnreachable,
 				"the orbit agent is not running (nothing is listening on %s)\n\n"+
-					"  systemctl status orbit-agent      # linux\n"+
+					"  systemctl status orbit-agent                         # linux\n"+
 					"  launchctl print system/com.griffithind.orbit.agent   # macos", path)
 		}
-		return err
+		return agentError(err, path)
 	}
 
 	if *asJSON {
@@ -148,6 +151,11 @@ func dataPlane(r renderer, n agent.NetworkStatus) string {
 		return "nebula state unknown"
 	case n.Nebula.Running:
 		return r.ansi("32", "nebula running") + "  " + n.Nebula.Instance
+	case n.Nebula.Detail != "":
+		// Why it stopped, on the same line as the fact that it did. A bound
+		// port or a refused configuration is the entire answer, and leaving it
+		// in a log line is what made this command necessary.
+		return r.ansi("31", "nebula NOT running") + "  " + n.Nebula.Detail
 	default:
 		return r.ansi("31", "nebula NOT running")
 	}

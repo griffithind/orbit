@@ -87,7 +87,12 @@ up, when it last reached the control plane — ask the agent on that host:
 
 ```bash
 sudo orbit status
+sudo orbit peers
 ```
+
+`status` is the agent's own view; `peers` is nebula's hostmap — the tunnels
+this host actually holds, which is the one thing the control plane cannot tell
+you.
 
 [docs/deployment.md](docs/deployment.md) has the whole of it — bring-up order,
 sealing the CA key to a TPM, backups, alerts, and what survives an outage.

@@ -5,10 +5,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +62,135 @@ func serveForTest(t *testing.T, rep Report) string {
 			t.Fatal("the status socket never came up")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// servePeersForTest is serveForTest with a peers handler attached.
+func servePeersForTest(t *testing.T, peers func(context.Context, string) (PeerReport, error)) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "orbit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	path := SocketPath(dir)
+	srv := &StatusServer{
+		Path:   path,
+		Report: func(context.Context) Report { return Report{} },
+		Peers:  peers,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("the status server did not shut down")
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if c, err := net.Dial("unix", path); err == nil {
+			_ = c.Close()
+			return path
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the status socket never came up")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestPeersRoundTrip(t *testing.T) {
+	want := PeerReport{
+		Network: "prod",
+		Running: true,
+		Established: []Peer{{
+			Name:          "db-01",
+			Groups:        []string{"env-prod"},
+			VpnAddrs:      []string{"10.42.0.9"},
+			CurrentRemote: "203.0.113.7:4242",
+			RelaysToMe:    []string{"10.42.0.1"},
+			Messages:      4242,
+			CertNotAfter:  time.Now().Add(48 * time.Hour).Truncate(time.Second),
+		}},
+		Pending: []Peer{{VpnAddrs: []string{"10.42.0.11"}}},
+	}
+	path := servePeersForTest(t, func(_ context.Context, slug string) (PeerReport, error) {
+		if slug != "prod" {
+			t.Errorf("handler got slug %q, want prod", slug)
+		}
+		return want, nil
+	})
+
+	got, err := FetchPeers(context.Background(), path, "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Running || len(got.Established) != 1 || len(got.Pending) != 1 {
+		t.Fatalf("report did not survive: %+v", got)
+	}
+	p := got.Established[0]
+	if p.Name != "db-01" || p.CurrentRemote != "203.0.113.7:4242" || p.Messages != 4242 {
+		t.Errorf("peer did not survive: %+v", p)
+	}
+	if !p.Relayed() {
+		t.Error("a peer with a relay reported as direct; that is the answer to 'why is this slow'")
+	}
+	if got.Pending[0].Name != "" {
+		t.Error("a pending peer has no verified certificate and so has no name")
+	}
+}
+
+// TestUnknownNetworkIsDistinguishable. A mistyped slug and a broken agent need
+// different messages, so the 404 has to survive as its own error rather than
+// arriving as "agent returned 404 Not Found".
+func TestUnknownNetworkIsDistinguishable(t *testing.T) {
+	path := servePeersForTest(t, func(_ context.Context, slug string) (PeerReport, error) {
+		return PeerReport{}, fmt.Errorf("%w: %s", ErrUnknownNetwork, slug)
+	})
+
+	_, err := FetchPeers(context.Background(), path, "typo")
+	if !errors.Is(err, ErrUnknownNetwork) {
+		t.Fatalf("got %v, want ErrUnknownNetwork", err)
+	}
+	if !strings.Contains(err.Error(), "typo") {
+		t.Errorf("the error does not name the network asked for: %v", err)
+	}
+}
+
+// TestPeersEscapesTheNetworkName. A slug is a directory name and could contain
+// anything; building the path by concatenation would let one escape the route.
+func TestPeersEscapesTheNetworkName(t *testing.T) {
+	var got string
+	path := servePeersForTest(t, func(_ context.Context, slug string) (PeerReport, error) {
+		got = slug
+		return PeerReport{Network: slug}, nil
+	})
+
+	if _, err := FetchPeers(context.Background(), path, "a/../b"); err != nil {
+		t.Fatal(err)
+	}
+	if got != "a/../b" {
+		t.Errorf("the handler saw %q; the name was not carried through intact", got)
+	}
+}
+
+// TestPeersWithNoHandler is the -once agent and anything else that serves
+// status without peers: a 404, not a panic.
+func TestPeersWithNoHandler(t *testing.T) {
+	path := serveForTest(t, Report{})
+
+	if _, err := FetchPeers(context.Background(), path, "prod"); err == nil {
+		t.Error("fetching peers from a server that does not offer them succeeded")
 	}
 }
 

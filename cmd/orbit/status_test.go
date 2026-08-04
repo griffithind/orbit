@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,6 +101,94 @@ func TestAnUnreadyNetworkStillReportsItself(t *testing.T) {
 	}
 	if got.Error == "" {
 		t.Error("the report says the network is not ready and not why")
+	}
+}
+
+// TestPeersOnANetworkThatNeverStarted.
+//
+// The host HAS joined it, so this is not a 404: telling an operator the network
+// does not exist would send them looking for a typo instead of at the reason it
+// is down.
+func TestPeersOnANetworkThatNeverStarted(t *testing.T) {
+	slot := &netSlot{dir: "/var/lib/orbit/prod"}
+	slot.setError(errors.New("read agent state: no such file or directory"))
+
+	rep, err := peerReport(context.Background(), "prod", []*netSlot{slot})
+	if err != nil {
+		t.Fatalf("a joined network answered with an error: %v", err)
+	}
+	if rep.Running {
+		t.Error("a network that never started reported a running nebula")
+	}
+	if rep.Detail == "" {
+		t.Error("no detail; the report says nothing an operator can act on")
+	}
+	if rep.Established == nil {
+		t.Error("Established is nil, so -json emits null rather than []")
+	}
+}
+
+// TestPeersOnAnUnjoinedNetworkIs404. The other half: a slug this host has never
+// joined is a mistake in the command, not a state of the host.
+func TestPeersOnAnUnjoinedNetworkIs404(t *testing.T) {
+	slot := &netSlot{dir: "/var/lib/orbit/prod"}
+
+	_, err := peerReport(context.Background(), "staging", []*netSlot{slot})
+	if !errors.Is(err, agent.ErrUnknownNetwork) {
+		t.Fatalf("got %v, want ErrUnknownNetwork", err)
+	}
+	if !strings.Contains(err.Error(), "staging") {
+		t.Errorf("the error does not name what was asked for: %v", err)
+	}
+}
+
+// TestPeerTableCarriesWhatAnOperatorNeeds.
+//
+// Rendered here rather than in the e2e because nebula cannot start without a
+// tun device, so no integration test on this machine can produce a populated
+// hostmap — and the populated table is the case the command exists for.
+func TestPeerTableCarriesWhatAnOperatorNeeds(t *testing.T) {
+	var buf bytes.Buffer
+	prev := out
+	out = &buf
+	t.Cleanup(func() { out = prev })
+
+	printPeers(agent.PeerReport{
+		Network: "prod",
+		Running: true,
+		Established: []agent.Peer{
+			{
+				Name: "db-01", VpnAddrs: []string{"10.42.0.9"},
+				CurrentRemote: "203.0.113.7:4242", Messages: 8123,
+				CertNotAfter: time.Now().Add(29 * 24 * time.Hour),
+			},
+			{
+				Name: "web-02", VpnAddrs: []string{"10.42.0.8"},
+				RelaysToMe: []string{"10.42.0.1"}, Messages: 340,
+				CertNotAfter: time.Now().Add(29 * 24 * time.Hour),
+			},
+		},
+		Pending: []agent.Peer{{VpnAddrs: []string{"10.42.0.11"}}},
+	})
+
+	got := buf.String()
+	t.Log("\n" + got)
+
+	for _, want := range []string{
+		"db-01", "10.42.0.9", "203.0.113.7:4242", // a direct tunnel
+		"web-02", "relay 10.42.0.1", // and a relayed one, named
+		"handshaking", "10.42.0.11", // and one that has not come up
+		"2 tunnels, 1 relayed, 1 handshaking",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the table is missing %q:\n%s", want, got)
+		}
+	}
+
+	// A pending peer has no certificate and so no name; falling back to the
+	// address keeps the row readable instead of starting it with a blank.
+	if strings.Contains(got, "  ?  ") {
+		t.Errorf("a nameless peer rendered as '?' rather than its address:\n%s", got)
 	}
 }
 

@@ -5,14 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/slackhq/nebula"
 	"github.com/slackhq/nebula/cert"
 )
 
@@ -98,6 +104,105 @@ type NebulaStatus struct {
 	Known    bool   `json:"known"`
 	Running  bool   `json:"running"`
 	Instance string `json:"instance,omitempty"`
+
+	// Detail is why it stopped, when it stopped on its own — a bound port, a
+	// missing device, a configuration nebula refused.
+	Detail string `json:"detail,omitempty"`
+}
+
+// PeerReport is GET /v1/networks/{slug}/peers.
+type PeerReport struct {
+	Network string `json:"network"`
+
+	// Running is nebula's state. When false the lists below are empty because
+	// there is nothing to ask, NOT because this host has no peers — and those
+	// are different diagnoses with different remedies.
+	Running bool   `json:"running"`
+	Detail  string `json:"detail,omitempty"`
+
+	// Established are peers with a tunnel; Pending are peers mid-handshake.
+	// Separate lists, because "we are trying" and "we are connected" answer the
+	// question differently.
+	Established []Peer `json:"established"`
+	Pending     []Peer `json:"pending,omitempty"`
+}
+
+// Peer is one entry of nebula's hostmap.
+type Peer struct {
+	// Name and Groups come from the peer's certificate, the only identity in
+	// the handshake. Empty when the tunnel has not got far enough to have
+	// verified one, which is the normal state for a pending entry.
+	Name   string   `json:"name,omitempty"`
+	Groups []string `json:"groups,omitempty"`
+
+	VpnAddrs []string `json:"vpn_addrs"`
+
+	// CurrentRemote is the underlay address packets are going to right now.
+	CurrentRemote string `json:"current_remote,omitempty"`
+
+	// RelaysToMe are the peers relaying this one's traffic to us, and
+	// RelaysThroughMe the peers whose traffic we relay for it. A non-empty
+	// RelaysToMe answers "why is this link slow": there is no direct path and
+	// something in the middle is carrying it.
+	RelaysToMe      []string `json:"relays_to_me,omitempty"`
+	RelaysThroughMe []string `json:"relays_through_me,omitempty"`
+
+	// Messages is nebula's counter for the tunnel. Zero on an established
+	// tunnel means it came up and has carried nothing, which is worth seeing.
+	Messages uint64 `json:"messages"`
+
+	CertNotAfter time.Time `json:"cert_not_after,omitempty"`
+}
+
+// Relayed reports whether traffic from this peer reaches us through somebody
+// else.
+func (p Peer) Relayed() bool { return len(p.RelaysToMe) > 0 }
+
+// peersFrom maps nebula's hostmap entries.
+//
+// Deliberately lossy. LocalIndex and RemoteIndex identify a tunnel inside
+// nebula and mean nothing to an operator; carrying them would be two more
+// columns nobody can act on.
+func peersFrom(hosts []nebula.ControlHostInfo) []Peer {
+	out := make([]Peer, 0, len(hosts))
+	for _, h := range hosts {
+		p := Peer{
+			VpnAddrs:        addrStrings(h.VpnAddrs),
+			Messages:        h.MessageCounter,
+			RelaysToMe:      addrStrings(h.CurrentRelaysToMe),
+			RelaysThroughMe: addrStrings(h.CurrentRelaysThroughMe),
+		}
+		if h.CurrentRemote.IsValid() {
+			p.CurrentRemote = h.CurrentRemote.String()
+		}
+		if h.Cert != nil {
+			p.Name = h.Cert.Name()
+			p.Groups = h.Cert.Groups()
+			p.CertNotAfter = h.Cert.NotAfter()
+		}
+		out = append(out, p)
+	}
+	// Sorted, because the hostmap iterates a Go map. Without this, two runs
+	// against an unchanged mesh print different orders and an operator
+	// comparing them is reading a shuffle.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return strings.Join(out[i].VpnAddrs, ",") < strings.Join(out[j].VpnAddrs, ",")
+	})
+	return out
+}
+
+func addrStrings(addrs []netip.Addr) []string {
+	if len(addrs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, a.String())
+	}
+	return out
 }
 
 // CertStatus is the certificate as currently on disk.
@@ -153,7 +258,14 @@ type StatusServer struct {
 	// Report produces the current answer. Called per request so the report is
 	// never staler than the request that asked for it.
 	Report func(context.Context) Report
+
+	// Peers answers for one network. ErrUnknownNetwork becomes a 404; anything
+	// else is a 500.
+	Peers func(ctx context.Context, network string) (PeerReport, error)
 }
+
+// ErrUnknownNetwork is a slug this host has not joined.
+var ErrUnknownNetwork = errors.New("no such network on this host")
 
 // Serve listens until ctx is cancelled.
 //
@@ -181,6 +293,21 @@ func (s *StatusServer) Serve(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		writeStatusJSON(w, s.Report(r.Context()))
+	})
+	mux.HandleFunc("GET /v1/networks/{slug}/peers", func(w http.ResponseWriter, r *http.Request) {
+		if s.Peers == nil {
+			http.Error(w, "peers are not served here", http.StatusNotFound)
+			return
+		}
+		rep, err := s.Peers(r.Context(), r.PathValue("slug"))
+		switch {
+		case errors.Is(err, ErrUnknownNetwork):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case err != nil:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		default:
+			writeStatusJSON(w, rep)
+		}
 	})
 
 	srv := &http.Server{
@@ -251,11 +378,23 @@ func writeStatusJSON(w http.ResponseWriter, v any) {
 // agent is not running" rather than surface a dial error about a path.
 var ErrNoAgent = errors.New("the orbit agent is not running")
 
-// FetchStatus reads the report from a running agent.
-//
-// The only client of the socket, so the wire format has exactly one
-// implementation on each side and the CLI does not hand-roll a unix transport.
+// FetchStatus reads the whole report from a running agent.
 func FetchStatus(ctx context.Context, path string) (Report, error) {
+	var rep Report
+	err := fetch(ctx, path, "/v1/status", &rep)
+	return rep, err
+}
+
+// FetchPeers reads one network's hostmap from a running agent.
+func FetchPeers(ctx context.Context, path, network string) (PeerReport, error) {
+	var rep PeerReport
+	err := fetch(ctx, path, "/v1/networks/"+url.PathEscape(network)+"/peers", &rep)
+	return rep, err
+}
+
+// fetch is the only client of the socket, so the wire format has exactly one
+// implementation on each side and no caller hand-rolls a unix transport.
+func fetch(ctx context.Context, path, route string, into any) error {
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -268,9 +407,9 @@ func FetchStatus(ctx context.Context, path string) (Report, error) {
 
 	// The host in the URL is ignored by the dialer above but must be present
 	// and valid for net/http to accept the request at all.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://agent/v1/status", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://agent"+route, nil)
 	if err != nil {
-		return Report{}, err
+		return err
 	}
 
 	resp, err := client.Do(req)
@@ -280,22 +419,26 @@ func FetchStatus(ctx context.Context, path string) (Report, error) {
 		// agent may be running perfectly well and the caller simply is not
 		// root — so that one keeps its own error.
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
-			return Report{}, ErrNoAgent
+			return ErrNoAgent
 		}
 		if errors.Is(err, os.ErrPermission) {
-			return Report{}, fmt.Errorf("cannot read %s: %w (run as root)", path, os.ErrPermission)
+			return fmt.Errorf("cannot read %s: %w (run as root)", path, os.ErrPermission)
 		}
-		return Report{}, err
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound {
+		// The body carries which network was asked for, and losing it here
+		// would leave the caller printing "404" at somebody who mistyped a slug.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("%w: %s", ErrUnknownNetwork, strings.TrimSpace(string(body)))
+	}
 	if resp.StatusCode != http.StatusOK {
-		return Report{}, fmt.Errorf("agent returned %s", resp.Status)
+		return fmt.Errorf("agent returned %s", resp.Status)
 	}
-
-	var rep Report
-	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
-		return Report{}, fmt.Errorf("parse agent response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
+		return fmt.Errorf("parse agent response: %w", err)
 	}
-	return rep, nil
+	return nil
 }

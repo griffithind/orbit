@@ -247,12 +247,48 @@ func (e *Embedded) stopLocked() {
 func (e *Embedded) Status(context.Context) (Status, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return Status{
+	s := Status{
 		Known:    true,
 		Running:  e.running,
 		Instance: fmt.Sprintf("gen-%d", e.generation),
-	}, nil
+	}
+	// Why it stopped, when it stopped on its own. The engine has recorded this
+	// since it existed and nothing read it, so "nebula is not running" reached
+	// an operator with the one useful fact — a bound port, a missing device, a
+	// bad configuration — left in a log line they had to go and find.
+	if !e.running && e.lastExit != nil {
+		s.Detail = e.lastExit.Error()
+	}
+	return s, nil
 }
+
+// Peers reports the tunnels this network currently holds.
+//
+// Straight from nebula's hostmap, not from anything Orbit tracks: the control
+// plane knows which hosts SHOULD be able to reach each other, and only the
+// running data plane knows which ones actually have a tunnel. That gap is the
+// entire diagnostic value.
+//
+// pending is the handshake map — peers being negotiated with rather than
+// established. Reported alongside rather than merged, because "handshaking"
+// and "connected" are different answers to the only question being asked.
+func (e *Embedded) Peers() (established, pending []Peer, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.running || e.ctrl == nil {
+		return nil, nil, ErrNebulaNotRunning
+	}
+	return peersFrom(e.ctrl.ListHostmapHosts(false)),
+		peersFrom(e.ctrl.ListHostmapHosts(true)), nil
+}
+
+// ErrNebulaNotRunning distinguishes "no tunnels" from "nothing to ask".
+//
+// An empty peer list from a stopped nebula reads as an isolated host, which is
+// a different diagnosis with a different remedy from a data plane that never
+// started.
+var ErrNebulaNotRunning = errors.New("nebula is not running on this network")
 
 // Close stops nebula. Idempotent.
 func (e *Embedded) Close() error {

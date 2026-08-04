@@ -239,6 +239,103 @@ func TestStatusShowsANetworkThatNeverCameUp(t *testing.T) {
 	}
 }
 
+// TestPeersReportsADeadDataPlaneRatherThanAnEmptyMesh.
+//
+// nebula cannot start here, so there are no tunnels — and an empty table would
+// read as "this host is isolated", which is a different problem with a
+// different remedy. The report has to lead with the reason.
+func TestPeersReportsADeadDataPlaneRatherThanAnEmptyMesh(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	root := shortTempDir(t)
+	h.enrollIntoDir(t, ts, "lonely", "10.42.92.7", filepath.Join(root, "prod"))
+	h.startAgent(t, root)
+
+	res := h.cliEnv(t, nil, "peers", "-root", root, "-json")
+	if res.code != 0 {
+		t.Fatalf("peers exited %d\n%s", res.code, res.stderr)
+	}
+	var rep agent.PeerReport
+	if err := json.Unmarshal([]byte(res.stdout), &rep); err != nil {
+		t.Fatalf("parse peers: %v\n%s", err, res.stdout)
+	}
+
+	if rep.Network != "prod" {
+		t.Errorf("network = %q; -network was omitted and the one joined network "+
+			"should have been chosen", rep.Network)
+	}
+	if rep.Running {
+		t.Error("peers reported a running nebula that cannot start without a tun device")
+	}
+	if rep.Detail == "" {
+		t.Error("the report says the data plane is down and not why")
+	}
+
+	// And in the human form, the reason is the headline.
+	human := h.cliEnv(t, nil, "peers", "-root", root)
+	if !strings.Contains(human.stdout, "nebula is not running") {
+		t.Errorf("the human output does not lead with the reason:\n%s", human.stdout)
+	}
+}
+
+// TestPeersNeedsANetworkWhenThereAreSeveral. Picking one arbitrarily would be
+// right half the time and silently wrong the rest.
+func TestPeersNeedsANetworkWhenThereAreSeveral(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	root := shortTempDir(t)
+	h.enrollIntoDir(t, ts, "one", "10.42.92.8", filepath.Join(root, "prod"))
+	h.enrollIntoDir(t, ts, "two", "10.42.92.9", filepath.Join(root, "staging"))
+	h.startAgent(t, root)
+
+	res := h.cliEnv(t, nil, "peers", "-root", root)
+	if res.code != 2 {
+		t.Fatalf("exit %d, want 2 (usage)\n%s%s", res.code, res.stdout, res.stderr)
+	}
+	// The message has to carry the choices; "-network is required" would send
+	// an operator to another command for something already known here.
+	for _, want := range []string{"prod", "staging"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("the error does not name %q as a choice:\n%s", want, res.stderr)
+		}
+	}
+
+	// Named explicitly, it works.
+	ok := h.cliEnv(t, nil, "peers", "-root", root, "-network", "staging", "-json")
+	if ok.code != 0 {
+		t.Fatalf("exit %d with -network\n%s", ok.code, ok.stderr)
+	}
+	var rep agent.PeerReport
+	if err := json.Unmarshal([]byte(ok.stdout), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Network != "staging" {
+		t.Errorf("network = %q, want staging", rep.Network)
+	}
+}
+
+// TestPeersOnAnUnknownNetworkIsNotAnAgentFailure. A mistyped slug and a broken
+// agent have nothing in common, and reporting both as "unreachable" would send
+// an operator to restart a service over a typo.
+func TestPeersOnAnUnknownNetworkIsNotAnAgentFailure(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	root := shortTempDir(t)
+	h.enrollIntoDir(t, ts, "real", "10.42.92.10", filepath.Join(root, "prod"))
+	h.startAgent(t, root)
+
+	res := h.cliEnv(t, nil, "peers", "-root", root, "-network", "nope")
+	if res.code != 5 {
+		t.Errorf("exit %d, want 5 (not found)\n%s", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "nope") {
+		t.Errorf("the error does not name the network asked for:\n%s", res.stderr)
+	}
+}
+
 // TestStatusWithoutAnAgentSaysSo. The command's own failure has to be legible:
 // it is asked precisely when things are broken, and a dial error naming a
 // socket path is not an answer to "is the agent running".

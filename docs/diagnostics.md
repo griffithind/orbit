@@ -164,14 +164,14 @@ diagnose a broken host, so its own failure mode has to be legible.
 
 1. ~~The socket, `/v1/status`, and `orbit status`.~~ **Built.**
    `internal/agent/status.go` and `cmd/orbit/status.go`.
-2. `/v1/networks/{slug}/peers` and `orbit peers`. Pure reshaping of
-   `ControlHostInfo`.
+2. ~~`/v1/networks/{slug}/peers` and `orbit peers`.~~ **Built.**
+   `Embedded.Peers` and `cmd/orbit/peers.go`.
 3. The explainer, its cross-check test, and node-local `orbit why`.
 4. Control-plane `orbit why <src> <dst>`, which needs no new agent surface —
    it reads compiled rulesets the server already has.
 
-Step 2 is mechanical. Step 3 is where the risk is, and it should not ship
-without the cross-check in 4.1.
+Step 3 is where the risk is, and it should not ship without the cross-check in
+4.1.
 
 ### 6.1 What step 1 settled
 
@@ -195,3 +195,30 @@ A third followed from the first two: a network that never finished setup gets a
 slot before it starts, so it appears in the report carrying its error. A
 registry populated only on success would omit precisely the host this command
 is run against.
+
+### 6.2 What step 2 settled
+
+**A stopped data plane is an answer, not an error.** `Embedded.Peers` returns
+`ErrNebulaNotRunning` rather than an empty slice, and `orbit peers` renders
+that as the headline. An empty peer table reads as "this host is isolated",
+which is a different problem with a different remedy from "nebula never
+started" — and returning a 500 would have made the command fail on exactly the
+host it is most useful on.
+
+**A network that has not started is not a 404.** The host has joined it, so
+saying it does not exist would send an operator looking for a typo instead of
+at the reason it is down. A slug that was never joined *is* a 404, and the two
+carry different exit codes (0 and 5).
+
+**Pending peers are a separate list.** A peer stuck mid-handshake is the
+signature of a firewall, a lighthouse that does not know it, or a clock skew —
+and merging it into the established list would hide it among peers that work.
+
+**The hostmap is sorted before it leaves the agent.** nebula iterates a Go map,
+so without this, two runs against an unchanged mesh print different orders and
+an operator comparing hosts is reading a shuffle.
+
+One thing came for free and was worth taking: `Embedded` had recorded *why*
+nebula last exited since it was written, and nothing read it. `Status` now
+carries it, so "nebula NOT running" arrives with the bound port or the refused
+configuration attached instead of sending the reader to a log.

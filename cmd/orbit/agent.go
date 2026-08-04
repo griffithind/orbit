@@ -328,6 +328,9 @@ func runCmd(args []string) error {
 			Path:   agent.SocketPath(socketRoot(df, *root)),
 			Log:    log,
 			Report: func(ctx context.Context) agent.Report { return report(ctx, *root, slots) },
+			Peers: func(ctx context.Context, network string) (agent.PeerReport, error) {
+				return peerReport(ctx, network, slots)
+			},
 		}
 		go func() {
 			if err := srv.Serve(ctx); err != nil {
@@ -418,6 +421,44 @@ func report(ctx context.Context, root string, slots []*netSlot) agent.Report {
 // processStart is when this agent came up, reported so an operator can tell a
 // host that has been healthy for a week from one that restarted a minute ago.
 var processStart = time.Now()
+
+// peerReport answers for one network, matched by slug.
+//
+// A network that exists but has not come up answers with Running false rather
+// than 404: the host HAS joined it, and telling an operator it does not exist
+// would send them looking for a typo instead of at the reason it is down.
+func peerReport(ctx context.Context, network string, slots []*netSlot) (agent.PeerReport, error) {
+	for _, s := range slots {
+		if filepath.Base(s.dir) != network {
+			continue
+		}
+		s.mu.Lock()
+		nl := s.nl
+		s.mu.Unlock()
+
+		rep := agent.PeerReport{Network: network, Established: []agent.Peer{}}
+		if nl == nil {
+			rep.Detail = "this network has not started"
+			return rep, nil
+		}
+
+		established, pending, err := nl.engine.Peers()
+		if err != nil {
+			// Not an error to the caller. "nebula is not running" is the
+			// answer, and returning a 500 would make the command fail on
+			// exactly the host it is most useful on.
+			rep.Detail = err.Error()
+			if st, sErr := nl.engine.Status(ctx); sErr == nil && st.Detail != "" {
+				rep.Detail = st.Detail
+			}
+			return rep, nil
+		}
+		rep.Running = true
+		rep.Established, rep.Pending = established, pending
+		return rep, nil
+	}
+	return agent.PeerReport{}, fmt.Errorf("%w: %s", agent.ErrUnknownNetwork, network)
+}
 
 // setupBackoff bounds how fast a network that cannot be set up is retried.
 //
@@ -546,7 +587,9 @@ func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
 	}
 
 	if s, err := n.engine.Status(ctx); err == nil {
-		out.Nebula = agent.NebulaStatus{Known: s.Known, Running: s.Running, Instance: s.Instance}
+		out.Nebula = agent.NebulaStatus{
+			Known: s.Known, Running: s.Running, Instance: s.Instance, Detail: s.Detail,
+		}
 	}
 	if cs, err := agent.ReadCertStatus(layout.Paths.Cert); err == nil {
 		out.Certificate = cs
