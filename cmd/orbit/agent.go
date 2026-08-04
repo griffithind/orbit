@@ -8,17 +8,18 @@ package main
 // what it does on a host. The two shared a release and a version already;
 // shipping them apart only meant two downloads and two things to keep in step.
 //
-// One agent process per network. Everything the agent owns for that network
-// lives in one per-network directory — /var/lib/orbit/<slug> by convention —
-// and a host joined to two networks runs two agents over two directories with
-// nothing shared. See internal/agent/layout.go.
+// One process, every network. Everything the agent owns for a network lives in
+// one per-network directory — /var/lib/orbit/<slug> by convention — and a host
+// joined to two networks keeps two directories with nothing shared, served by
+// one process under one service unit. See internal/agent/layout.go.
 //
-// It supervises the stock nebula binary: it writes the configuration and the
-// certificate material, then signals a reload, or restarts nebula and verifies
-// the restart took when the change is one nebula cannot hot-load. It never
-// embeds nebula, and it never restarts nebula merely because the process died —
-// the service manager owns that — so an agent failure cannot take down the data
-// plane.
+// It runs nebula in-process, one instance per joined network: it writes the
+// configuration and the certificate material, then reloads or restarts the
+// instance depending on whether the change is one nebula can hot-load. Agent
+// liveness and tunnel liveness are therefore the same liveness, which is the
+// cost of the arrangement; a control-plane outage still leaves every overlay
+// running, because nebula needs nothing from the control plane to forward
+// packets.
 //
 // Why -dir and not -network:
 //
@@ -300,19 +301,123 @@ func runCmd(args []string) error {
 		return fmt.Errorf("no joined networks under %s: enroll one with `orbit agent install`", *root)
 	}
 
-	var wg sync.WaitGroup
-	for _, dir := range dirs {
-		wg.Add(1)
-		go func(dir string) {
-			defer wg.Done()
-			serveNetwork(ctx, dir, c, *verifyURL, *reuseKey, *interval, *once, log)
-		}(dir)
+	slots := make([]*netSlot, len(dirs))
+	for i, dir := range dirs {
+		slots[i] = &netSlot{dir: dir}
 	}
+
+	var wg sync.WaitGroup
+	for _, s := range slots {
+		wg.Add(1)
+		go func(s *netSlot) {
+			defer wg.Done()
+			serveNetwork(ctx, s, c, *verifyURL, *reuseKey, *interval, *once, log)
+		}(s)
+	}
+
+	// The status socket, which `orbit status` reads.
+	//
+	// Not under -once: that is a single pass for a test or a cron, and binding
+	// a socket for the length of one tick would only leave a path for the next
+	// invocation to trip over.
+	//
+	// A failure to serve it is logged and nothing more. Diagnostics are worth
+	// having; they are not worth taking a host's overlays down for.
+	if !*once {
+		srv := &agent.StatusServer{
+			Path:   agent.SocketPath(socketRoot(df, *root)),
+			Log:    log,
+			Report: func(ctx context.Context) agent.Report { return report(ctx, *root, slots) },
+		}
+		go func() {
+			if err := srv.Serve(ctx); err != nil {
+				log.Error("status socket unavailable; `orbit status` will not work on this host",
+					"path", srv.Path, "error", err)
+			}
+		}()
+	}
+
 	log.Info("agent running", "networks", len(dirs), "root", *root)
 
 	wg.Wait()
 	return nil
 }
+
+// socketRoot is the directory the status socket lives in.
+//
+// Normally the agent root, the one directory shared by every network this
+// process serves. An explicit -dir means the caller has put a network somewhere
+// of its own — a test, a container, a second stack on one box — and the socket
+// belongs beside it rather than in a /var/lib/orbit that may not exist and may
+// not be writable.
+func socketRoot(df *dirFlags, root string) string {
+	if df.explicit() {
+		if layout, err := df.layout(); err == nil {
+			return filepath.Dir(layout.Dir)
+		}
+	}
+	return root
+}
+
+// netSlot is one network's current status: published by the goroutine that owns
+// the network, read by the status socket.
+//
+// One slot per directory, created before any of them starts, so a network that
+// never finishes setup still appears in the report and carries the reason. That
+// is the case the command exists for, and a registry populated only on success
+// would omit exactly it.
+type netSlot struct {
+	dir string
+
+	mu  sync.Mutex
+	nl  *networkLoop
+	err error
+}
+
+func (s *netSlot) setLoop(nl *networkLoop) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nl, s.err = nl, nil
+}
+
+func (s *netSlot) setError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nl, s.err = nil, err
+}
+
+func (s *netSlot) status(ctx context.Context) agent.NetworkStatus {
+	s.mu.Lock()
+	nl, err := s.nl, s.err
+	s.mu.Unlock()
+
+	if nl != nil {
+		return nl.status(ctx)
+	}
+	st := agent.NetworkStatus{Network: filepath.Base(s.dir), Dir: s.dir}
+	if err != nil {
+		st.Error = err.Error()
+	}
+	return st
+}
+
+func report(ctx context.Context, root string, slots []*netSlot) agent.Report {
+	rep := agent.Report{
+		Version:  version.Version,
+		Root:     root,
+		PID:      os.Getpid(),
+		Started:  processStart,
+		Networks: make([]agent.NetworkStatus, 0, len(slots)),
+	}
+	for _, s := range slots {
+		rep.Networks = append(rep.Networks, s.status(ctx))
+	}
+	return rep
+}
+
+// processStart is when this agent came up, reported so an operator can tell a
+// host that has been healthy for a week from one that restarted a minute ago.
+var processStart = time.Now()
 
 // setupBackoff bounds how fast a network that cannot be set up is retried.
 //
@@ -331,15 +436,18 @@ const (
 // Setup is retried rather than attempted once, and the poll loop below heals
 // nebula on every tick. Between them, the states a host can get stuck in are
 // the ones where the control plane itself has nothing to offer.
-func serveNetwork(ctx context.Context, dir string, c cert.Curve, verifyURL string, reuseKey bool, interval time.Duration, once bool, log *slog.Logger) {
+func serveNetwork(ctx context.Context, slot *netSlot, c cert.Curve, verifyURL string, reuseKey bool, interval time.Duration, once bool, log *slog.Logger) {
+	dir := slot.dir
 	backoff := setupBackoffMin
 	for {
 		nl, err := newNetworkLoop(ctx, dir, c, verifyURL, reuseKey, log)
 		if err == nil {
+			slot.setLoop(nl)
 			defer func() { _ = nl.engine.Close() }()
 			nl.run(ctx, interval, once)
 			return
 		}
+		slot.setError(err)
 
 		// One network failing must not stop the others: a host on three
 		// networks losing all three because one directory is unreadable is
@@ -390,6 +498,60 @@ type networkLoop struct {
 	loop   *agent.Loop
 	engine *agent.Embedded
 	log    *slog.Logger
+
+	// mu guards the tick's own record of itself. Loop's state is NOT read
+	// through here — see status.
+	mu       sync.Mutex
+	lastPoll time.Time
+	lastErr  error
+}
+
+// status is this network as the socket reports it.
+//
+// The persisted state is re-read from disk rather than taken from
+// loop.State, which the tick goroutine mutates: reading that field from the
+// socket's goroutine is a data race, and holding a lock across a tick would
+// make a slow control plane block the diagnostic command that exists to
+// report on it. Reading the file is also the more honest answer — it is what
+// survives a restart, and it is what the control plane was last told.
+func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
+	n.mu.Lock()
+	lastPoll, lastErr := n.lastPoll, n.lastErr
+	n.mu.Unlock()
+
+	layout := n.loop.Layout
+	out := agent.NetworkStatus{
+		Network:  layout.Network,
+		Dir:      layout.Dir,
+		Ready:    true,
+		LastPoll: lastPoll,
+	}
+	if lastErr != nil {
+		out.LastPollError = lastErr.Error()
+	}
+
+	if st, err := agent.ReadState(layout.Dir); err == nil {
+		out.HostID = st.HostID
+		out.ControlURL = st.ControlURL()
+		out.Replicas = len(st.AgentURLs)
+		out.ConfigEpoch = st.ConfigEpoch
+		out.BlocklistEpoch = st.BlocklistEpoch
+		out.DataPlaneDownSince = st.DataPlaneDownSince
+		out.UnconfirmedSince = st.UnconfirmedSince
+		// Only while it is still in force. A quarantine that lapsed an hour ago
+		// is not a reason to tell an operator this host is refusing a config.
+		if time.Now().Before(st.QuarantinedUntil) {
+			out.QuarantinedEpoch = st.QuarantinedConfigEpoch
+		}
+	}
+
+	if s, err := n.engine.Status(ctx); err == nil {
+		out.Nebula = agent.NebulaStatus{Known: s.Known, Running: s.Running, Instance: s.Instance}
+	}
+	if cs, err := agent.ReadCertStatus(layout.Paths.Cert); err == nil {
+		out.Certificate = cs
+	}
+	return out
 }
 
 func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL string, reuseKey bool, log *slog.Logger) (*networkLoop, error) {
@@ -473,9 +635,17 @@ func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool
 			n.log.Info("nebula restarted")
 		}
 
-		if err := n.loop.Tick(ctx); err != nil {
+		err := n.loop.Tick(ctx)
+		if err != nil {
 			n.log.Warn("tick failed, keeping current configuration", "error", err)
 		}
+
+		// Recorded whether or not it failed. "Last polled 40 minutes ago with
+		// no error" is a different diagnosis from "polled a second ago and
+		// failed", and the epochs alone tell neither.
+		n.mu.Lock()
+		n.lastPoll, n.lastErr = time.Now(), err
+		n.mu.Unlock()
 	}
 
 	tick()

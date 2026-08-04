@@ -82,6 +82,13 @@ orbit host create -name web-01 -addr 10.42.0.7 -role web && orbit host code web-
 sudo orbit agent install -url https://orbit.example.com -code orb_1_… -network prod
 ```
 
+To see what a host is doing — every network it joined, whether its data plane is
+up, when it last reached the control plane — ask the agent on that host:
+
+```bash
+sudo orbit status
+```
+
 [docs/deployment.md](docs/deployment.md) has the whole of it — bring-up order,
 sealing the CA key to a TPM, backups, alerts, and what survives an outage.
 
@@ -200,7 +207,7 @@ detail and says plainly what has and has not been measured.
 | [docs/enrollment.md](docs/enrollment.md) | Enrollment methods, wire protocol, renewal, recovery, attack analysis |
 | [docs/policy-model.md](docs/policy-model.md) | How Nebula's firewall enforces, what a certificate can carry, and how policy compiles |
 | [docs/revocation.md](docs/revocation.md) | How blocking propagates, and how to measure it |
-| [docs/diagnostics.md](docs/diagnostics.md) | Design for `orbit status`, `orbit peers` and `orbit why` (not yet built) |
+| [docs/diagnostics.md](docs/diagnostics.md) | The agent status socket, and the design for `orbit peers` and `orbit why` |
 
 Start with `design.md` §1. It documents six properties of Nebula's certificate
 code that every other decision here follows from, with file references — most

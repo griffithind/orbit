@@ -162,13 +162,36 @@ diagnose a broken host, so its own failure mode has to be legible.
 
 ## 6. Order of work
 
-1. The socket, `/v1/status`, and `orbit status`. Smallest useful slice, and it
-   closes the most common support question on its own.
+1. ~~The socket, `/v1/status`, and `orbit status`.~~ **Built.**
+   `internal/agent/status.go` and `cmd/orbit/status.go`.
 2. `/v1/networks/{slug}/peers` and `orbit peers`. Pure reshaping of
    `ControlHostInfo`.
 3. The explainer, its cross-check test, and node-local `orbit why`.
 4. Control-plane `orbit why <src> <dst>`, which needs no new agent surface —
    it reads compiled rulesets the server already has.
 
-Steps 1 and 2 are mechanical. Step 3 is where the risk is, and it should not
-ship without the cross-check in 4.1.
+Step 2 is mechanical. Step 3 is where the risk is, and it should not ship
+without the cross-check in 4.1.
+
+### 6.1 What step 1 settled
+
+Two things were decided in code rather than here, and both are load-bearing
+enough to record.
+
+**The socket is bound with a connect-first check, never an unconditional
+unlink.** Clearing the path outright lets a second agent bind over a running
+first one: both processes look healthy, status requests go to whichever won,
+and the loser keeps serving networks nobody can see. Only a refused connection
+proves the path is a leftover. `TestALiveSocketIsNotStolen` holds it.
+
+**The report re-reads the state file rather than reading `Loop.State`.** The
+tick goroutine mutates that field, so reading it from the socket's goroutine is
+a data race, and holding a lock across a tick would let a slow control plane
+block the command that exists to report on it. Reading the file is also the
+more honest answer: it is what survives a restart, and it is what the control
+plane was last told.
+
+A third followed from the first two: a network that never finished setup gets a
+slot before it starts, so it appears in the report carrying its error. A
+registry populated only on success would omit precisely the host this command
+is run against.

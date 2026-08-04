@@ -126,13 +126,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Scoped to ./internal/... on purpose. Every piece of shared mutable
-      # state on the hot path lives there and is directly tested:
+      # Scoped on purpose. Every piece of shared mutable state on the hot path
+      # is directly tested:
       #
       #   internal/notify   subscriber fan-out under subscribe/release churn
       #   internal/api      the enrollment limiter's key map
       #   internal/agent    the apply/renew loop's state
       #   internal/store    pool handling
+      #   cmd/orbit         the agent's status socket, answering from its own
+      #                     goroutine while the tick and the setup retry mutate
+      #                     what it reports
+      #
+      # cmd/... is in scope despite holding almost no logic, because that one
+      # piece of it IS concurrent and its types are in package main — they
+      # cannot move into internal/ without dragging the whole run loop along.
+      # It costs about a second.
       #
       # Running -race over ./e2e/ as well was measured at roughly 100x: a 0.5s
       # test took 57s, because the detector instruments every one of nebula's
@@ -140,4 +148,4 @@ jobs:
       # the same primitives, reached through a slower path — for a 25-minute PR
       # gate, so the fan-out gets a direct unit test instead.
       - name: race
-        run: go test ./internal/... -count=1 -race -timeout 10m
+        run: go test ./internal/... ./cmd/... -count=1 -race -timeout 10m
