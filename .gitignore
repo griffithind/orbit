@@ -14,6 +14,13 @@
 *.env
 !deploy/orbit.env.example
 
+# What scripts/setup-control-plane.sh writes, and it writes them INSIDE a clone
+# — it checks the repository out to /opt/orbit and compose needs ./ca-pass
+# beside the compose file. So a `git add -A` on the server would otherwise
+# commit the mesh's CA passphrase and both admin tokens.
+/deploy/ca-pass
+/deploy/bootstrap-output.txt
+
 # Local data
 /var/
 *.sql.age

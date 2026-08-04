@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -125,4 +126,42 @@ func loopbackPorts(s string) []string {
 		}
 	}
 	return out
+}
+
+// TestTheSetupScriptsSecretsAreIgnored.
+//
+// scripts/setup-control-plane.sh checks the repository out to /opt/orbit and
+// writes its secrets INSIDE that clone — it has to, because compose resolves
+// `file: ./ca-pass` relative to the compose file. So the working tree on a
+// running control plane contains the mesh's CA passphrase and both admin
+// tokens, and a `git add -A` there would commit them.
+//
+// Derived from the script rather than hardcoded: a new secret the script starts
+// writing fails here instead of being discovered in a public repository.
+func TestTheSetupScriptsSecretsAreIgnored(t *testing.T) {
+	b, err := os.ReadFile("../../scripts/setup-control-plane.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(b)
+
+	// Every path the script creates beside the compose file. Kept as a literal
+	// list so the test states the invariant, with a check below that the script
+	// still writes each one.
+	secrets := []string{"ca-pass", "bootstrap-output.txt", ".env"}
+	for _, name := range secrets {
+		if !strings.Contains(script, name) {
+			t.Errorf("the script no longer mentions %q; this list is stale and "+
+				"something else may now be written unignored", name)
+			continue
+		}
+		path := "deploy/" + name
+		cmd := exec.Command("git", "check-ignore", "-q", path)
+		cmd.Dir = "../.."
+		if err := cmd.Run(); err != nil {
+			t.Errorf("%s is NOT gitignored. The setup script writes it into a clone "+
+				"on the control plane, so a stray `git add -A` there commits the "+
+				"mesh's CA passphrase or an admin token to a public repository.", path)
+		}
+	}
 }

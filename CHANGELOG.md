@@ -13,6 +13,14 @@ without one.
 
 ### Fixed
 
+- **The setup script wrote secrets into an unignored working tree.**
+  `scripts/setup-control-plane.sh` checks the repository out to `/opt/orbit` and
+  writes `ca-pass` and `bootstrap-output.txt` beside the compose file — it has
+  to, because compose resolves `file: ./ca-pass` relative to itself. Neither was
+  gitignored, so a `git add -A` on a control plane would have committed the
+  mesh's CA passphrase and both admin tokens. Both are ignored now, and a test
+  derives the list from the script so a new secret cannot escape quietly.
+
 - **The compose file could never reach its own database.** `orbitd` runs with
   `network_mode: host`, which takes it off the compose network — so it cannot
   resolve `postgres` by service name, and the only address the two share is the
