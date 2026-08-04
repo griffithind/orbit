@@ -9,6 +9,29 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.3.3
+
+### Fixed
+
+- **The setup script could finish without handing over the admin token.** Two
+  causes, either of which loses a secret `orbitd bootstrap` prints exactly once.
+
+  `docker compose run` allocates a pseudo-TTY by default, and a TTY-attached
+  container's output does not reliably reach a pipe — so the `| tee` that was
+  meant to capture the token could capture nothing while the run reported
+  success. Every `compose run` now passes `-T`.
+
+  And the token was only ever shown where it was generated, then scrolled past
+  behind compose's progress output, `docker compose up -d`, and the readiness
+  loop; the closing summary named a file rather than printing it. Both tokens
+  are now printed in the summary, and the script fails loudly if bootstrap
+  yields no token rather than continuing to a cheerful "Done".
+
+  A re-run over an already-bootstrapped network now says so and gives the
+  command to mint a replacement, instead of implying a token was issued. It no
+  longer mints a break-glass token on every re-run either — a trail of untracked
+  `*` tokens is the opposite of what one is for.
+
 ## v0.3.2
 
 Deployment fixes and a secrets-handling fix, all found by running v0.3.1 on a

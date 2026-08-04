@@ -19,7 +19,7 @@
 set -euo pipefail
 
 REPO_URL=${ORBIT_REPO_URL:-https://github.com/griffithind/orbit}
-VERSION=${ORBIT_VERSION:-0.3.2}
+VERSION=${ORBIT_VERSION:-0.3.3}
 DIR=${ORBIT_DIR:-/opt/orbit}
 NETWORK=prod
 CIDR=10.42.0.0/16
@@ -174,20 +174,29 @@ fi
 #------------------------------------------------------------------------------
 say "Database"
 
-docker compose run --rm orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
+docker compose run --rm -T orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
 
 #------------------------------------------------------------------------------
 say "Bootstrap"
 
+ADMIN_TOKEN=""
+BREAK_GLASS=""
+FRESH=0
+
 if [ -n "${ORBIT_NETWORK:-}" ]; then
     echo "already bootstrapped as $ORBIT_NETWORK; skipping"
 else
-    # Captured rather than streamed, because the network id has to be written
-    # back into .env and the admin token is shown exactly once. 0600 and named
-    # so it is obvious what it holds.
+    FRESH=1
+    # Captured as well as shown, because the network id has to be written back
+    # into .env and the admin token is printed exactly once. 0600 and named so
+    # it is obvious what it holds.
+    #
+    # -T disables compose's pseudo-TTY. With a TTY allocated the container's
+    # output does not reliably reach a pipe, which is how a run can complete
+    # successfully and hand back no token at all.
     out=bootstrap-output.txt
     umask 077
-    docker compose run --rm orbitd bootstrap \
+    docker compose run --rm -T orbitd bootstrap \
         -network "$NETWORK" -cidr "$CIDR" -cert-ttl "$CERT_TTL" | tee "$out"
     chmod 0600 "$out"
 
@@ -196,6 +205,10 @@ else
     sed -i "s|^ORBIT_NETWORK=.*|ORBIT_NETWORK=$net|" .env
     export ORBIT_NETWORK=$net
     echo "network $net written to .env"
+
+    ADMIN_TOKEN=$(sed -n 's/^ *export ORBIT_TOKEN=//p' "$out" | tr -d '\r' | head -1)
+    [ -n "$ADMIN_TOKEN" ] || die "bootstrap did not yield an admin token ($out).
+Mint one with:  docker compose run --rm -T orbitd token create -name admin -scopes '*'"
 fi
 
 #------------------------------------------------------------------------------
@@ -219,9 +232,19 @@ say "Break-glass token"
 
 # Minted now, while everything works. POST /v1/tokens needs a token, so the one
 # failure the API cannot help with is losing every admin credential.
-docker compose run --rm orbitd token create -name break-glass -scopes '*' \
-    | tee -a bootstrap-output.txt
-chmod 0600 bootstrap-output.txt
+#
+# Only on a fresh bootstrap: minting one on every re-run would leave a trail of
+# "*" tokens nobody is tracking, which is the opposite of what this is for.
+if [ "$FRESH" = 1 ]; then
+    BREAK_GLASS=$(docker compose run --rm -T orbitd token create \
+        -name break-glass -scopes '*' 2>/dev/null | tr -d '\r' | tail -1)
+    printf 'break-glass %s\n' "$BREAK_GLASS" >> bootstrap-output.txt
+    chmod 0600 bootstrap-output.txt
+    echo "minted"
+else
+    echo "skipped on a re-run; mint one with:"
+    echo "  docker compose run --rm -T orbitd token create -name break-glass -scopes '*'"
+fi
 
 #------------------------------------------------------------------------------
 cat <<EOF
@@ -233,9 +256,35 @@ $(printf '\033[1m')Done.$(printf '\033[0m')  The control plane is running and is
   lighthouse   ${PUBLIC_IP}:4242
   overlay      $OVERLAY_ADDR
 
-$(printf '\033[1m')The admin token and the break-glass token are in$(printf '\033[0m')
-$(printf '\033[1m')  $PWD/bootstrap-output.txt$(printf '\033[0m')
-Store them somewhere that is not this machine, then: shred -u bootstrap-output.txt
+EOF
+
+# The tokens, printed HERE rather than only where they were generated.
+#
+# Both scroll past behind compose's progress output, `up -d`, and the readiness
+# loop — and the admin token is shown exactly once by bootstrap, so a run that
+# completes and leaves an operator without it has failed at the only thing it
+# could not redo.
+if [ "$FRESH" = 1 ]; then
+    printf '\033[1m%s\033[0m\n' "Admin token — shown once, store it now:"
+    printf '\n  %s\n\n' "$ADMIN_TOKEN"
+    printf '\033[1m%s\033[0m\n' "Break-glass token — store this somewhere else entirely:"
+    printf '\n  %s\n\n' "$BREAK_GLASS"
+    cat <<EOF
+Both are also in $PWD/bootstrap-output.txt (0600, gitignored).
+Once they are somewhere safe:  shred -u bootstrap-output.txt
+
+EOF
+else
+    cat <<EOF
+This network was already bootstrapped, so no admin token was issued — bootstrap
+prints one exactly once. If you no longer have it:
+
+  docker compose run --rm -T orbitd token create -name admin -scopes '*'
+
+EOF
+fi
+
+cat <<EOF
 
 Add a host, from your laptop:
 
