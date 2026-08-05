@@ -35,6 +35,16 @@ type DNSState struct {
 	// Listen is this host's own overlay address, port 53.
 	Listen netip.AddrPort
 
+	// TunDev is the link systemd-resolved hangs this machine's DNS settings
+	// off, so `resolvectl revert <dev>` can take all of them away by name.
+	TunDev string
+
+	// Global is true when every lookup must come here, not just the mesh
+	// domain. It follows the exit node, because that is the case where leaving
+	// the machine's resolver pointed at the local network tells that network
+	// every name this machine looks up.
+	Global bool
+
 	// Hosts maps a lowercased fully-qualified name to every address it has.
 	//
 	// EVERY address: a dual-stack machine has two and an answer carrying one of
@@ -52,7 +62,8 @@ func (d DNSState) String() string {
 	if d.Empty() {
 		return "dns=off"
 	}
-	return fmt.Sprintf("dns=%s domain=%s names=%d", d.Listen, d.Domain, len(d.Hosts))
+	return fmt.Sprintf("dns=%s domain=%s dev=%s global=%v names=%d",
+		d.Listen, d.Domain, d.TunDev, d.Global, len(d.Hosts))
 }
 
 // DNSStateFromConfig reads the name table out of a VERIFIED configuration.
@@ -63,8 +74,12 @@ func (d DNSState) String() string {
 // can be pointed anywhere.
 func DNSStateFromConfig(yamlCfg string) (DNSState, error) {
 	var doc struct {
+		Tun struct {
+			Dev string `yaml:"dev"`
+		} `yaml:"tun"`
 		Orbit *struct {
-			DNS *struct {
+			ExitNode bool `yaml:"exit_node"`
+			DNS      *struct {
 				Domain string `yaml:"domain"`
 				Listen string `yaml:"listen"`
 				Hosts  []struct {
@@ -93,6 +108,8 @@ func DNSStateFromConfig(yamlCfg string) (DNSState, error) {
 	d := DNSState{
 		Domain: strings.ToLower(strings.Trim(src.Domain, ".")),
 		Listen: listen,
+		TunDev: doc.Tun.Dev,
+		Global: doc.Orbit.ExitNode,
 		Hosts:  make(map[string][]netip.Addr, len(src.Hosts)*2),
 	}
 	for _, h := range src.Hosts {
@@ -134,10 +151,18 @@ type Resolver struct {
 
 	servers []*dns.Server
 	current string // the applied state's String(), to skip no-op reconciles
+
+	// apply and remove point the machine at this resolver. Fields rather than
+	// direct calls so a unit test cannot rewrite the DNS configuration of the
+	// machine it happens to be running on.
+	apply  func(dev, domain, addr string, global bool) error
+	remove func(dev, domain string) error
 }
 
 // NewResolver returns a resolver that is not yet listening.
-func NewResolver(log logger) *Resolver { return &Resolver{log: log} }
+func NewResolver(log logger) *Resolver {
+	return &Resolver{log: log, apply: applyDNS, remove: removeDNS}
+}
 
 // Apply makes the state true, restarting the listener if the address changed.
 //
@@ -154,6 +179,12 @@ func (r *Resolver) Apply(d DNSState) error {
 		return nil
 	}
 	if d.Empty() {
+		// The OS first: a machine pointed at a resolver that is about to stop
+		// answering resolves nothing, and the window is however long teardown
+		// takes.
+		if err := r.remove(r.state.TunDev, r.state.Domain); err != nil {
+			r.log.Warn("could not restore this machine's resolver", "error", err)
+		}
 		r.Stop()
 		r.current = ""
 		return nil
@@ -178,6 +209,19 @@ func (r *Resolver) Apply(d DNSState) error {
 	if err := r.listen(d.Listen); err != nil {
 		return err
 	}
+	// Only once it is answering. Pointing the OS at a socket that is not
+	// listening yet is a machine that cannot resolve its own control plane.
+	//
+	// A failure here does NOT take the listener down. The resolver still answers
+	// anything that asks it, which is worth having, and the reconcile loop
+	// retries every cycle — whereas tearing down on a transient permission
+	// error would turn one bad moment into a machine that resolves nothing.
+	// current stays empty so the next cycle tries again rather than deciding
+	// nothing changed.
+	if err := r.apply(d.TunDev, d.Domain, d.Listen.String(), d.Global); err != nil {
+		return fmt.Errorf("point this machine at the mesh resolver: %w", err)
+	}
+
 	r.current = d.String()
 	r.log.Info("resolver serving the mesh name table",
 		"listen", d.Listen, "domain", d.Domain, "names", len(d.Hosts), "upstream", up)

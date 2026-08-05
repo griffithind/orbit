@@ -64,6 +64,9 @@ func TestResolverAnswersAndForwards(t *testing.T) {
 	defer upstream.Shutdown()
 
 	r := NewResolver(quietLogger{})
+	// Serve, but do not touch this machine's own resolver configuration.
+	r.apply = func(_, _, _ string, _ bool) error { return nil }
+	r.remove = func(_, _ string) error { return nil }
 	r.upstream = []string{upAddr}
 	d, err := DNSStateFromConfig(dnsCfg)
 	if err != nil {
