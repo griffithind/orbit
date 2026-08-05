@@ -81,10 +81,24 @@ func caCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Defaulted here rather than server-side, because the API refuses an
+	// unconstrained CA on purpose — a CA that may claim anything is a mesh-wide
+	// backdoor — and "the network's own prefixes" is the answer an operator
+	// means every time except when they say otherwise. Making them retype the
+	// CIDRs would only invite a typo that silently narrows what the CA can sign.
+	claim := splitCSV(*networks)
+	if len(claim) == 0 {
+		net, err := o.client.GetNetwork(ctx, networkID.String())
+		if err != nil {
+			return err
+		}
+		claim = net.Value.CIDRs
+	}
+
 	res, err := o.client.CreateCA(ctx, networkID, wire.CreateCARequest{
 		Name:           fs.Arg(0),
 		Days:           *days,
-		Networks:       splitCSV(*networks),
+		Networks:       claim,
 		Groups:         splitCSV(*groups),
 		UnsafeNetworks: splitCSV(*unsafe),
 	})

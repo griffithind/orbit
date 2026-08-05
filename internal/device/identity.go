@@ -218,13 +218,18 @@ func LoadOrCreate(path string) (*Identity, error) {
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create device key directory: %w", err)
+		return nil, fmt.Errorf("create the directory for the device key at %s "+
+			"(pass -device-key to put it somewhere writable): %w", dir, err)
 	}
 
 	// Same directory, so the link below cannot cross a filesystem boundary.
 	tmp, err := os.CreateTemp(dir, ".device.key.*")
 	if err != nil {
-		return nil, fmt.Errorf("create device key: %w", err)
+		// Named with the DESTINATION, not the temporary file the write goes
+		// through. A permission error quoting `.device.key.1869827180` sends an
+		// operator looking for a file that has never existed.
+		return nil, fmt.Errorf("create the device key at %s "+
+			"(pass -device-key to put it somewhere writable): %w", path, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once linked; the cleanup path when not

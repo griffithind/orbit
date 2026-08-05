@@ -480,7 +480,7 @@ func membershipReserve(ctx context.Context, args []string) error {
 		"here and nowhere else — it is not recoverable.\n\nOn the machine:\n\n"+
 		"  orbit agent join -url %s -network %s -code %s\n",
 		*name, network.Name, res.Value.ExpiresAt.Format(time.RFC3339),
-		orDash(res.Value.EnrollURL), network.Slug, res.Value.Code)
+		joinURL(res.Value.EnrollURL, o.url), network.Slug, res.Value.Code)
 
 	// Say what the machine will BE, not just that a code exists. The whole point
 	// of putting the topology on the reservation is that nobody has to come back
@@ -761,6 +761,25 @@ func membershipRm(ctx context.Context, args []string) error {
 }
 
 // splitCSV matches orbitd's helper of the same name: trimmed, empties dropped.
+// joinURL is the URL to put in the join command printed for an operator to copy.
+//
+// The control plane's -enroll-url when it has one, because that is the address it knows
+// machines can reach it at. Falling back to the address this CLI is itself talking to,
+// which is usually right and is at worst a URL the operator recognises.
+//
+// Never a dash. orDash is right for a table cell, where an empty column is information;
+// inside a command somebody is about to paste it is a line that cannot work, and the
+// failure lands on the machine being enrolled rather than here.
+func joinURL(enrollURL, clientURL string) string {
+	if enrollURL != "" {
+		return enrollURL
+	}
+	if clientURL != "" {
+		return clientURL
+	}
+	return "<control-plane-url>"
+}
+
 func splitCSV(s string) []string {
 	var out []string
 	for _, p := range strings.Split(s, ",") {

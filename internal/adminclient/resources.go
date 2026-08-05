@@ -163,6 +163,10 @@ func (c *Client) ListAudit(ctx context.Context, f AuditFilter) (Result[[]wire.Au
 // That two-step is the whole of rotation, and it is why this returns a CA nobody is using
 // yet rather than one that has already taken over.
 func (c *Client) CreateCA(ctx context.Context, networkID uuid.UUID, req wire.CreateCARequest) (Result[wire.CAResponse], error) {
-	q := url.Values{"network_id": {networkID.String()}}
-	return send[wire.CAResponse](ctx, c, http.MethodPost, "/v1/cas", q, req)
+	// In the BODY. Unlike every list endpoint beside it, this handler reads the
+	// network from the request rather than the query string, and sending it the
+	// other way fails with "invalid network_id" while looking like a
+	// permissions problem.
+	req.NetworkID = networkID.String()
+	return send[wire.CAResponse](ctx, c, http.MethodPost, "/v1/cas", nil, req)
 }

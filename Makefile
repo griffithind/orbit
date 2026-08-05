@@ -107,5 +107,4 @@ e2e: ## Run the end-to-end tests (needs Postgres)
 
 .PHONY: demo
 demo: ## Bootstrap a local mesh and print next steps
-	@ORBIT_ENROLL_PEPPER=$$(head -c 32 /dev/urandom | base64) \
-	  go run ./cmd/orbitd bootstrap -dsn "postgres://orbit_app:orbit_app_test@localhost:5433/orbit?sslmode=disable"
+	@go run ./cmd/orbitd bootstrap -dsn "$(ADMIN_DSN)"
