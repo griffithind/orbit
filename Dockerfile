@@ -12,8 +12,15 @@ FROM golang:1.26-alpine AS build
 
 # Layer the module download separately so a source change does not refetch the
 # dependency graph. gvisor and nebula are most of it.
+#
+# The submodule's own go.mod comes too. go.mod replaces nebula with
+# ./third_party/nebula, and `go mod download` resolves every replacement before
+# it fetches anything — so without this it fails on a missing file rather than
+# on anything to do with the build, and only in the image, because every other
+# build already has the whole tree.
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY third_party/nebula/go.mod third_party/nebula/go.sum ./third_party/nebula/
 RUN go mod download
 
 COPY . .

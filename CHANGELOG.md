@@ -9,6 +9,20 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.4.1
+
+### Fixed
+
+- **The container image would not build.** The Dockerfile copies `go.mod` and
+  `go.sum` on their own so a source change does not refetch the dependency
+  graph, then runs `go mod download`. As of v0.4.0 that file replaces nebula
+  with `./third_party/nebula`, and `go mod download` resolves every replacement
+  before fetching anything — so it failed on a missing `go.mod` in a directory
+  the image had not copied yet.
+
+  Only the image was affected. Every other build already has the whole tree, so
+  nothing local, in CI, or in the release binaries could see it.
+
 ## v0.4.0
 
 The largest release so far: the data model was rebuilt, the mesh learned to
