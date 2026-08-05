@@ -34,7 +34,7 @@ import (
 // firewall tables, and asserts that what the explainer predicted is what
 // happened. When upstream changes the matching, this fails.
 //
-// Userspace devices (overlay.NewUserDeviceFromConfig) rather than tun, so it
+// Userspace devices (overlay.NewUserDeviceFromConfig, nil) rather than tun, so it
 // needs no root and runs in ordinary CI — the firewall is in the packet path
 // either way, since Drop does not care what the device is.
 
@@ -197,7 +197,7 @@ func bootNode(t *testing.T, name, cfgYAML string) (*service.Service, string) {
 	if err := c.Load(path); err != nil {
 		t.Fatalf("%s: load config: %v\n%s", name, err, cfgYAML)
 	}
-	ctrl, err := nebula.Main(c, false, "why-"+name, quiet, overlay.NewUserDeviceFromConfig)
+	ctrl, err := nebula.Main(c, false, "why-"+name, quiet, overlay.NewUserDeviceFromConfig, nil)
 	if err != nil {
 		t.Fatalf("%s: nebula refused the config: %v\n%s", name, err, cfgYAML)
 	}

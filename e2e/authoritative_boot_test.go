@@ -114,7 +114,7 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
-	ctrl, err := nebula.Main(c, false, "orbit-e2e", logger, overlay.NewUserDeviceFromConfig)
+	ctrl, err := nebula.Main(c, false, "orbit-e2e", logger, overlay.NewUserDeviceFromConfig, nil)
 	if err != nil {
 		t.Fatalf("nebula refused the authoritative config: %v\n%s", err, written)
 	}

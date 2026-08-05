@@ -114,7 +114,7 @@ func validate(t *testing.T, fragment []byte) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, err := nebula.Main(c, true, "orbit-test", logger, nil); err != nil {
+	if _, err := nebula.Main(c, true, "orbit-test", logger, nil, nil); err != nil {
 		t.Fatalf("nebula rejected the config: %v\n\n%s", err, fragment)
 	}
 }

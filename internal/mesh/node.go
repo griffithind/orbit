@@ -171,7 +171,7 @@ func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger)
 		return nil, fmt.Errorf("mesh: load config: %w", err)
 	}
 
-	ctrl, err := nebula.Main(c, false, "orbit-control-plane", log.With("component", "nebula"), overlay.NewUserDeviceFromConfig)
+	ctrl, err := nebula.Main(c, false, "orbit-control-plane", log.With("component", "nebula"), overlay.NewUserDeviceFromConfig, nil)
 	if err != nil {
 		return nil, fmt.Errorf("mesh: start nebula on network %s: %w", cfg.NetworkID, err)
 	}

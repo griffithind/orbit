@@ -53,3 +53,24 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20240423190808-9d7a357edefe // indirect
 )
+
+// Nebula is built from the fork at github.com/griffithind/nebula, checked out as the
+// submodule at third_party/nebula. The fork carries one commit on top of upstream: a
+// udp.ListenerFactory parameter on Main, mirroring the overlay.DeviceFactory that is
+// already there for the tun device.
+//
+// Orbit needs it because Main builds its UDP listeners inline and Control hands back no
+// reference to them, so there is no supported way to set a socket option on the socket
+// nebula spends its life sending from. On darwin that option is IP_BOUND_IF, which scopes
+// the socket to a physical interface — the only equivalent of listen.so_mark on a platform
+// with neither SO_MARK nor policy routing, and the one thing keeping an exit node from
+// routing nebula's own UDP into the tunnel that carries it.
+//
+// The fork keeps upstream's module path so this stays a directory replace. That is also
+// why it is deliberately one small commit: it is meant to be upstreamed, and to rebase
+// cleanly onto each release until it is.
+//
+// A replace applies only to the main module. Anything importing Orbit as a library gets
+// stock nebula, where the factory does not exist and the build fails — loudly, which is
+// the right way for that to be discovered.
+replace github.com/slackhq/nebula => ./third_party/nebula

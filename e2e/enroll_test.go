@@ -792,7 +792,7 @@ func bootNebula(t *testing.T, dir string, addr netip.Addr) (*nebulaNode, error) 
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
-	ctrl, err := nebula.Main(c, false, "orbit-e2e", logger, overlay.NewUserDeviceFromConfig)
+	ctrl, err := nebula.Main(c, false, "orbit-e2e", logger, overlay.NewUserDeviceFromConfig, nil)
 	if err != nil {
 		return nil, fmt.Errorf("start nebula in %s: %w", dir, err)
 	}

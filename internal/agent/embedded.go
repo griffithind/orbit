@@ -112,7 +112,7 @@ func (e *Embedded) startLocked(_ context.Context) error {
 	// difference between this and internal/mesh: the control plane runs on a
 	// userspace stack and needs no interface, a managed host IS the interface.
 	// It is also why this path needs root.
-	ctrl, err := nebula.Main(c, false, "orbit-agent", nlog, nil)
+	ctrl, err := nebula.Main(c, false, "orbit-agent", nlog, nil, nil)
 	if err != nil {
 		return fmt.Errorf("nebula rejected the configuration: %w", err)
 	}
