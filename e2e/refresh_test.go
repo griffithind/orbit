@@ -171,7 +171,13 @@ func TestControlPlanePicksUpANewLighthouse(t *testing.T) {
 		t.Errorf("control plane did not pick up the second lighthouse:\n%s", cfg)
 	}
 	// And it must still not point at itself.
-	if strings.Contains(cfg, "10.42.62.2") {
+	//
+	// Scoped to nebula's half of the configuration. Every host now carries the
+	// network's DNS name table, which lists every machine including this one, so
+	// a search of the whole file would find this address in a section that has
+	// nothing to do with lighthouses and fail for the wrong reason.
+	nebulaCfg, _, _ := strings.Cut(cfg, "\norbit:")
+	if strings.Contains(nebulaCfg, "10.42.62.2") {
 		t.Error("control plane listed itself as a lighthouse")
 	}
 }

@@ -825,7 +825,14 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		tunDev = ""
 	}
 
+	names, err := namesFor(ctx, tx, net)
+	if err != nil {
+		return nil, "", err
+	}
+
 	fragment, err := nebulacfg.Render(nebulacfg.Input{
+		DNSDomain:    dnsDomainFor(net),
+		Names:        names,
 		Paths:        inst.paths,
 		AmLighthouse: host.IsLighthouse,
 		AmRelay:      host.IsRelay,
@@ -1366,4 +1373,43 @@ func (s *Service) HostRoles(ctx context.Context, membershipID uuid.UUID) (*store
 		return err
 	})
 	return h, err
+}
+
+// DNSSuffix is the parent domain every network's names sit under.
+//
+// .internal, because ICANN reserved it for exactly this in 2024 and it can
+// therefore never be delegated to somebody else. A made-up TLD works until the
+// day it does not, and the failure is a machine resolving an internal name to a
+// stranger's server.
+const DNSSuffix = "internal"
+
+// dnsDomainFor is the search domain for a network.
+//
+// The SLUG, not the display name. UpdateNetworkName changes the label and
+// nothing else, so a rename must not move every machine's fully-qualified name
+// out from under whatever is using it.
+func dnsDomainFor(net *store.Network) string {
+	if net.Slug == "" {
+		return ""
+	}
+	return net.Slug + "." + DNSSuffix
+}
+
+// namesFor is the name table this network's hosts resolve locally.
+//
+// Every reachable machine, not just the ones this host may talk to. Policy
+// decides what a connection can do; hiding a name would only mean a failure
+// surfaces as "no such host" rather than as the refusal it actually is, which
+// is harder to diagnose and no more private — the address is in the
+// certificate the moment a handshake is attempted.
+func namesFor(ctx context.Context, tx *store.Tx, net *store.Network) ([]nebulacfg.Name, error) {
+	rows, err := tx.NetworkNames(ctx, net.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]nebulacfg.Name, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, nebulacfg.Name{Name: r.Name, Addr: r.Addr})
+	}
+	return out, nil
 }

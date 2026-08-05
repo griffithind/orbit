@@ -245,6 +245,12 @@ type Input struct {
 	// TunDisabled produces a lighthouse that needs no tun device and no root.
 	TunDisabled bool
 
+	// DNSDomain is the search suffix for this network, and Names is every
+	// machine in it. Empty Names renders no dns section at all, so a network
+	// that has not enabled it is byte-identical to what it was.
+	DNSDomain string
+	Names     []Name
+
 	// SoMark is nebula's packet mark, set only when this host has a default
 	// route. Zero omits it.
 	SoMark int
@@ -481,6 +487,10 @@ type orbitSection struct {
 	// Forward is true when this host is a gateway for something.
 	Forward bool `yaml:"forward,omitempty"`
 
+	// DNS is the name table this host answers locally, and the domain it
+	// searches. Nil when the network has no names to serve.
+	DNS *dnsSection `yaml:"dns,omitempty"`
+
 	// ExitNode is true when this host reaches 0.0.0.0/0 through the mesh.
 	//
 	// It is what a platform acts on to keep nebula's own UDP out of the tunnel
@@ -662,7 +672,7 @@ func Render(in Input) ([]byte, error) {
 			UnsafeRoutes: renderRoutes(in.Routes),
 		},
 		Firewall: fw,
-		Orbit:    renderOrbit(in.Serves, hasDefault(in.Routes)),
+		Orbit:    renderOrbit(in.Serves, hasDefault(in.Routes), renderDNS(in.DNSDomain, in.Names)),
 	}
 	if in.LogLevel != "" || in.LogFormat != "" {
 		doc.Logging = &loggingSection{Level: in.LogLevel, Format: in.LogFormat}
@@ -760,6 +770,72 @@ func renderRoutes(routes []Route) []unsafeRoute {
 	return out
 }
 
+// dnsSection is the name table, carried in the signed configuration.
+//
+// WHY HERE AND NOT A RESOLVER SOMEWHERE IN THE MESH.
+//
+// Nebula can run a DNS server on a lighthouse, answering from its hostmap. That
+// puts every lookup in the fleet through one machine over the overlay, and its
+// failure mode is a mesh that works while nothing can be found by name.
+//
+// Orbit had a better channel already built: a signed configuration with an
+// epoch, delivered everywhere, reverted automatically when it breaks. A name
+// table riding in it is answered locally with no round trip and no single point
+// of failure, and a name carries the same proof as the certificate paths beside
+// it — the control plane cannot mint a name it has not signed for.
+//
+// A LIST, not a map. Two control planes rendering the same network must produce
+// identical bytes because the result is signed, and a map's marshalling order is
+// not part of any guarantee worth resting a digest on.
+type dnsSection struct {
+	// Domain is the search suffix, so `ssh laptop` works and
+	// `laptop.<network>.orbit` is what it means.
+	Domain string `yaml:"domain,omitempty"`
+
+	// Hosts is every reachable machine in this network, this one included: a
+	// host that cannot resolve its own name is a surprise nobody needs.
+	Hosts []dnsHost `yaml:"hosts,omitempty"`
+}
+
+// dnsHost is one machine and every overlay address it answers on.
+type dnsHost struct {
+	Name  string   `yaml:"name"`
+	Addrs []string `yaml:"addrs"`
+}
+
+// Name is one machine's name and one of its overlay addresses, as the caller
+// assembled it. One entry per address; a dual-stack host has two.
+type Name struct {
+	Name string
+	Addr netip.Addr
+}
+
+// renderDNS groups the caller's rows into one entry per machine.
+//
+// Grouping here rather than in SQL because the answer to an A query is every
+// address that machine has, and a resolver that returned one of them would work
+// until the day the other was the reachable one.
+func renderDNS(domain string, names []Name) *dnsSection {
+	if len(names) == 0 {
+		return nil
+	}
+	out := &dnsSection{Domain: domain}
+	for _, n := range names {
+		if n.Name == "" || !n.Addr.IsValid() {
+			continue
+		}
+		if k := len(out.Hosts); k > 0 && out.Hosts[k-1].Name == n.Name {
+			out.Hosts[k-1].Addrs = append(out.Hosts[k-1].Addrs, n.Addr.String())
+			continue
+		}
+		out.Hosts = append(out.Hosts, dnsHost{Name: n.Name, Addrs: []string{n.Addr.String()}})
+	}
+	if len(out.Hosts) == 0 {
+		return nil
+	}
+	return out
+}
+
 // splitDefault turns a default route into the two halves that cover the same space
 // without being a default route.
 //
@@ -803,11 +879,11 @@ func hasDefault(routes []Route) bool {
 // Nil when this host serves nothing, so an ordinary machine's configuration is
 // byte-identical to what it was before routes existed — which is what keeps a
 // feature nobody uses from re-applying every config in a fleet.
-func renderOrbit(serves []Served, exitNode bool) *orbitSection {
-	if len(serves) == 0 && !exitNode {
+func renderOrbit(serves []Served, exitNode bool, dns *dnsSection) *orbitSection {
+	if len(serves) == 0 && !exitNode && dns == nil {
 		return nil
 	}
-	out := &orbitSection{Forward: len(serves) > 0, ExitNode: exitNode}
+	out := &orbitSection{Forward: len(serves) > 0, ExitNode: exitNode, DNS: dns}
 	for _, s := range serves {
 		if s.Masquerade {
 			out.Masquerade = append(out.Masquerade, s.Prefix.String())

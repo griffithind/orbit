@@ -1006,3 +1006,63 @@ func (t *Tx) recordReportOnDevice(ctx context.Context, membershipID uuid.UUID, r
 		membershipID, r.NebulaVersion, r.AgentVersion)
 	return mapErr(err, "record agent report on device")
 }
+
+// MeshName is one machine's name and one of its overlay addresses.
+type MeshName struct {
+	Name string
+	Addr netip.Addr
+}
+
+// NetworkNames lists every reachable machine in a network, for DNS.
+//
+// WHY THE CONTROL PLANE ANSWERS THIS AND NOT A RESOLVER IN THE MESH.
+//
+// Nebula ships a DNS server that a lighthouse can run, answering from its own
+// hostmap. Using it would put every name lookup in the fleet through one
+// machine, over the overlay, with the failure mode that the mesh keeps working
+// while nothing can be found by name.
+//
+// Orbit already has something better and did not need to build it: a signed
+// configuration with an epoch, delivered to every host, reverted automatically
+// when it breaks. A name table shipped in that config is answered locally with
+// no round trip, has no single point of failure, and carries the same proof as
+// the certificate paths beside it. A control plane that cannot mint a name it
+// has not signed for is worth more than one that answers quickly.
+//
+// Enrolled and active only, the same filter NetworkTopology and NetworkRoutes
+// use. A machine that has not finished enrolling has no certificate, so a name
+// pointing at its address resolves to something nothing can talk to — a
+// confusing failure two layers from its cause.
+//
+// One row per address: a dual-stack membership has both, and both belong in the
+// answer. Ordered so two control planes rendering the same network produce
+// identical bytes, because the result is signed and a nondeterministic order
+// would change the digest on every poll.
+func (t *Tx) NetworkNames(ctx context.Context, networkID uuid.UUID) ([]MeshName, error) {
+	rows, err := t.tx.Query(ctx, `
+		SELECT h.name, ma.addr
+		  FROM orbit.membership h
+		  JOIN orbit.membership_address ma ON ma.membership_id = h.id
+		 WHERE h.network_id = $1
+		   AND h.state IN ('enrolled', 'active')
+		 ORDER BY h.name, ma.addr`, networkID)
+	if err != nil {
+		return nil, mapErr(err, "network names")
+	}
+	defer rows.Close()
+
+	var out []MeshName
+	for rows.Next() {
+		var n MeshName
+		var addr *netip.Addr
+		if err := rows.Scan(&n.Name, &addr); err != nil {
+			return nil, mapErr(err, "scan network name")
+		}
+		if addr == nil {
+			continue
+		}
+		n.Addr = *addr
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}

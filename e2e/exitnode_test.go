@@ -109,12 +109,17 @@ func TestAGatewayIsToldToForwardAndNAT(t *testing.T) {
 			state.Masquerade)
 	}
 
-	// And an ordinary machine gets no instructions at all, so the feature
-	// existing does not rewrite every configuration in a fleet.
+	// And an ordinary machine gets no HOST-STATE instructions: it has an orbit
+	// section, because every host carries the network's name table, but nothing
+	// in it tells this machine to change its kernel. That is the line that
+	// matters — a feature existing must not quietly make every machine a
+	// gateway.
 	plain := h.createAndEnroll(t, ts, "plain", "10.42.96.9", false, false, nil)
 	pcfg := readFile(t, agent.DefaultLayout(plain.dir).ConfigPath())
-	if strings.Contains(pcfg, "orbit:") {
-		t.Errorf("a non-gateway was given host-state instructions:\n%s", pcfg)
+	for _, instruction := range []string{"forward:", "masquerade:", "exit_node:"} {
+		if strings.Contains(pcfg, instruction) {
+			t.Errorf("a non-gateway was given %q:\n%s", instruction, pcfg)
+		}
 	}
 	pstate, err := agent.HostStateFromConfig(pcfg)
 	if err != nil {
