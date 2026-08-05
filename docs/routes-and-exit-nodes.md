@@ -134,83 +134,159 @@ What is missing is the middle, not the ends:
 
 ---
 
-## 4. A shape for Orbit
+## 4. The design
 
-Routes are a **membership** fact — this machine, in this network, routes these
-prefixes — which puts them beside `is_lighthouse` and `is_relay`, not on the
-device. A laptop that routes a lab subnet on one network routes nothing on
-another.
+Decided, with three corrections noted where they change the shape.
+
+### The table
+
+Routes are **topology**, like `is_lighthouse` and `is_relay` — and like those,
+they belong to a membership, not a device. A Pi that routes a lab subnet on one
+network routes nothing on another.
+
+```sql
+CREATE TABLE orbit.route (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    network_id    uuid NOT NULL,
+    membership_id uuid NOT NULL,          -- the gateway advertising it
+
+    prefix        cidr NOT NULL,
+    weight        int  NOT NULL DEFAULT 1,      -- share among gateways for the SAME prefix
+    masquerade    boolean NOT NULL DEFAULT false,
+    install       boolean NOT NULL DEFAULT true,
+    mtu           int,
+
+    created_at    timestamptz NOT NULL DEFAULT now(),
+
+    -- Composite, so a route cannot name a membership in another network. The
+    -- same shape role uses, for the same reason.
+    FOREIGN KEY (network_id, membership_id)
+        REFERENCES orbit.membership (network_id, id) ON DELETE CASCADE,
+
+    -- One membership offers one prefix once. Two gateways for the same prefix
+    -- are two rows, which is exactly how alternative paths are expressed.
+    UNIQUE (membership_id, prefix)
+);
+```
+
+### Priority is two different things, and only one needs modelling
+
+Worth separating, because conflating them produces a knob that does nothing.
+
+**Different prefixes on one gateway** — `192.168.88.0/24` and `0.0.0.0/0` on the
+same Pi — need **no priority at all**. Longest-prefix match is how every routing
+table on earth works: a packet for `192.168.88.5` takes the /24 because it is
+more specific, and everything else falls to the /0. It is automatic, it is not
+configurable, and there is nothing to store.
+
+**The same prefix from two gateways** is where priority is real, and that is
+`weight`: nebula's weighted ECMP, which also fails over automatically when a
+gateway goes unreachable. That is the column above, and it is the whole of
+"alternative paths" — two rows, two weights, done.
+
+### NAT is per route, which is right
+
+`masquerade` is a column, not a network-wide setting. The Pi case makes the
+argument by itself: `0.0.0.0/0` wants NAT, because the internet cannot route
+back to an overlay address; `192.168.88.0/24` usually does not, because the LAN
+can be told a static route and the operator would rather see real source
+addresses in their own logs.
+
+Nebula performs no NAT. The agent installs and removes the rule, scoped to that
+prefix — which means the agent grows the ability to change host firewall state,
+and that is a real increase in what it does. Worth its own scrutiny when built.
+
+### Access control needs no new mechanism
+
+The policy document already has `cidr:` selectors, and the compiler already
+emits `local_cidr` when a destination is a subnet a host routes. So this works
+the day the table exists:
+
+```yaml
+allow:
+  - src: [role:laptop, tag:team=platform]
+    dst: [cidr:192.168.88.0/24]
+    proto: any
+```
+
+**Do not build a second access-control system for routes.** That is precisely
+NetBird's documented mistake — "routes bypass access control policies unless
+explicitly configured" — which cost them a whole second mechanism to escape.
+One document decides who may reach what, whether the destination is a member or
+a subnet behind one.
+
+`autogroup:internet` stays refused. Tailscale needs that token because its ACLs
+cannot name the internet; Orbit's can — `dst: [cidr:0.0.0.0/0]` — and the
+compiler renders the `local_cidr` that makes it bite on the gateway.
+
+`via:` also stays refused, and the reason sharpens rather than changes: choosing
+a **path** is routing, and routing is this table. The firewall sees a peer's
+certificate, not a path, so a `via` selector in a policy document would be a
+promise the packet filter cannot keep. The two layers stay apart.
+
+### Routes auto-apply; exit nodes are opted into
+
+A route to `192.168.88.0/24` reaches a consumer through policy, with no
+per-machine acceptance. That is right: the operator who wrote the policy already
+decided.
+
+`0.0.0.0/0` is different, because it captures **everything** — and a machine
+silently acquiring a new default route is the one change nobody should discover
+by accident.
+
+**But the acceptance cannot be local configuration.** The agent hands nebula
+only what the control plane signed (`config-integrity.md` §7a), and a locally
+injected route would be the one thing that model exists to prevent. So the local
+command is a *request*, not an edit:
 
 ```
-membership.routes           text[]   -- prefixes this membership offers
-membership.route_metric     int      -- lower wins; NetBird's model
-membership.is_exit_node     boolean  -- sugar for routes containing 0.0.0.0/0
+orbit exit-node ls            # what this membership is permitted to use
+orbit exit-node use lab-pi    # PATCH the membership; epoch bumps; config returns
+orbit exit-node off
 ```
 
-**Two-sided consent, taken from Tailscale**, because it is right: the machine
-*offers* (it is the one that knows what it is plugged into), the control plane
-*approves* (it is the one that knows what should be reachable). Orbit already
-has both halves — a reservation can carry the offer, `orbit membership set`
-approves — and the reservation path means an unattended gateway can be
-provisioned in one step, which is the §26 pattern again.
-
-**Consumers get the route through policy, not fleet-wide.** NetBird's
-distribution groups by another name. Orbit's policy document already selects by
-role and tag; a `routes:` stanza naming which roles may use which gateway falls
-out of the existing compiler, and the compiler already knows to emit
-`local_cidr` so the rules actually bite.
-
-**Failover is free.** Nebula's weighted ECMP means two gateways offering the
-same prefix is HA with no extra machinery — and it is strictly better than the
-thing Tailscale documents as a limitation.
-
-**Exit nodes** are the same feature with three additions the agent must own:
-`ip_forward`, a `MASQUERADE` rule, and `so_mark`. Masquerade on by default, as
-NetBird does — the alternative needs return routes in somebody else's network,
-which is not a thing a mesh can arrange for you.
+Local UX, central authority, signed config intact. The list is what policy
+already permits, so an operator cannot opt into a gateway they were never
+granted.
 
 ---
 
-## 5. The decisions, and one is time-sensitive
+## 5. The CA constraint
 
-**1. The CA constraint, which must be decided before a network is bootstrapped.**
+A CA's `UnsafeNetworks` cannot be widened after signing, so enabling routes on a
+network whose CA permits none means a **rotation**.
 
-A CA's `UnsafeNetworks` cannot be widened after the fact — it is signed. A
-network bootstrapped today permits no routes at all, and enabling them later
-means a **CA rotation**. Rotation is supported and rehearsed (`design.md` §6),
-so this is a cost, not a wall. But it is the same shape as the curve decision:
-permanent, invisible until it bites.
+That is a smaller problem than it first looks, and the reasoning is worth
+keeping: rotation is a supported, rehearsed operation (`design.md` §6), the
+control plane pushes the new bundle before the new CA signs anything, and a
+machine that falls behind pulls its configuration and recovers on its own. It is
+a scheduled change, not an outage — and gateways can be prioritised, since they
+are the only machines that need the new authority.
 
-Three options:
+**Proposal: default a new network's CA to RFC1918** — `10/8`, `172.16/12`,
+`192.168/16`. That makes the common case (a Pi in front of a LAN) work the day a
+network is bootstrapped, with no rotation.
 
-- *Nothing* (today). Routes require a rotation. Honest, and annoying.
-- *RFC1918 by default* — `10/8`, `172.16/12`, `192.168/16`. Covers essentially
-  every "raspberry pi in front of a lab" case without granting the internet.
-- *`0.0.0.0/0`* — permits exit nodes, and also permits any signed host to claim
-  authority over every destination. Too wide as a default.
-
-RFC1918 as the default with a bootstrap flag to widen looks right: it makes the
-common case work with no rotation, and keeps exit nodes an explicit decision.
-
-**2. Masquerade default.** On, following NetBird — with the caveat documented,
-since it hides source addresses from whatever is on the far side.
-
-**3. Does a route need a certificate reissue?** Yes, and that is the trade.
-Changing which prefixes a gateway offers means a new certificate. Orbit reissues
-on epoch already, so this is seconds — but it is not the instant database toggle
-Tailscale has, and the docs should say so rather than let someone discover it.
-
-**4. LAN access while using an exit node.** Tailscale loses it by default and
-has a flag. Orbit should decide deliberately rather than inherit whatever
-`0.0.0.0/0` does.
+`0.0.0.0/0` stays out of the default deliberately. A CA permitting it lets any
+host it signs claim authority over every destination, and exit nodes are the
+feature we already decided should be explicit. Widening to it is a rotation, and
+that is the right amount of friction for the thing that carries all of a
+machine's traffic.
 
 ---
 
-## 6. Where to start
+## 6. Order of work
 
-1. `membership.routes` + the enrollment path into `HostParams.UnsafeNetworks`.
-2. `nebulacfg` renders `tun.unsafe_routes` from the topology query.
-3. The CA default decision above, since it gates everything and is permanent.
-4. Policy `routes:` stanza — the compiler is already waiting for it.
-5. Exit nodes last: forwarding, NAT and `so_mark` are host surgery and belong
-   behind a working route feature, not in front of it.
+1. `orbit.route` and the CA default, together — the second gates the first and
+   is permanent, so it is not a thing to leave until the feature works.
+2. Enrollment carries the gateway's prefixes into `HostParams.UnsafeNetworks`,
+   and `policy.Membership.UnsafeNetworks` stops being empty. The compiler
+   already does the rest.
+3. `nebulacfg` renders `tun.unsafe_routes`, grouping rows by prefix so multiple
+   gateways become one entry with weighted `via` list.
+4. API, CLI and UI for offering and revoking a route.
+5. Exit nodes: `0.0.0.0/0`, the opt-in call, `ip_forward`, `so_mark`, and the
+   masquerade rule. Host surgery, and it belongs behind a route feature that
+   already works rather than in front of it.
+
+Access control needs no step. It already works.
