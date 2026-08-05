@@ -437,25 +437,60 @@ credential model designs a user credential and does not build one
 the machine", which is the exit-node mechanism — and for a leak control, the
 machine is the wrong place to put the switch.
 
-### The hazard this creates, which is worse than it looks
+### Roaming breaks the pre-flight check
 
-Shield `192.168.1.0/24` across a fleet and every person whose home router uses
-that prefix loses their LAN — printer, NAS, quite possibly the router's own web
-interface. It is the most common home subnet in the world, `192.168.0.0/24` is
-the second, and the failure is silent: the shield is working exactly as
-specified, it has simply also killed something legitimate.
+A first draft of this proposed reporting each machine's local subnets so an
+operator could ask "does this shield collide with anything?" before applying it.
+That works for a server in a rack and not at all for a laptop, which is most of
+the fleet: its local subnet changes at every café, hotel and office. There is no
+"before" to check, and the collision is not a possibility to assess but a
+certainty to schedule — `192.168.1.0/24` is the most common home subnet in the
+world and `192.168.0.0/24` the second, so a roaming machine meets one eventually.
 
-The answer is **transparency without veto**, and one new fact:
+Collision detection therefore has to be **continuous, not pre-flight**. The agent
+reports the subnets it is currently attached to (a fact it does not carry today),
+and the control plane can say *now* which machines are sitting on a network that
+overlaps a shielded prefix. That is a support answer — "your printer stopped
+working because this hotel uses your company's subnet" — rather than a planning
+one.
 
-- `orbit status` names shielded prefixes plainly, so somebody debugging their
-  printer finds the reason in the first place they look.
-- **The agent reports its local subnets.** It does not today — facts carry OS,
-  kernel, arch and posture, not attached networks. With that, the control plane
-  can answer "how many machines have a local network overlapping this prefix?"
-  *before* the shield is applied rather than through support tickets after.
-- Break-glass is a control-plane action on one membership, not a switch on the
-  machine. The escape hatch belongs on the side that can see the fleet, not the
-  side that is the risk.
+### Shield is worth much more for the internet than for a route
+
+The two cases look symmetric and are not.
+
+**`0.0.0.0/0` defends against an accident that happens routinely.** A tunnel
+flaps, and every packet silently falls back to the local network in the clear.
+Nobody has to be attacking; it is the default behaviour of a routing table, and
+it is why every commercial VPN ships a kill switch.
+
+**A route's shield defends against a targeted attack.** For the leak to happen,
+somebody has to control a network you join *and* have replicated your internal
+prefix — an evil twin that knows your addressing. Real, but it requires an
+adversary who has done homework, not a flaky link.
+
+The failure modes are asymmetric in the opposite direction:
+
+| | Value | Failure when it fires wrongly |
+|---|---|---|
+| `0.0.0.0/0` | High — stops a routine accident | No internet. Obvious, and the user knows why |
+| A route prefix | Lower — stops a targeted attack | One subnet mysteriously unreachable. Confusing, hard to attribute |
+
+So the useful one fails comprehensibly and the marginal one fails as a puzzle.
+
+**Recommendation.** Build the mechanism once — it is the same policy routing and
+netfilter either way — then:
+
+- **Default it ON for `0.0.0.0/0`.** An exit node without a kill switch is a
+  privacy feature with a hole in it, and the user already accepted the gateway.
+- **Default it OFF for routes, and document it as narrow.** Its safety is
+  proportional to how unusual the prefix is: shielding `10.53.0.0/16` is nearly
+  free, shielding `192.168.1.0/24` is a trap that springs at a random hotel. If
+  a network intends to shield its internal prefixes, that is a reason to pick
+  unusual RFC1918 space at bootstrap — which is advice worth giving *before* the
+  first network exists, since a network's CIDRs are not easily changed either.
+
+Break-glass stays a control-plane action on one membership, for the reason
+above: the escape hatch belongs on the side that can see the fleet.
 
 ### Shape
 
