@@ -156,10 +156,9 @@ func loopbackPorts(s string) []string {
 // TestTheSetupScriptsSecretsAreIgnored.
 //
 // scripts/setup-control-plane.sh checks the repository out to /opt/orbit and
-// writes its secrets INSIDE that clone — it has to, because compose resolves
-// `file: ./ca-pass` relative to the compose file. So the working tree on a
-// running control plane contains the mesh's CA passphrase and both admin
-// tokens, and a `git add -A` there would commit them.
+// writes its secrets INSIDE that clone, beside the compose file that reads
+// them. So the working tree on a running control plane contains the KEK
+// passphrase and both admin tokens, and a `git add -A` there would commit them.
 //
 // Derived from the script rather than hardcoded: a new secret the script starts
 // writing fails here instead of being discovered in a public repository.
@@ -173,7 +172,10 @@ func TestTheSetupScriptsSecretsAreIgnored(t *testing.T) {
 	// Every path the script creates beside the compose file. Kept as a literal
 	// list so the test states the invariant, with a check below that the script
 	// still writes each one.
-	secrets := []string{"ca-pass", "bootstrap-output.txt", ".env"}
+	// ca-pass is deliberately absent: the script no longer writes one. It stays
+	// in .gitignore because a control plane set up before that still has the
+	// file, and an upgrade must not make it committable.
+	secrets := []string{"bootstrap-output.txt", ".env"}
 	for _, name := range secrets {
 		if !strings.Contains(script, name) {
 			t.Errorf("the script no longer mentions %q; this list is stale and "+

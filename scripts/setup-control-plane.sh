@@ -31,12 +31,6 @@ OVERLAY_ADDR=10.42.0.1
 PUBLIC_IP=""
 ENROLL_URL=""
 
-# The uid the image runs as (distroless nonroot). Compose bind-mounts a
-# file-backed secret with the HOST's ownership and mode, so a passphrase left
-# 0600 root is unreadable by the container — and the failure is
-# "permission denied" on a path that looks perfectly fine from a root shell.
-NONROOT_UID=65532
-
 die() { echo "setup: $*" >&2; exit 1; }
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
@@ -200,15 +194,13 @@ EOF
 fi
 chmod 0600 .env
 
-if [ ! -f ca-pass ]; then
-    umask 077
-    head -c 32 /dev/urandom | base64 > ca-pass
-    echo "wrote ca-pass"
-fi
-# Owned by the container's user, not by root. See NONROOT_UID above: this is the
-# one file whose host ownership the container actually has to satisfy.
-chown "$NONROOT_UID:$NONROOT_UID" ca-pass
-chmod 0400 ca-pass
+# There was a second secret here, ./ca-pass, passed as
+# ORBIT_CA_KEY_PASSPHRASE_FILE. It never did anything. That variable is a
+# compatibility ALIAS for the KEK, read only when ORBIT_KEK_PASSPHRASE is unset,
+# from before the CA key moved into Postgres — so the deployment protected two
+# secrets where one was real, and would have fallen back to the wrong one, and
+# failed to decrypt anything, if the KEK variable were ever empty. One secret,
+# in .env.
 
 set -a
 # shellcheck disable=SC1091

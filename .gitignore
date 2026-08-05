@@ -19,6 +19,8 @@
 # — it checks the repository out to /opt/orbit and compose needs ./ca-pass
 # beside the compose file. So a `git add -A` on the server would otherwise
 # commit the mesh's CA passphrase and both admin tokens.
+# No longer written — ORBIT_CA_KEY_PASSPHRASE_FILE was a dead alias for the KEK
+# — but kept so a control plane set up before that does not start offering it.
 /deploy/ca-pass
 /deploy/bootstrap-output.txt
 

@@ -5,7 +5,7 @@
 # break-glass token — it is the supported path, and this file is what it drives.
 # Read on only if you are adapting it.
 #
-#   1. Put a passphrase in ./ca-pass and a database password in ./.env
+#   1. Put ORBIT_KEK_PASSPHRASE and the database passwords in ./.env
 #   2. docker compose run --rm orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
 #   3. docker compose run --rm orbitd bootstrap -network prod -cidr 10.42.0.0/16
 #      (the CA key is sealed into Postgres under ORBIT_KEK_PASSPHRASE; no file
@@ -17,8 +17,7 @@
 #
 # The admin CLI is in the same image and needs no second install:
 #
-#   docker compose run --rm orbit host create -name web-01 -addr 10.42.0.7 -role default
-#   docker compose run --rm orbit host code web-01
+#   docker compose run --rm orbit membership reserve -name web-01 -role default
 
 name: orbit
 
@@ -79,13 +78,14 @@ services:
       # never sees it, which is the entire point: a leaked dump is useless
       # without it, and losing it makes every stored key unreadable.
       ORBIT_KEK_PASSPHRASE: ${ORBIT_KEK_PASSPHRASE:?set ORBIT_KEK_PASSPHRASE in .env}
-      # A path, never the value. The passphrase stays out of the environment,
-      # out of `docker inspect`, and out of anything that dumps a container's
-      # config.
-      ORBIT_CA_KEY_PASSPHRASE_FILE: /run/secrets/ca-pass
 
-    secrets:
-      - ca-pass
+    volumes:
+      # The control plane's own device key. The image declares VOLUME
+      # /var/lib/orbit, so without naming it here Docker creates an ANONYMOUS
+      # volume — which is orphaned every time the container is recreated, and
+      # `compose up -d` recreates on any config change. The control plane would
+      # come back as a different device on its own network each time.
+      - orbitstate:/var/lib/orbit
 
     command:
       - serve
@@ -107,8 +107,8 @@ services:
   # that runs and exits, not a service. `docker compose run` enables a targeted
   # service's profile on its own, so no --profile flag is needed:
   #
-  #   docker compose run --rm orbit host create -name web-01 -addr 10.42.0.7 -role default
-  #   docker compose run --rm orbit host code web-01
+  #   docker compose run --rm orbit membership reserve -name web-01 -role default
+  #   docker compose run --rm orbit ca create lab-ca -unsafe-networks 0.0.0.0/0
   #   docker compose run --rm orbit converge
   #
   # host networking so 127.0.0.1:8080 is the control plane next to it, and so
@@ -129,11 +129,11 @@ services:
       # without it, and losing it makes every stored key unreadable.
       ORBIT_KEK_PASSPHRASE: ${ORBIT_KEK_PASSPHRASE:?set ORBIT_KEK_PASSPHRASE in .env}
 
-secrets:
-  ca-pass:
-    file: ./ca-pass
-
 volumes:
+  # The control plane's device identity, which must survive a container being
+  # replaced. Not a root of trust — that is pgdata below plus the passphrase.
+  orbitstate:
+
   # THE root of trust now lives here, and nowhere else.
   #
   # The CA key and the network identity key are rows in Postgres, sealed under
