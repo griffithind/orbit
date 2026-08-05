@@ -13,6 +13,14 @@ import (
 // the private half never exists outside the chip, and the certificate that
 // names it becomes useless on any other machine.
 //
+// NOT A TPM, THOUGH. Tested: `tpm2-pkcs11` 1.9.0 does not implement
+// CKM_ECDH1_DERIVE — it is absent from the module's mechanism list and
+// C_DeriveKey returns CKR_MECHANISM_INVALID — so nebula cannot perform the
+// handshake DH on a TPM through it. The TPM itself reports TPM2_CC_ECDH_ZGen
+// and P-256; the gap is the PKCS#11 bridge, and closing it is upstream work.
+// A token that DOES implement the mechanism (YubiKey ykcs11, SoftHSM, an HSM)
+// works today. See docs/credential-model.md §7.
+//
 // Nebula already supports this. A `pki.key` beginning `pkcs11:` makes nebula
 // perform the Noise handshake's Diffie-Hellman ON the token
 // (CKM_ECDH1_DERIVE with CKD_NULL), so the private key is never in this
@@ -24,8 +32,8 @@ import (
 //
 //   - P-256 only. `pki.go` forces cert.Curve_P256 for any pkcs11 key, because
 //     no TPM 2.0 implements Curve25519 and Apple's Secure Enclave is P-256
-//     only. The network's curve is fixed at bootstrap, so a CURVE25519 network
-//     can never use one — see `orbitd bootstrap -curve`.
+//     only. Every Orbit network is P-256 (migration 0021), so this constraint
+//     is now satisfied by construction rather than by an operator's choice.
 //   - cgo and the `pkcs11` build tag. Nebula's pkclient is a cgo binding, so a
 //     binary without both silently gets a stub whose every method returns "not
 //     implemented". This package refuses at the seam instead, with a message

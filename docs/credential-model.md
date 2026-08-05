@@ -160,12 +160,46 @@ following the documented steps failed its claim with a curve mismatch. Neither
 default was wrong alone, which is why it survived — two constants in two
 binaries cannot notice they disagree.
 
-**Nebula needs raw ECDH.** `pkclient.DeriveNoise` uses `CKM_ECDH1_DERIVE` with
-`CKD_NULL` — no KDF, the bare 32-byte X coordinate — and requires the derived
-secret to be `CKA_EXTRACTABLE` with `CKA_VALUE_LEN == 32`. TPM 2.0's
-`TPM2_ECDH_ZGen` returns raw coordinates natively, so this should pass through,
-but **whether `tpm2-pkcs11` honours that template is unverified** and is the
-single cheapest thing to test.
+**Nebula needs raw ECDH, and `tpm2-pkcs11` does not provide it.** TESTED, and
+the answer is no.
+
+`pkclient.DeriveNoise` uses `CKM_ECDH1_DERIVE` with `CKD_NULL` — no KDF, the
+bare 32-byte X coordinate. This was recorded here as "should pass through, but
+unverified". It does not pass through:
+
+```
+$ pkcs11-tool --module libtpm2_pkcs11.so --list-mechanisms | grep -i ecdh
+(nothing)
+
+$ pkcs11-tool --module libtpm2_pkcs11.so --derive --mechanism ECDH1-DERIVE …
+error: PKCS11 function C_DeriveKey failed: rv = CKR_MECHANISM_INVALID (0x70)
+```
+
+A P-256 key created by `tpm2_ptool addkey --algorithm=ecc256` reports
+`Allowed mechanisms: ECDSA, ECDSA-SHA1, ECDSA-SHA256, ECDSA-SHA384,
+ECDSA-SHA512` — signing only. The module advertises no derive mechanism of any
+kind.
+
+**The gap is the bridge, not the hardware.** The same TPM reports
+`TPM2_CC_ECDH_ZGen` and `TPM2_CC_ECDH_KeyGen` among its implemented commands,
+and `TPM2_ECC_NIST_P256` among its curves. The chip can do exactly what nebula
+needs; `tpm2-pkcs11` simply does not expose it through PKCS#11.
+
+So a TPM-backed nebula host key is **not achievable with tpm2-pkcs11 today**,
+and no amount of configuration changes that. What would: the mechanism landing
+upstream in tpm2-pkcs11, or a different PKCS#11 module over the same TPM. Both
+are outside Orbit — `pki.go` dispatches on the `pkcs11:` prefix and any
+conforming module plugs in unmodified, so nothing here has to change when one
+appears.
+
+Verified against tpm2-pkcs11 1.9.0 (Debian trixie) with `swtpm` and
+`tpm2-abrmd`. Reproduce by creating a token with `tpm2_ptool`, adding an
+`ecc256` key, and running the two commands above. A hardware TPM is not needed
+to re-test this: the mechanism list comes from the module.
+
+A **PKCS#11 token that does implement `CKM_ECDH1_DERIVE`** — a YubiKey via
+`ykcs11`, a SoftHSM token, an HSM — still works, and that is what the
+`-tags pkcs11` build is for. It is the TPM specifically that is blocked.
 
 **No Nebula fork is required.** `pki.go` dispatches on the `pkcs11:` string
 prefix, so any conforming PKCS#11 module plugs in unmodified. The cost is the
