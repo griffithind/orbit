@@ -479,7 +479,7 @@ caller cannot use the endpoint to learn which memberships an operator approved.
 There is no recovery endpoint. A machine whose certificate expired re-runs
 `join`, which is idempotent and returns the membership it already holds; the
 device key that authenticates it never expires. See
-[enrollment.md](enrollment.md) §7.1.
+[enrollment.md](enrollment.md) §6.1.
 
 ### 4.3 Agent API — `/agent/v1`, bound to the overlay
 
@@ -682,9 +682,8 @@ means every other user on the box — including any service that gets popped —
 mint mesh identities.
 
 **A narrow, short-lived CA.** Constraints bound what a leaked key can mint
-(§1.2); a 90-day lifetime bounds how long it can mint it. Both matter more here
-than they would with a hardware-backed key, and rotation (§6) is what makes a
-short lifetime practical rather than a recurring outage.
+(§1.2); a 90-day lifetime bounds how long it can mint it. Rotation (§6) is what
+makes a short lifetime practical rather than a recurring outage.
 
 ### What this does not protect against
 
@@ -1009,8 +1008,8 @@ regresses past its deadline.
 
 Two things in this document are described but not implemented, and are marked as
 such where they appear: SSO/OIDC (§4.4, where the identity seam is in place and
-tokens are the supported path) and the two enrollment methods in
-enrollment.md §4–5.
+tokens are the supported path) and the cloud-IID enrollment method in
+enrollment.md §4.
 
 ---
 

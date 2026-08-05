@@ -121,9 +121,8 @@ func (s *memorySigner) Close() error { return nil }
 
 // PublicFromHostKey derives the public half of a host static key.
 //
-// Used when renewing with --reuse-key, where the private key must stay put (a
-// hardware-backed key cannot be regenerated) but the control plane still needs
-// the public half to mint a certificate.
+// The private half stays where it is; only the derived public half is sent, so
+// the control plane can mint a certificate over a key it has never seen.
 func PublicFromHostKey(curve cert.Curve, priv []byte) ([]byte, error) {
 	switch curve {
 	case cert.Curve_CURVE25519:

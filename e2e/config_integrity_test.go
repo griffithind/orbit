@@ -37,7 +37,7 @@ func TestJoinPinsTheNetworkKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := agent.NewClient(ts.URL)
-	joined, err := client.JoinWithCode(ctx, id, h.netID.String(), "pinned", "", "", code.Code, time.Now())
+	joined, err := client.JoinWithCode(ctx, id, h.netID.String(), "pinned", "", code.Code, time.Now())
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}

@@ -25,16 +25,6 @@ import (
 //
 // See docs/design-device-identity.md.
 
-// DeviceKeyBacking says where a device holds its private key.
-//
-// Reported by the machine and therefore a CLAIM, not a fact, until attestation
-// can prove it. Recorded anyway: an operator looking at a fleet should be able to see how
-// many machines hold a copyable key before there is anything to enforce.
-const (
-	DeviceKeyFile  = "file"
-	DeviceKeyToken = "token"
-)
-
 // ErrDeviceBlocked is returned when a blocked device tries to do anything.
 //
 // A distinct error because the caller must not retry and must not fall through
@@ -54,9 +44,6 @@ type Device struct {
 	// because a fingerprint proves a match but cannot verify a signature, and
 	// issuing a device certificate needs the key itself.
 	PublicKey []byte
-
-	// KeyBacking is DeviceKeyFile or DeviceKeyToken. See the constants.
-	KeyBacking string
 
 	// Hostname is host-supplied, never trusted, and present so a human deciding
 	// whether to authorize a pending join can tell which row is the laptop on
@@ -152,7 +139,7 @@ func DeviceFingerprint(publicKey []byte) string {
 // for a RETURNING clause, which has no alias in scope. Two constants rather
 // than one because using the qualified form in RETURNING is a runtime SQL
 // error, not a compile error — it builds fine and fails on the join path.
-const deviceCols = `d.id, d.key_fingerprint, d.public_key, d.key_backing,
+const deviceCols = `d.id, d.key_fingerprint, d.public_key,
 	COALESCE(d.hostname, ''), d.blocked_at, COALESCE(d.blocked_reason, ''),
 	d.public_addrs, d.first_seen_at, d.last_seen_at,
 	COALESCE(d.os, ''), COALESCE(d.os_version, ''), COALESCE(d.kernel, ''),
@@ -161,7 +148,7 @@ const deviceCols = `d.id, d.key_fingerprint, d.public_key, d.key_backing,
 	d.disk_encrypted, d.secure_boot, d.firewall_enabled, d.tpm_present,
 	d.posture_observed_at`
 
-const deviceColsBare = `id, key_fingerprint, public_key, key_backing,
+const deviceColsBare = `id, key_fingerprint, public_key,
 	COALESCE(hostname, ''), blocked_at, COALESCE(blocked_reason, ''),
 	public_addrs, first_seen_at, last_seen_at,
 	COALESCE(os, ''), COALESCE(os_version, ''), COALESCE(kernel, ''),
@@ -172,7 +159,7 @@ const deviceColsBare = `id, key_fingerprint, public_key, key_backing,
 
 func scanDevice(row pgx.Row) (*Device, error) {
 	var d Device
-	if err := row.Scan(&d.ID, &d.KeyFingerprint, &d.PublicKey, &d.KeyBacking,
+	if err := row.Scan(&d.ID, &d.KeyFingerprint, &d.PublicKey,
 		&d.Hostname, &d.BlockedAt, &d.BlockedReason,
 		&d.PublicAddrs, &d.FirstSeenAt, &d.LastSeenAt,
 		&d.Facts.OS, &d.Facts.OSVersion, &d.Facts.Kernel,
@@ -211,23 +198,16 @@ func (t *Tx) SeeDevice(ctx context.Context, d *Device) error {
 		return fmt.Errorf("see device: fingerprint %s does not match the public key (%s)",
 			d.KeyFingerprint, fp)
 	}
-	backing := d.KeyBacking
-	if backing == "" {
-		backing = DeviceKeyFile
-	}
-
 	row := t.tx.QueryRow(ctx, `
-		INSERT INTO orbit.device (key_fingerprint, public_key, key_backing, hostname)
-		VALUES ($1, $2, $3, NULLIF($4, ''))
+		INSERT INTO orbit.device (key_fingerprint, public_key, hostname)
+		VALUES ($1, $2, NULLIF($3, ''))
 		ON CONFLICT (key_fingerprint) DO UPDATE
 		   SET last_seen_at = now(),
-		       -- Both are advisory and both can legitimately change: a laptop
-		       -- gets renamed, and a host that moves its key into a TPM keeps
-		       -- the same key only if it was exportable, so in practice this
-		       -- goes file -> token exactly once and never back.
-		       key_backing = EXCLUDED.key_backing,
+		       -- Advisory and legitimately changeable: a laptop gets renamed.
+		       -- COALESCE so a report that omits it does not erase the one
+		       -- already recorded.
 		       hostname = COALESCE(EXCLUDED.hostname, orbit.device.hostname)
-		RETURNING `+deviceColsBare, fp, d.PublicKey, backing, d.Hostname)
+		RETURNING `+deviceColsBare, fp, d.PublicKey, d.Hostname)
 
 	seen, err := scanDevice(row)
 	if err != nil {

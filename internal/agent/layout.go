@@ -2,7 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -68,80 +67,6 @@ func DeviceKeyPath(root string) string {
 	}
 	return filepath.Join(root, DeviceKeyName)
 }
-
-// DeviceKeyRefName records that this machine's identity lives on a TOKEN rather
-// than in DeviceKeyName.
-//
-// A file naming a key, beside the place the key would otherwise be. It exists
-// because the choice is made once — at `orbit agent install` — and has to be
-// honoured by every later `orbit agent join`, on every network, without the
-// operator repeating a URI they will eventually mistype. One machine, one
-// identity, decided once.
-//
-// Absent is the common case and means the key file. This is never written for a
-// file-backed device, so an installed machine that has one is unambiguously
-// token-backed.
-const DeviceKeyRefName = "device-key.ref"
-
-// DeviceKeyRefPath is where that pointer lives.
-func DeviceKeyRefPath(root string) string {
-	if root == "" {
-		root = DefaultRoot
-	}
-	return filepath.Join(root, DeviceKeyRefName)
-}
-
-// DeviceKeyRef resolves what to hand device.Open: a token URI if one was
-// recorded at install, otherwise the key file's path.
-func DeviceKeyRef(root string) string {
-	b, err := os.ReadFile(DeviceKeyRefPath(root))
-	if err == nil {
-		if ref := strings.TrimSpace(string(b)); ref != "" {
-			return ref
-		}
-	}
-	return DeviceKeyPath(root)
-}
-
-// WriteDeviceKeyRef records a token URI as this machine's identity.
-//
-// The mode depends on what the URI CONTAINS, which is not a detail. A PKCS#11
-// URI is ordinarily a pointer and not a secret — 0644 is right for it — but it
-// may carry `pin-value=`, and a PIN in a world-readable file is a secret in a
-// file whose mode says otherwise. That combination would undo most of what
-// moving the key into a chip buys: the key cannot be copied, but anyone who can
-// read this file can ask the chip to use it.
-//
-// So a URI carrying a PIN gets 0600. Better still is not to put one here at
-// all — `pin-source=` naming a mode-0600 file, or letting the module prompt —
-// and RecommendPinSource says so where an operator will see it.
-func WriteDeviceKeyRef(root, ref string) error {
-	if err := os.MkdirAll(filepath.Dir(DeviceKeyRefPath(root)), 0o700); err != nil {
-		return err
-	}
-	mode := os.FileMode(0o644)
-	if URIHasInlinePIN(ref) {
-		mode = 0o600
-	}
-	return os.WriteFile(DeviceKeyRefPath(root), []byte(ref+"\n"), mode)
-}
-
-// URIHasInlinePIN reports whether a PKCS#11 URI carries the PIN in it.
-func URIHasInlinePIN(ref string) bool {
-	return strings.Contains(ref, "pin-value=")
-}
-
-// RecommendPinSource is the warning for a URI with an inline PIN.
-//
-// A warning and not a refusal: an inline PIN is a legitimate choice for a
-// machine whose whole disk is encrypted and whose threat model is a stolen
-// laptop, and refusing it would push operators to a wrapper script that does
-// the same thing with less scrutiny. What is not acceptable is doing it
-// unknowingly, which is what this prevents.
-const RecommendPinSource = "the device key URI carries pin-value=, so the PIN is stored on this " +
-	"machine in " + DeviceKeyRefName + " (written 0600). Anyone who can read it can use the key, " +
-	"which is most of what moving the key into a chip was for. Prefer pin-source= naming a " +
-	"0600 file, or omit the PIN and let the module prompt"
 
 // ValidateNetwork checks a network slug is safe as a path component and as a
 // systemd instance name.

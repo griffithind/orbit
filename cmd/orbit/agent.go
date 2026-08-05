@@ -198,11 +198,6 @@ func enrollCmd(args []string) error {
 	var (
 		url  = fs.String("url", "", "control plane base URL")
 		code = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-
-		// A token URI rather than a boolean, because which object on which
-		// token is not something the agent can guess, and getting it wrong must
-		// fail here rather than at the first handshake.
-		keyRef = fs.String("key", "", "PKCS#11 URI of a token-resident private key, e.g. pkcs11:token=orbit;object=host-key. Empty generates a key on this host and writes it to disk. Implies P-256, which the network must also use; requires a binary built with -tags pkcs11")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -229,27 +224,11 @@ func enrollCmd(args []string) error {
 	// defensible answer, and why the two defaults used to differ.
 	c := cert.Curve_P256
 
-	// Either way the private half stays on this host and is never transmitted.
-	// The difference is how strong that guarantee is: a file can be copied off
-	// a disk image, a token key cannot leave the chip.
-	var kp *agent.Keypair
-	if *keyRef != "" {
-		if !agent.IsTokenRef(*keyRef) {
-			return fmt.Errorf("-key must be a pkcs11: URI, got %q", *keyRef)
-		}
-		// The token's curve is P-256 by construction, and so is every network,
-		// so there is nothing left to disagree. The control plane still
-		// rejects a mismatch against the network, which is the check that
-		// matters if either ever changes.
-		kp, err = agent.KeypairFromToken(*keyRef)
-		if err != nil {
-			return fmt.Errorf("read public key from token: %w", err)
-		}
-	} else {
-		kp, err = agent.GenerateKeypair(c)
-		if err != nil {
-			return fmt.Errorf("generate keypair: %w", err)
-		}
+	// The private half is generated here and never transmitted: only the public
+	// half goes to the control plane, which signs a certificate over it.
+	kp, err := agent.GenerateKeypair(c)
+	if err != nil {
+		return fmt.Errorf("generate keypair: %w", err)
 	}
 
 	client := agent.NewClient(*url)
@@ -271,7 +250,6 @@ func enrollCmd(args []string) error {
 		Layout:            layout,
 		Reloader:          agent.NoopReloader{},
 		DisableValidation: true,
-		KeyRef:            *keyRef,
 		Log:               log,
 	}
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
@@ -303,7 +281,6 @@ func enrollCmd(args []string) error {
 		ConfigEpoch:    resp.ConfigEpoch,
 		BlocklistEpoch: resp.BlocklistEpoch,
 		MembershipID:   resp.MembershipID,
-		KeyRef:         *keyRef,
 		NetworkKey:     resp.NetworkKey,
 	}); err != nil {
 		return err
@@ -320,7 +297,6 @@ func runCmd(args []string) error {
 	var (
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		interval  = fs.Duration("interval", time.Minute, "poll interval")
-		reuseKey  = fs.Bool("reuse-key", false, "keep the existing private key across renewals (for hardware-backed keys)")
 		once      = fs.Bool("once", false, "run one iteration and exit")
 		root      = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
 	)
@@ -363,8 +339,8 @@ func runCmd(args []string) error {
 	// what a newly provisioned laptop should do.
 	sup := &supervisor{
 		root: *root, df: df, curve: c,
-		verifyURL: *verifyURL, reuseKey: *reuseKey,
-		interval: *interval, once: *once, log: log,
+		verifyURL: *verifyURL,
+		interval:  *interval, once: *once, log: log,
 		running: map[string]*netSlot{},
 	}
 
@@ -427,7 +403,6 @@ type supervisor struct {
 	df        *dirFlags
 	curve     cert.Curve
 	verifyURL string
-	reuseKey  bool
 	interval  time.Duration
 	once      bool
 	log       *slog.Logger
@@ -469,7 +444,7 @@ func (s *supervisor) start(ctx context.Context, wg *sync.WaitGroup, dirs []strin
 		wg.Add(1)
 		go func(slot *netSlot) {
 			defer wg.Done()
-			serveNetwork(ctx, slot, s.curve, s.verifyURL, s.reuseKey, s.interval, s.once, s.log)
+			serveNetwork(ctx, slot, s.curve, s.verifyURL, s.interval, s.once, s.log)
 		}(slot)
 	}
 }
@@ -661,11 +636,11 @@ const (
 // Setup is retried rather than attempted once, and the poll loop below heals
 // nebula on every tick. Between them, the states a host can get stuck in are
 // the ones where the control plane itself has nothing to offer.
-func serveNetwork(ctx context.Context, slot *netSlot, c cert.Curve, verifyURL string, reuseKey bool, interval time.Duration, once bool, log *slog.Logger) {
+func serveNetwork(ctx context.Context, slot *netSlot, c cert.Curve, verifyURL string, interval time.Duration, once bool, log *slog.Logger) {
 	dir := slot.dir
 	backoff := setupBackoffMin
 	for {
-		nl, err := newNetworkLoop(ctx, dir, c, verifyURL, reuseKey, log)
+		nl, err := newNetworkLoop(ctx, dir, c, verifyURL, log)
 		if err == nil {
 			slot.setLoop(nl)
 			defer func() { _ = nl.engine.Close() }()
@@ -781,7 +756,7 @@ func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
 	return out
 }
 
-func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL string, reuseKey bool, log *slog.Logger) (*networkLoop, error) {
+func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL string, log *slog.Logger) (*networkLoop, error) {
 	layout := agent.DefaultLayout(dir)
 	st, err := agent.ReadState(dir)
 	if err != nil {
@@ -796,11 +771,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 		// The linked copy IS the copy that will run it, so validating in
 		// process is exact rather than a guess about a host binary's version.
 		DisableValidation: true,
-		// From this network's own state, not a flag: one process runs every
-		// joined network, and a host may hold a token key for one and a file
-		// for another.
-		KeyRef: st.KeyRef,
-		Log:    nlog,
+		Log:               nlog,
 	}
 	applier.Supervisor = engine
 
@@ -821,15 +792,13 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	}
 
 	loop := &agent.Loop{
-		Client:   agent.NewClient(st.ControlURL()),
-		Applier:  applier,
-		Policy:   agent.DefaultRenewalPolicy(),
-		Layout:   layout,
-		Curve:    c,
-		ReuseKey: reuseKey,
-		KeyRef:   st.KeyRef,
-		State:    st,
-		Log:      nlog,
+		Client:  agent.NewClient(st.ControlURL()),
+		Applier: applier,
+		Policy:  agent.DefaultRenewalPolicy(),
+		Layout:  layout,
+		Curve:   c,
+		State:   st,
+		Log:     nlog,
 	}
 
 	if nb, na, err := loop.CurrentWindow(); err == nil {
@@ -917,16 +886,6 @@ func installCmd(args []string) error {
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		dryRun    = fs.Bool("dry-run", false, "print what would be written and installed, and change nothing")
 		noStart   = fs.Bool("no-start", false, "write the service definition but do not enable or start it")
-
-		// The MACHINE's identity key, not a network's mesh key — different keys
-		// with different jobs, and -key on `join` is the other one. Decided here
-		// because install is the per-machine step, and recorded so that no later
-		// join has to repeat it.
-		deviceKey = fs.String("device-key", "",
-			"PKCS#11 URI of a token-resident DEVICE identity key, e.g. "+
-				"pkcs11:token=orbit;object=device-key. Empty generates one on this host. "+
-				"Works on a TPM, unlike the mesh key - see docs/credential-model.md 7. "+
-				"Requires a binary built with -tags pkcs11")
 	)
 	_ = fs.Parse(args)
 
@@ -947,16 +906,8 @@ func installCmd(args []string) error {
 	}
 
 	if *dryRun {
-		// What happens to the device key depends on where it lives, and saying
-		// "would write the device key" about a token-backed one is the exact
-		// opposite of the truth — the whole point is that nothing is written.
-		keyLine := fmt.Sprintf("would write the device key under %s", *root)
-		if *deviceKey != "" {
-			keyLine = fmt.Sprintf("would use the token-resident device key %s\n"+
-				"  no private key would be written to disk", *deviceKey)
-		}
-		fmt.Fprintf(errOut, "%s\nwould write %s (%s)\nwould run: %s\n\n",
-			keyLine, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
+		fmt.Fprintf(errOut, "would write the device key under %s\nwould write %s (%s)\nwould run: %s\n\n",
+			*root, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
 		fmt.Fprintln(out, plan.Contents)
 		return nil
 	}
@@ -966,27 +917,9 @@ func installCmd(args []string) error {
 	// never expiring, and the same key for every network it will ever join. An
 	// operator can read the fingerprint off this output and recognise the
 	// machine in the authorization queue before it has joined anything.
-	// A token URI is VERIFIED before it is recorded. Writing the pointer first
-	// and finding at the next join that the object does not exist would leave a
-	// machine that cannot join anything, with the operator long gone.
-	ref := agent.DeviceKeyRef(*root)
-	if *deviceKey != "" {
-		if !device.IsTokenRef(*deviceKey) {
-			return usageErrorf("-device-key must be a pkcs11: URI, got %q", *deviceKey)
-		}
-		ref = *deviceKey
-	}
-	id, err := device.Open(ref)
+	id, err := device.LoadOrCreate(agent.DeviceKeyPath(*root))
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
-	}
-	if *deviceKey != "" {
-		if err := agent.WriteDeviceKeyRef(*root, *deviceKey); err != nil {
-			return fmt.Errorf("record the device key reference: %w", err)
-		}
-		if agent.URIHasInlinePIN(*deviceKey) {
-			fmt.Fprintf(errOut, "\nWARNING: %s\n\n", agent.RecommendPinSource)
-		}
 	}
 
 	if err := plan.Write(); err != nil {

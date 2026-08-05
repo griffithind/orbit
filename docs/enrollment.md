@@ -50,15 +50,14 @@ nobody has to watch a queue — but it now carries the operator's *intent* (a na
 optionally an address and a role) rather than being the only thing standing
 between a stranger and a certificate. See `design-device-identity.md`.
 
-**Orbit implements one credential method: `code`.** Two more are designed in §4
-and §5 and are not built. They are documented because the reasoning is worth
-keeping, not because you can use them.
+**Orbit implements one credential method: `code`.** One more is designed in §4
+and is not built. It is documented because the reasoning is worth keeping, not
+because you can use it.
 
 | Method | Bootstrap secret | Assurance | Status |
 |---|---|---|---|
 | `code` | single-use code, 15 min TTL | operator-mediated | **implemented** |
 | `cloud_iid` | signed cloud instance identity document | platform-attested | design only, §4 |
-| `attestation` | TPM 2.0 / Secure Enclave key attestation | hardware-bound | design only, §5 |
 
 Neither appears in the schema, and that is deliberate. A CHECK constraint listing
 a method is a claim the method works, and anyone reading the schema for what the
@@ -280,46 +279,7 @@ account, region, and tag set can join the mesh. Scope rules narrowly, and treat
 
 ---
 
-## 5. Method: `attestation` — designed, not built
-
-Highest assurance: the membership key is generated **inside** a TPM 2.0 or Secure
-Enclave and provably cannot be exported.
-
-Blocked on a decision, not on effort: TPM 2.0 has no X25519, so this forces the
-curve choice for an entire network. See the caveats at the end of this section.
-
-```json
-{ "method": "attestation",
-  "credential": "orb_1_…",          // still code-gated; attestation adds to it
-  "public_key": "…",
-  "attestation": { "format": "tpm",
-                   "ek_cert": "…", "ak_pub": "…",
-                   "certify_info": "…", "signature": "…" } }
-```
-
-Orbit verifies the EK certificate chains to a known TPM vendor root, that the
-attestation key is bound to that EK, and that `certify_info` proves the
-submitted public key was created in that TPM with non-exportable attributes.
-
-Two honest caveats:
-
-- **The hard part is not the protocol, it is vendor root management.** Smallstep
-  makes exactly this point about ACME device attestation: the plumbing is
-  straightforward, the attestation *verification* logic and the trust store of
-  TPM vendor roots is the real work. Budget accordingly.
-- **Nebula's X25519 host keys cannot live in most TPMs.** TPM 2.0 does not
-  support X25519 key agreement. In practice attestation is usable with **P-256
-  networks** (ECDH P-256 is widely supported), or the attested key is a separate
-  device-identity key that gates enrollment while the Nebula key stays in
-  software. Decide which, and document it — a claim of "hardware-bound Nebula
-  identity" that isn't is worse than no claim.
-
-It is the right long-term answer and the wrong thing to block a first release
-on.
-
----
-
-## 6. Renewal
+## 5. Renewal
 
 Steady state. Runs over the overlay, authenticated by source address
 (`design.md` §4.3), with no bearer credential.
@@ -332,7 +292,7 @@ POST /agent/v1/renew          (from 10.42.0.7, over the tunnel)
 Orbit resolves the membership from the source overlay address, confirms it is not
 blocked, and issues a fresh certificate from the network's **active** CA.
 
-### 6.1 Timing
+### 5.1 Timing
 
 Renew at **50% of certificate lifetime**, with jitter.
 
@@ -347,13 +307,16 @@ issued ──────────────┬─────────�
                         for the remaining half of the lifetime
 ```
 
-### 6.2 Key rotation on renewal
+### 5.2 Key rotation on renewal
 
-Generate a **new keypair** on each renewal by default. The cost is negligible
-and it bounds the value of a stolen key file. Provide `--reuse-key` for
-TPM-backed keys, which cannot be regenerated cheaply.
+Generate a **new keypair** on every renewal. Not a default — the only
+behaviour. The cost is microseconds and it bounds the value of a stolen key
+file: a key that never changes is one a past compromise keeps paying out on for
+as long as the machine lives, which is most of what renewing is supposed to end.
+`TestRenewRotatesThePrivateKey` asserts it, because rotation is invisible from
+the outside.
 
-### 6.3 Applying it safely
+### 5.3 Applying it safely
 
 Nebula holds v1 and v2 certificates simultaneously and rehandshakes on mismatch
 (`connection_manager.go:tryRehandshake`), so overlap is well-supported. Lean on
@@ -375,12 +338,12 @@ distinct event.
 
 ---
 
-## 7. When renewal stops working
+## 6. When renewal stops working
 
 Three ways a machine ends up unable to renew normally. All three need an answer,
 or the fleet slowly bleeds machines.
 
-### 7.1 Expired certificate (machine was offline)
+### 6.1 Expired certificate (machine was offline)
 
 **There is no recovery command, because there is nothing to recover from.**
 
@@ -416,7 +379,7 @@ Two consequences worth stating:
 
 `e2e/join_test.go:TestExpiredCertificateRecoversByRejoining` asserts all of it.
 
-### 7.2 Lost device key (disk failure, reimage)
+### 6.2 Lost device key (disk failure, reimage)
 
 A machine that lost `/var/lib/orbit/device.key` is, to this control plane, a
 DIFFERENT MACHINE. That is not a limitation to work around — it is the property
@@ -436,7 +399,7 @@ Do not build a "re-key this membership" path. It would be a way to move a
 membership onto a key nobody verified, which is exactly what an attacker who
 learns a membership id wants.
 
-### 7.3 Host cannot reach Orbit at all after a bad config push
+### 6.3 Host cannot reach Orbit at all after a bad config push
 
 Handled by the agent-side revert described in `design.md` §9: if the membership cannot
 reach Orbit for longer than a threshold after applying epoch *N*, it reverts to
@@ -446,7 +409,7 @@ first production rollout rather than after the first outage.
 
 ---
 
-## 8. Attack analysis
+## 7. Attack analysis
 
 | Attack | Defence |
 |---|---|
@@ -464,7 +427,7 @@ first production rollout rather than after the first outage.
 
 ---
 
-## 9. What to build first
+## 8. What to build first
 
 Orbit ships `code` only, and that is the right scope. It is the method every
 operator understands, it exercises the full issuance path end to end, and the

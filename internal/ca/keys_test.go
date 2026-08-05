@@ -14,7 +14,7 @@ import (
 // certificate whose curve differs from its signer's, and nothing updates
 // store.Network.Curve after creation. So an empty or misspelled name must be an
 // error here, not a silent CURVE25519, or `-curve ""` quietly builds a network
-// that can never have hardware-backed host keys.
+// which Orbit no longer creates.
 //
 // internal/enroll wraps this and applies its own empty-means-CURVE25519 default
 // for wire compatibility with agents that predate P-256. That default belongs

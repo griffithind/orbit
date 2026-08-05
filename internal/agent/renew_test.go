@@ -406,7 +406,7 @@ func TestKeypairFromPrivateRoundTrips(t *testing.T) {
 			}
 
 			// Reusing the key must derive the same public half, or a
-			// --reuse-key renewal would mint a certificate for a key the host
+			// A renewal would otherwise mint a certificate for a key the host
 			// does not hold.
 			again, err := agent.KeypairFromPrivate(curve, raw)
 			if err != nil {

@@ -144,7 +144,6 @@ func deviceResponse(d *store.Device, hosts []store.Membership) wire.DeviceRespon
 	out := wire.DeviceResponse{
 		ID:             d.ID.String(),
 		KeyFingerprint: d.KeyFingerprint,
-		KeyBacking:     d.KeyBacking,
 		Hostname:       d.Hostname,
 		PublicAddrs:    d.PublicAddrs,
 		Blocked:        d.Blocked(),

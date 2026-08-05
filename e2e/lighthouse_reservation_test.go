@@ -52,7 +52,7 @@ func TestReservedLighthouseNeedsNoFollowUp(t *testing.T) {
 	}
 	client := agent.NewClient(ts.URL)
 	joined, err := client.JoinWithCode(
-		ctx, id, h.netID.String(), "reserved-lh", "", "", code.Code, time.Now())
+		ctx, id, h.netID.String(), "reserved-lh", "", code.Code, time.Now())
 	if err != nil {
 		t.Fatalf("join with the reservation: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestReservationDoesNotOverwriteAMachinesAddresses(t *testing.T) {
 		t.Fatalf("device key: %v", err)
 	}
 	client := agent.NewClient(ts.URL)
-	joined, err := client.JoinWithCode(ctx, id, h.netID.String(), "multi-net-lh", "", "", first.Code, time.Now())
+	joined, err := client.JoinWithCode(ctx, id, h.netID.String(), "multi-net-lh", "", first.Code, time.Now())
 	if err != nil {
 		t.Fatalf("first join: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestReservationDoesNotOverwriteAMachinesAddresses(t *testing.T) {
 		}, &secondCode); status != http.StatusCreated {
 		t.Fatalf("second reservation: status %d", status)
 	}
-	if _, err := client.JoinWithCode(ctx, id, second.ID, "multi-net-lh", "", "", secondCode.Code, time.Now()); err != nil {
+	if _, err := client.JoinWithCode(ctx, id, second.ID, "multi-net-lh", "", secondCode.Code, time.Now()); err != nil {
 		t.Fatalf("second join: %v", err)
 	}
 

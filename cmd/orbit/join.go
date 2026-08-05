@@ -51,7 +51,6 @@ func joinCmd(args []string) error {
 		// A token URI rather than a boolean, for the reason `enroll` takes one:
 		// which object on which token is not something the agent can guess, and
 		// getting it wrong must fail here rather than at the first handshake.
-		keyRef = fs.String("key", "", "PKCS#11 URI of a token-resident mesh key, e.g. pkcs11:token=orbit;object=host-key. Implies P-256, which the network must also use; requires a binary built with -tags pkcs11")
 	)
 	dirFlag := fs.String("dir", "", "per-network directory (default "+agent.DefaultRoot+"/<network slug>)")
 	_ = fs.Parse(args)
@@ -71,10 +70,9 @@ func joinCmd(args []string) error {
 		*name = h
 	}
 
-	// P-256, always. See cmd/orbitd bootstrap: a network's curve is permanent
-	// and there is only one answer that leaves hardware-backed keys possible,
-	// so it is a constant on both halves rather than a flag on each that can
-	// disagree — which is exactly how the two used to.
+	// P-256, always. See cmd/orbitd bootstrap: a network's curve is permanent,
+	// so it is one constant across both halves rather than a flag on each that
+	// can disagree — which is exactly how the two used to.
 	c := cert.Curve_P256
 
 	log := newLogger()
@@ -84,10 +82,7 @@ func joinCmd(args []string) error {
 	// The device key, generated on first use and never again. Everything after
 	// this point is the same key no matter which network is being joined or
 	// which control plane is being talked to.
-	// Whatever `orbit agent install` recorded: a token URI, or the key file.
-	// Join takes no -device-key of its own — one machine has one identity, and
-	// a flag here would let two networks disagree about what it is.
-	id, err := device.Open(agent.DeviceKeyRef(*root))
+	id, err := device.LoadOrCreate(agent.DeviceKeyPath(*root))
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
 	}
@@ -98,10 +93,7 @@ func joinCmd(args []string) error {
 	// the two are different keys with different jobs — nebula needs CKA_DERIVE,
 	// an identity needs CKA_SIGN, and one object cannot be both.
 	client := agent.NewClient(*url)
-	// id.Backing(), not "". The control plane records where this machine says
-	// its identity key lives, and it was previously always told "file" —
-	// including by a machine whose key was on a token, because nothing asked.
-	joined, err := client.JoinWithCode(ctx, id, *network, *name, hostname, id.Backing(), *code, time.Now())
+	joined, err := client.JoinWithCode(ctx, id, *network, *name, hostname, *code, time.Now())
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {
@@ -161,7 +153,7 @@ func joinCmd(args []string) error {
 	// makes it a trust anchor is that it was established here, at the one moment
 	// this machine checked it against a network ID given out of band.
 	return awaitAuthorization(ctx, client, id, joined.MembershipID, joined.NetworkKey,
-		dir, c, *keyRef, *wait, *poll, log)
+		dir, c, *wait, *poll, log)
 }
 
 // awaitAuthorization polls the claim endpoint until the membership is approved,
@@ -172,7 +164,7 @@ func joinCmd(args []string) error {
 // — an agent that gave up on the first 409 would need approval to land inside
 // one polling interval of the join.
 func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Identity,
-	membershipID, networkKey, dir string, c cert.Curve, keyRef string,
+	membershipID, networkKey, dir string, c cert.Curve,
 	wait, poll time.Duration, log *slog.Logger) error {
 
 	// One mesh keypair for the whole wait, re-signed on each attempt.
@@ -185,17 +177,8 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 	// Either way the private half stays on this machine and is never
 	// transmitted. The difference is how strong that guarantee is: a file can be
 	// copied off a disk image, a token key cannot leave the chip.
-	var kp *agent.Keypair
-	var err error
-	if keyRef != "" {
-		if !agent.IsTokenRef(keyRef) {
-			return fmt.Errorf("-key must be a pkcs11: URI, got %q", keyRef)
-		}
-		kp, err = agent.KeypairFromToken(keyRef)
-		if err != nil {
-			return fmt.Errorf("read public key from token: %w", err)
-		}
-	} else if kp, err = agent.GenerateKeypair(c); err != nil {
+	kp, err := agent.GenerateKeypair(c)
+	if err != nil {
 		return fmt.Errorf("generate keypair: %w", err)
 	}
 
@@ -212,7 +195,6 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 				Layout:            layout,
 				Reloader:          agent.NoopReloader{},
 				DisableValidation: true,
-				KeyRef:            keyRef,
 				Log:               log,
 			}
 
@@ -237,7 +219,6 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 				ConfigEpoch:    resp.ConfigEpoch,
 				BlocklistEpoch: resp.BlocklistEpoch,
 				MembershipID:   resp.MembershipID,
-				KeyRef:         keyRef,
 				NetworkKey:     networkKey,
 			}); err != nil {
 				return err

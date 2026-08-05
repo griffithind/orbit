@@ -134,7 +134,7 @@ type CA struct {
 	Fingerprint string
 	CertPEM     string
 	// SignerRef is an opaque locator resolved by internal/ca. It never holds
-	// key material: awskms://…, pkcs11://…, file://…
+	// key material. Today there is one scheme: db://<uuid>, the vault.
 	SignerRef string
 	Curve     string
 	NotBefore time.Time

@@ -390,7 +390,7 @@ apart because they have different causes and different answers:
 | A **machine** | its certificate expired while it was offline | re-run `orbit agent join` — the device key never expires |
 | A **person** | every admin token expired, revoked, or lost | `orbitd token create`, which authenticates with the database |
 
-The device key removed the first entirely (`enrollment.md` §7.1), and removed
+The device key removed the first entirely (`enrollment.md` §6.1), and removed
 nothing from the second. A fleet can be perfectly healthy — every tunnel up,
 every machine renewing on schedule — while no human can add a machine, rotate a
 CA, or block a stolen laptop. That is precisely the situation this section

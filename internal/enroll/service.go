@@ -1054,9 +1054,8 @@ func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip
 		// the control plane is the one machine that never reports through the
 		// agent API.
 		self := store.Device{
-			PublicKey:  deviceKey,
-			KeyBacking: store.DeviceKeyFile,
-			Hostname:   name,
+			PublicKey: deviceKey,
+			Hostname:  name,
 		}
 		if err := tx.SeeDevice(ctx, &self); err != nil {
 			return fmt.Errorf("record the control plane device: %w", err)

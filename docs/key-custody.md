@@ -41,8 +41,8 @@ against it first.
 
 ### 2.1 KMS is documented but does not exist
 
-`internal/ca/registry.go` names `awskms://`, `gcpkms://` and `pkcs11://` in the
-`SignerFactory` doc comment. Only `FileSignerFactory` is wired — in `orbitd`,
+`internal/ca/registry.go` named `awskms://`, `gcpkms://` and `pkcs11://` in the
+`SignerFactory` doc comment. Only `FileSignerFactory` was wired — in `orbitd`,
 twice, with no alternative reachable by configuration.
 
 `design.md` §5 is honest about this ("interface only; no backend ships today").

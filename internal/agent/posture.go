@@ -205,11 +205,10 @@ func firewallEnabled() *bool {
 // tpmPresent reports whether a TPM device node exists.
 //
 // Presence only. It says nothing about whether the TPM is usable, whether it
-// holds an endorsement certificate, or whether tpm2-pkcs11 will honour the
-// derive template a hardware-backed nebula key needs — all of which matter and
-// none of which a file check can answer. It is here because knowing which
-// machines in a fleet COULD hold a hardware key is the first thing anyone plans
-// a rollout against.
+// holds an endorsement certificate, or whether anything is sealed to it —
+// none of which a file check can answer. It is inventory, reported alongside
+// secure boot and disk encryption: knowing which machines in a fleet have one
+// is worth recording even though Orbit does not use it.
 func tpmPresent() *bool {
 	for _, p := range []string{"/dev/tpmrm0", "/dev/tpm0"} {
 		if _, err := os.Stat(sysPath(p)); err == nil {

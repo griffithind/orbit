@@ -438,11 +438,7 @@ func serve(args []string) error {
 	var selfDevice *device.Identity
 	if len(meshes) > 0 {
 		var err error
-		// device.Open, so -device-key takes a pkcs11: URI as well as a path. The
-		// control plane is a machine on its own network and holds a device key
-		// like any other; no reason its identity should be less protectable
-		// than a laptop's.
-		selfDevice, err = device.Open(*deviceKeyPath)
+		selfDevice, err = device.LoadOrCreate(*deviceKeyPath)
 		if err != nil {
 			return fmt.Errorf("control plane device key: %w", err)
 		}
@@ -673,12 +669,8 @@ func bootstrap(args []string) error {
 	// here means building a new network and re-enrolling every machine. That is
 	// a bad thing to leave as a choice, and there is only one defensible answer.
 	//
-	// P-256 is the only curve on which a host key can live in hardware. TPM 2.0
-	// has no Curve25519 at all, Apple's Secure Enclave is P-256 only, and
-	// Windows' Platform Crypto Provider is ECDSA P-256/P-384 — and nebula's
-	// PKCS#11 support exists only for P-256 (noiseutil.DHP256PKCS11, with no
-	// 25519 equivalent). Choosing 25519 forecloses hardware-backed keys forever
-	// for that network.
+	// P-256 because it is what every other ecosystem standardises on for ECDSA,
+	// and because the choice is nearly free either way.
 	//
 	// What it costs is nothing that reaches the data plane. The curve selects
 	// only the Noise handshake's DH function (pki.go newCipherSuite); the AEAD

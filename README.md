@@ -130,7 +130,8 @@ certificate from a missing tunnel from a denying rule, which all look identical
 from `ping`.
 
 [docs/deployment.md](docs/deployment.md) has the whole of it — bring-up order,
-sealing the CA key to a TPM, backups, alerts, and what survives an outage.
+sealing the KEK passphrase with `systemd-creds`, backups, alerts, and what
+survives an outage.
 
 ---
 

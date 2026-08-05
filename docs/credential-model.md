@@ -34,8 +34,8 @@ things they are allowed to assert. They should be different credentials.
 ### Device credential — the Nebula certificate
 
 - **Issued at**: enrollment.
-- **Bound to**: a key that never leaves hardware (TPM, Secure Enclave, StrongBox)
-  where the platform allows; a software key otherwise, stated as such.
+- **Bound to**: a key generated on the machine and never transmitted — a file
+  at mode 0600. Not hardware-held; see §7 for why not.
 - **Asserts**: this is a known, enrolled machine.
 - **Authoritative for**: **network reachability.** Which hosts this machine may
   open a connection to, on which ports.
@@ -120,17 +120,16 @@ Distinguish what is **observed** from what is **asserted**, and prefer observed.
 
 | Signal | Source | Trust |
 |---|---|---|
-| Device key resident in hardware | Attestation at enrollment | **Proven**, where the platform supports it |
-| Device identity | Certificate + hardware key | **Proven** |
+| Device identity | Certificate over a key that never left the machine | **Proven** — as far as possession goes; a key on disk is copyable, so this proves "something holding that key", not "that physical machine" |
 | Underlay address, lighthouse reached | Observed by the control plane during handshake | **Observed** — coarse but real |
 | Time of issuance | Control plane clock | **Observed** |
-| Boot state | TPM quote + event log | **Proven** where measured boot is configured |
+| Boot state, TPM presence | Agent report | **Asserted.** Read natively from the machine and attributable to an enrolled device, but not attested |
 | Disk encryption, firewall, patch level | Agent report | **Asserted.** Attributable to an enrolled device; not proof |
 | Geolocation | Anything self-reported | **Asserted, weakly.** Entra's own documentation says device-platform signals "aren't verified" |
 
-The honest claim this supports: posture reports are **attributable to a
-hardware-held key that also gates network access**, delivered in seconds rather
-than hours, with revocation that severs the connection. Lying requires
+The honest claim this supports: posture reports are **attributable to a key that
+also gates network access**, delivered in seconds rather than hours, with
+revocation that severs the connection. Lying requires
 compromising the host rather than spoofing a header. That is a real improvement.
 It is not proof that the report is true, and it should not be sold as one.
 
@@ -138,127 +137,49 @@ It is not proof that the report is true, and it should not be sold as one.
 
 ## 7. Constraints this design inherits
 
-**Curve was a whole-network, create-time decision. Now it is not a decision at
-all.** `cert/ca_pool.go` rejects a certificate whose curve differs from its
-signer's, and nothing updates a network's curve — so the wrong answer meant
-rebuilding the network and re-enrolling every machine. Hardware-backed keys
-require P-256: TPM 2.0 has no Curve25519, Apple's Secure Enclave is P-256 only,
-Windows' Platform Crypto Provider is ECDSA P-256/P-384, and nebula's own PKCS#11
-path exists only for P-256 (`noiseutil.DHP256PKCS11`, with no 25519 equivalent).
+**One curve, and no choice about it.** `cert/ca_pool.go` rejects a certificate
+whose curve differs from its signer's, and nothing updates a network's curve —
+so the wrong answer means rebuilding the network and re-enrolling every machine.
+Orbit is **P-256 only**: there is no `-curve` flag on either half, and migration
+0021 refuses anything else in the database.
 
-So Orbit is **P-256 only**. There is no `-curve` flag on either half, and
-migration 0021 refuses anything else in the database. What it costs reaches no
-further than the handshake — the curve selects only the Noise DH function
-(`pki.go newCipherSuite`), while the AEAD and hash come from the separate
-`cipher` setting, so every packet after the handshake is identical work.
-Measured: about 10% on the handshake DH and 24% on a certificate verify, which
-is 10-20µs once per peer pair.
+P-256 rather than Curve25519 because it is the curve every other ecosystem
+standardises on for ECDSA, and because the difference reaches no further than
+the handshake — `pki.go newCipherSuite` uses the curve only to pick the Noise DH
+function, while the AEAD and hash come from the separate `cipher` setting, so
+every packet after the handshake is identical work either way. Measured: about
+10% on the handshake DH and 24% on a certificate verify, which is 10-20µs once
+per peer pair.
 
-Removing the choice also removed a live bug: `orbitd bootstrap` defaulted to
-P256 while every `orbit agent` path defaulted to CURVE25519, so a machine
-following the documented steps failed its claim with a curve mismatch. Neither
-default was wrong alone, which is why it survived — two constants in two
-binaries cannot notice they disagree.
+The value is having ONE curve. Two defaults that could disagree is not a
+theoretical hazard: `orbitd bootstrap` defaulted to P256 while every `orbit
+agent` path defaulted to CURVE25519, and a machine following the documented
+steps failed its claim with a curve mismatch. Two constants in two binaries
+cannot notice they differ.
 
-**Nebula needs raw ECDH, and `tpm2-pkcs11` does not provide it.** TESTED, and
-the answer is no.
+**Private keys are files, deliberately.** The mesh key lives at
+`<network dir>/host.key` and the device identity key at
+`/var/lib/orbit/device.key`, both mode 0600. There is no PKCS#11, no TPM, no
+Secure Enclave — the same choice Tailscale and ZeroTier make.
 
-`pkclient.DeriveNoise` uses `CKM_ECDH1_DERIVE` with `CKD_NULL` — no KDF, the
-bare 32-byte X coordinate. This was recorded here as "should pass through, but
-unverified". It does not pass through:
+Hardware backing defeats **offline** attacks: a stolen disk, a backup, a VM
+snapshot, a decommissioned SSD. It does nothing against an attacker with code
+execution on a running machine, who simply asks the chip to sign. That is a real
+category, and a narrow one, and covering it costs a cgo build variant, a second
+release artifact, and a PKCS#11 module installed and configured on every managed
+host — for a property that could not even be verified, since nothing attested
+that a machine reporting "token" was using one.
 
-```
-$ pkcs11-tool --module libtpm2_pkcs11.so --list-mechanisms | grep -i ecdh
-(nothing)
-
-$ pkcs11-tool --module libtpm2_pkcs11.so --derive --mechanism ECDH1-DERIVE …
-error: PKCS11 function C_DeriveKey failed: rv = CKR_MECHANISM_INVALID (0x70)
-```
-
-A P-256 key created by `tpm2_ptool addkey --algorithm=ecc256` reports
-`Allowed mechanisms: ECDSA, ECDSA-SHA1, ECDSA-SHA256, ECDSA-SHA384,
-ECDSA-SHA512` — signing only. The module advertises no derive mechanism of any
-kind.
-
-**The gap is the bridge, not the hardware.** The same TPM reports
-`TPM2_CC_ECDH_ZGen` and `TPM2_CC_ECDH_KeyGen` among its implemented commands,
-and `TPM2_ECC_NIST_P256` among its curves. The chip can do exactly what nebula
-needs; `tpm2-pkcs11` simply does not expose it through PKCS#11.
-
-So a TPM-backed nebula host key is **not achievable with tpm2-pkcs11 today**,
-and no amount of configuration changes that. What would: the mechanism landing
-upstream in tpm2-pkcs11, or a different PKCS#11 module over the same TPM. Both
-are outside Orbit — `pki.go` dispatches on the `pkcs11:` prefix and any
-conforming module plugs in unmodified, so nothing here has to change when one
-appears.
-
-Verified against tpm2-pkcs11 1.9.0 (Debian trixie) with `swtpm` and
-`tpm2-abrmd`. Reproduce by creating a token with `tpm2_ptool`, adding an
-`ecc256` key, and running the two commands above. A hardware TPM is not needed
-to re-test this: the mechanism list comes from the module.
-
-A **PKCS#11 token that does implement `CKM_ECDH1_DERIVE`** — a YubiKey via
-`ykcs11`, a SoftHSM token, an HSM — still works, and that is what the
-`-tags pkcs11` build is for. It is the TPM specifically that is blocked.
-
-### The DEVICE key, which a TPM can hold
-
-The mesh key is blocked. **The device identity key is not**, and the difference
-is the operation rather than the hardware: a device key only ever **signs**.
-`tpm2-pkcs11` implements `CKM_ECDSA_SHA256` and advertises it on an `ecc256`
-key; it is only the derive mechanism that is missing.
-
-Tested, against the same software TPM: a device identity opened from a
-TPM-resident key signed a join statement, and the signature verified through
-`device.Verify` against the SPKI derived from the token's own EC point.
-
-```bash
-orbit agent install -device-key 'pkcs11:token=orbit;object=device-key'
-```
-
-records the URI in `device-key.ref` and writes **no private key file** — the
-private half is created on the token by `tpm2_ptool` and never leaves it.
-`orbit agent join` then uses whatever install recorded, on every network, so the
-choice is made once per machine.
-
-This is the more valuable half. The device key is what Orbit's identity model
-rests on: joining is a signature over it, no secret travels, and a machine whose
-certificate expired still gets back in because that key never expires. A stolen
-disk image is no longer a stolen identity.
-
-**Two limits, both real.**
-
-*It is claimed, not attested.* `KeyBacking` is what the agent reports about
-itself. A machine whose agent has been replaced can report `token` while using a
-file. Proving TPM residency needs the TPM to certify the key — `TPM2_Certify`
-under an attestation key whose own certificate chains to the manufacturer — and
-that is a different feature. Treat the field as inventory, not evidence.
-
-*A PIN in the URI is a secret on the disk.* `pin-value=` in `device-key.ref`
-means anyone who can read that file can ask the chip to use the key, which is
-most of what moving the key into a chip was for. Orbit writes the file `0600`
-when it sees one and warns; `pin-source=` naming a `0600` file, or no PIN at all
-with the module prompting, is better.
-
-**No Nebula fork is required.** `pki.go` dispatches on the `pkcs11:` string
-prefix, so any conforming PKCS#11 module plugs in unmodified. The cost is the
-`cgo` and `pkcs11` build tags, which means hosts wanting hardware keys lose the
-single static binary.
-
-**EK certificates are often absent** on Intel PTT and AMD fTPM, with no fetchable
-endpoint. A trust-on-first-use enrollment path is a requirement, not a
-compromise.
-
----
+What bounds the file instead: certificates are short-lived (24h by default), the
+mesh key is rotated on every renewal, and `orbit device block` refuses a device
+everywhere on the control plane immediately. A stolen disk image buys mesh
+access until the certificate expires, not indefinitely.
 
 ## 8. Open questions
 
-1. Does `tpm2-pkcs11` satisfy Nebula's derive template (`CKD_NULL`,
-   `CKA_EXTRACTABLE`, `CKA_VALUE_LEN == 32`)? One afternoon with
-   `make bin-pkcs11` and a TPM settles it.
-2. What exactly goes in the user credential, and in which fields — extensions,
+1. What exactly goes in the user credential, and in which fields — extensions,
    SAN, or a signed claims blob?
-3. What issues it: does Orbit accept an OIDC ID token, a Kerberos ticket, a PAM
+2. What issues it: does Orbit accept an OIDC ID token, a Kerberos ticket, a PAM
    success, or all three?
-4. How does the user credential reach its consumers — NSS database, Kerberos
+3. How does the user credential reach its consumers — NSS database, Kerberos
    ccache, a local socket?

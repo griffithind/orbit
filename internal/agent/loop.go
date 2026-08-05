@@ -65,16 +65,6 @@ type State struct {
 	// before anything else is acted on. This just keeps what that step proved.
 	NetworkKey string `json:"network_key,omitempty"`
 
-	// KeyRef says where this host's private key lives FOR THIS NETWORK. Empty
-	// means the key file in the layout directory; a "pkcs11:" URI means a
-	// token, and no key file exists.
-	//
-	// Here rather than on a flag because `orbit agent run` drives every joined
-	// network in one process: a host can hold a token-backed key for one
-	// network and a file for another, and a single flag could not say both. It
-	// is a property of the join, decided at enrollment, exactly like BaseURL.
-	KeyRef string `json:"key_ref,omitempty"`
-
 	// UnconfirmedSince is when the currently-installed generation was applied
 	// without the control plane having been reachable since. Zero means the
 	// current generation is confirmed working.
@@ -249,21 +239,6 @@ type Loop struct {
 
 	// Curve for newly generated keys. Must match the network.
 	Curve cert.Curve
-
-	// ReuseKey keeps the existing private key across renewals.
-	//
-	// Off by default: generating a fresh keypair costs nothing and bounds the
-	// value of a stolen key file to one certificate lifetime. Turn it on only
-	// for hardware-backed keys, which cannot be regenerated.
-	ReuseKey bool
-
-	// KeyRef is a "pkcs11:" URI when this host's private key lives on a token,
-	// empty when it is a file.
-	//
-	// A token key implies ReuseKey: there is nothing to rotate, because the
-	// agent cannot generate a key inside the token and would not want to — the
-	// key's non-exportability is the reason it is there.
-	KeyRef string
 
 	State State
 	Log   *slog.Logger
@@ -760,31 +735,15 @@ func (l *Loop) RenewNow(ctx context.Context) error {
 }
 
 func (l *Loop) doRenew(ctx context.Context) error {
-	var (
-		kp  *Keypair
-		err error
-	)
-	switch {
-	case IsTokenRef(l.KeyRef):
-		// A token key is never rotated: the agent cannot generate one inside
-		// the token, and the whole point is that this key stays put. Read the
-		// public half back so the control plane can sign for it again.
-		kp, err = KeypairFromToken(l.KeyRef)
-		if err != nil {
-			return fmt.Errorf("read public key from token: %w", err)
-		}
-	case l.ReuseKey:
-		// Reusing the key still requires sending the public half, which is
-		// derived from the key on disk rather than regenerated.
-		kp, err = l.publicFromDisk()
-		if err != nil {
-			return fmt.Errorf("read existing key: %w", err)
-		}
-	default:
-		kp, err = GenerateKeypair(l.Curve)
-		if err != nil {
-			return fmt.Errorf("generate keypair: %w", err)
-		}
+	// A FRESH keypair on every renewal, with no way to opt out.
+	//
+	// Rotating the key is what makes a renewal worth more than a longer
+	// certificate: a key that never changes is one a past compromise keeps
+	// paying out on, for as long as the machine lives. Generating one costs
+	// microseconds and the private half never leaves this host either way.
+	kp, err := GenerateKeypair(l.Curve)
+	if err != nil {
+		return fmt.Errorf("generate keypair: %w", err)
 	}
 
 	resp, err := l.Client.Renew(ctx, kp)
@@ -810,14 +769,7 @@ func (l *Loop) doRenew(ctx context.Context) error {
 		Certificate: resp.Certificate,
 		ConfigSig:   resp.ConfigSig,
 	}
-	// Empty for a token key by construction — KeypairFromToken has no private
-	// half to return — and Applier stages nothing for empty content, so a token
-	// host never gets a key file. Stated as a condition anyway: relying on the
-	// emptiness alone would make "we never write a private key for this host" an
-	// accident of another function's return value.
-	if !l.ReuseKey && !IsTokenRef(l.KeyRef) {
-		material.PrivateKey = kp.PrivatePEM
-	}
+	material.PrivateKey = kp.PrivatePEM
 
 	if err := l.Applier.Apply(ctx, material); err != nil {
 		return fmt.Errorf("apply renewed certificate: %w", err)
@@ -840,25 +792,10 @@ func (l *Loop) doRenew(ctx context.Context) error {
 
 	l.adoptEndpoints(resp.AgentEndpoints)
 	l.Log.Info("certificate renewed",
-		"notAfter", resp.NotAfter, "renewAfter", resp.RenewAfter,
-		"rotatedKey", !l.ReuseKey && !IsTokenRef(l.KeyRef),
-		"keyBacking", keyBacking(l.KeyRef))
+		"notAfter", resp.NotAfter, "renewAfter", resp.RenewAfter)
 
 	l.report(ctx)
 	return nil
-}
-
-// publicFromDisk derives the public half of the existing private key.
-func (l *Loop) publicFromDisk() (*Keypair, error) {
-	b, err := os.ReadFile(l.Layout.Paths.Key)
-	if err != nil {
-		return nil, err
-	}
-	raw, _, curve, err := cert.UnmarshalPrivateKeyFromPEM(b)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-	return KeypairFromPrivate(curve, raw)
 }
 
 // poll fetches and applies any configuration change.

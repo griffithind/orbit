@@ -32,7 +32,7 @@ import (
 //
 // See docs/design-device-identity.md.
 //
-// Two keys, not one. A hardware key is created for a single purpose class:
+// Two keys, not one. A signing key and a key-agreement key are different
 // nebula's Noise handshake needs ECDH (PKCS#11 CKA_DERIVE), TLS client
 // authentication needs ECDSA (CKA_SIGN), and no token will do both with one
 // object. A token-backed host therefore holds two non-exportable P-256 keys.
@@ -81,7 +81,7 @@ func (s x509Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]
 // P-256 only, and deliberately so. SignBytes already produces ASN.1 ECDSA over
 // SHA-256 for this curve, which is exactly what X.509 expects; Ed25519 would
 // need x509.PureEd25519 and a signer that takes the whole message rather than a
-// digest — a second code path for a curve that cannot hold a hardware key
+// digest — a second code path for a curve Orbit no longer creates
 // anyway.
 func x509SignerFor(ctx context.Context, s Signer) (crypto.Signer, error) {
 	if s.Curve() != cert.Curve_P256 {

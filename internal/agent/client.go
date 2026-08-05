@@ -179,8 +179,7 @@ func decodeResponse(resp *http.Response, out any) error {
 
 // KeypairFromPrivate reconstructs a Keypair from an existing private key.
 //
-// Used by --reuse-key renewal. The private half never changes and never leaves
-// the host; only the derived public half is sent.
+// The private half never leaves the host; only the derived public half is sent.
 func KeypairFromPrivate(curve cert.Curve, priv []byte) (*Keypair, error) {
 	pub, err := ca.PublicFromHostKey(curve, priv)
 	if err != nil {
@@ -227,8 +226,8 @@ func (c *Client) Watch(ctx context.Context, configEpoch, blockEpoch int64, hold 
 // The device key signs the request; nothing secret travels. What comes back is
 // a membership id and a state, not a certificate — see Claim for the second
 // half, and docs/design-device-identity.md §3 for why it is two steps.
-func (c *Client) Join(ctx context.Context, id *device.Identity, network, name, hostname, keyBacking string, now time.Time) (*wire.JoinResponse, error) {
-	return c.JoinWithCode(ctx, id, network, name, hostname, keyBacking, "", now)
+func (c *Client) Join(ctx context.Context, id *device.Identity, network, name, hostname string, now time.Time) (*wire.JoinResponse, error) {
+	return c.JoinWithCode(ctx, id, network, name, hostname, "", now)
 }
 
 // JoinWithCode is Join carrying a reservation code.
@@ -244,7 +243,7 @@ func (c *Client) Join(ctx context.Context, id *device.Identity, network, name, h
 // reservation could only ever be redeemed by a device chosen before the code was
 // minted — which is the opposite of what a reservation is for.
 func (c *Client) JoinWithCode(ctx context.Context, id *device.Identity,
-	network, name, hostname, keyBacking, code string, now time.Time) (*wire.JoinResponse, error) {
+	network, name, hostname, code string, now time.Time) (*wire.JoinResponse, error) {
 
 	sig, err := id.SignJoin(network, name, now)
 	if err != nil {
@@ -254,7 +253,6 @@ func (c *Client) JoinWithCode(ctx context.Context, id *device.Identity,
 		Network:    network,
 		Name:       name,
 		PublicKey:  base64.StdEncoding.EncodeToString(id.PublicKey()),
-		KeyBacking: keyBacking,
 		Hostname:   hostname,
 		SignedAt:   now.Unix(),
 		Signature:  base64.StdEncoding.EncodeToString(sig),

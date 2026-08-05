@@ -1279,10 +1279,6 @@ type JoinRequest struct {
 	// across every network and control plane, and is never used for the mesh.
 	PublicKey string `json:"public_key"`
 
-	// KeyBacking is 'file' or 'token' — where the device claims to hold its
-	// private key. A claim, never a fact, until attestation can prove it.
-	KeyBacking string `json:"key_backing,omitempty"`
-
 	// Hostname is advisory and exists so a human deciding whether to authorize
 	// a pending join can tell which row is the laptop on their desk.
 	Hostname string `json:"hostname,omitempty"`
@@ -1455,11 +1451,6 @@ type DevicePosture struct {
 type DeviceResponse struct {
 	ID             string `json:"id"`
 	KeyFingerprint string `json:"key_fingerprint"`
-
-	// KeyBacking is 'file' or 'token', and is a CLAIM until attestation can
-	// prove it. Named in the JSON as what it is so a consumer does not read it
-	// as a verified fact.
-	KeyBacking string `json:"key_backing"`
 
 	Hostname string `json:"hostname,omitempty"`
 

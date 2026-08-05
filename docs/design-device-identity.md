@@ -180,10 +180,10 @@ There is no space to sweep and nothing to farm, so a PoW would cost battery on
 every laptop and buy nothing.
 
 The instinct behind it — *make identity creation prove something real* — is
-right, and **TPM attestation is the strictly better version**. Proof of work
-proves someone spent CPU, which anyone with CPU can do. Attestation proves the
-key lives in hardware you can name, which cannot be forged at any price. That is
-already the plan; this is the same idea done properly.
+right; proof of work is just the wrong instrument. It proves someone spent CPU,
+which anyone with CPU can do. What actually gates identity here is an operator
+authorizing a pending join, or a reservation code they minted in advance. That
+is a person deciding, which is stronger than any amount of arithmetic.
 
 ---
 
@@ -200,10 +200,12 @@ anyone who knows it can create rows. Mitigations are rate limiting per source
 and per network, and a bound on pending rows — neither is exotic, but neither is
 free, and it is the cost of the door being open.
 
-**The device key is only as good as its storage.** In a file it is copyable off
-a disk image, which is the same weakness the mesh key has today. In a TPM it is
-not. The design does not require hardware; it makes hardware worth having, and
-the difference must be stated per host rather than implied fleet-wide.
+**The device key is only as good as its storage.** It is a file at mode 0600,
+copyable off a disk image — the same weakness the mesh key has. What bounds it:
+certificates are short-lived, the mesh key rotates on every renewal, and
+`orbit device block` refuses a device everywhere immediately. A stolen image
+buys access until the certificate expires, not indefinitely. See
+`credential-model.md` §7 for why there is no hardware option.
 
 ---
 

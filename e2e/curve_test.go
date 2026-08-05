@@ -15,9 +15,8 @@ import (
 
 // TestP256NetworkEndToEnd.
 //
-// `orbitd bootstrap` defaults to P-256, because it is the only curve on which a
-// host key can live in a TPM or Secure Enclave — TPM 2.0 has no Curve25519 and
-// Apple's Secure Enclave is P-256 only. A network's curve is permanent
+// Every Orbit network is P-256 — the choice is gone and migration 0021
+// refuses anything else. A network's curve is permanent
 // (cert/ca_pool.go refuses a leaf whose curve differs from its signer's, and
 // nothing updates store.Network.Curve), so the default is unrecoverable if it
 // is wrong.

@@ -71,7 +71,6 @@ func deviceLs(ctx context.Context, args []string) error {
 		column{name: "HOSTNAME", elastic: true},
 		column{name: "ID"},
 		column{name: "OS"},
-		column{name: "KEY"},
 		column{name: "POSTURE"},
 		column{name: "SEEN"},
 	)
@@ -87,7 +86,7 @@ func deviceLs(ctx context.Context, args []string) error {
 		}
 		seen := d.LastSeenAt
 		t.add(orDash(name), shortFingerprint(d.ID), orDash(d.Facts.OSVersion),
-			d.KeyBacking, postureSummary(d.Posture, d.PostureObservedAt), ago(&seen))
+			postureSummary(d.Posture, d.PostureObservedAt), ago(&seen))
 	}
 	if shown == 0 {
 		if *gaps {
@@ -131,10 +130,6 @@ func deviceShow(ctx context.Context, args []string) error {
 	fmt.Fprintf(out, "%s\n", o.r.bold(orDash(d.Hostname)))
 	fmt.Fprintf(out, "  id           %s\n", d.ID)
 	fmt.Fprintf(out, "  fingerprint  %s\n", d.KeyFingerprint)
-	// Labelled "claimed" because it is. A host says where it holds its key and
-	// nothing yet proves it, and a column that reads as a fact would be the one
-	// an operator builds a rollout plan on.
-	fmt.Fprintf(out, "  key          %s (claimed)\n", d.KeyBacking)
 	first, last := d.FirstSeenAt, d.LastSeenAt
 	fmt.Fprintf(out, "  first seen   %s\n", ago(&first))
 	fmt.Fprintf(out, "  last seen    %s\n", ago(&last))
@@ -262,8 +257,8 @@ func postureSatisfied(p wire.DevicePosture) bool {
 		}
 	}
 	// TPMPresent is deliberately not part of this. It is a capability, not a
-	// compliance signal: a machine without one is not misconfigured, it is a
-	// machine that cannot hold a hardware-backed key.
+	// compliance signal: a machine without one is not misconfigured, and Orbit
+	// does not use it for anything.
 	return true
 }
 

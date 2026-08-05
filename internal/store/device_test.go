@@ -44,9 +44,6 @@ func TestSeeDeviceIsIdempotent(t *testing.T) {
 	if first.ID.String() == "" || first.KeyFingerprint == "" {
 		t.Fatal("SeeDevice did not populate the row it returned")
 	}
-	if first.KeyBacking != store.DeviceKeyFile {
-		t.Errorf("key backing = %q, want the %q default", first.KeyBacking, store.DeviceKeyFile)
-	}
 
 	err = st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		second = store.Device{PublicKey: key, Hostname: "laptop-1"}
@@ -159,7 +156,7 @@ func TestGetDeviceByFingerprint(t *testing.T) {
 
 	var d store.Device
 	if err := st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		d = store.Device{PublicKey: key, KeyBacking: store.DeviceKeyToken}
+		d = store.Device{PublicKey: key}
 		return tx.SeeDevice(ctx, &d)
 	}); err != nil {
 		t.Fatalf("see: %v", err)
@@ -175,9 +172,6 @@ func TestGetDeviceByFingerprint(t *testing.T) {
 	}
 	if got.ID != d.ID {
 		t.Errorf("resolved %s, want %s", got.ID, d.ID)
-	}
-	if got.KeyBacking != store.DeviceKeyToken {
-		t.Errorf("key backing = %q, want %q", got.KeyBacking, store.DeviceKeyToken)
 	}
 
 	// An unknown fingerprint is not found, not an error the caller has to

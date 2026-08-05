@@ -15,8 +15,7 @@ import (
 //
 //	db://<uuid>                    the vault: sealed in Postgres under the KEK
 //	awskms://<region>/<key-id>     not implemented
-//	pkcs11://<token>?<params>      not implemented
-//
+
 // `file://` was REMOVED, not deprecated — internal/vault rejects it by name.
 // Two custody schemes meant two things to back up, two ways to lose a network,
 // and a replica that could silently hold a stale key. See docs/key-custody.md.

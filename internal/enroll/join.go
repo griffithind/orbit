@@ -93,16 +93,6 @@ func (s *Service) Join(ctx context.Context, req wire.JoinRequest, from netip.Add
 		return nil, ErrJoinSignature
 	}
 
-	backing := req.KeyBacking
-	switch backing {
-	case "":
-		backing = store.DeviceKeyFile
-	case store.DeviceKeyFile, store.DeviceKeyToken:
-	default:
-		return nil, fmt.Errorf("%w: key_backing must be %q or %q",
-			ErrJoinName, store.DeviceKeyFile, store.DeviceKeyToken)
-	}
-
 	// A reservation code, if one was presented. Validated for shape here so a
 	// malformed one is refused before any database work.
 	if req.Credential != "" {
@@ -119,9 +109,8 @@ func (s *Service) Join(ctx context.Context, req wire.JoinRequest, from netip.Add
 		}
 
 		d := store.Device{
-			PublicKey:  pub,
-			KeyBacking: backing,
-			Hostname:   req.Hostname,
+			PublicKey: pub,
+			Hostname:  req.Hostname,
 		}
 
 		var m *store.Membership

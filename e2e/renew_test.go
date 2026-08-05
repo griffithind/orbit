@@ -205,13 +205,21 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 	}
 }
 
-// TestRenewReuseKeyKeepsPrivateKey covers the hardware-backed path, where the
-// private key cannot be regenerated and only a new certificate is wanted.
-func TestRenewReuseKeyKeepsPrivateKey(t *testing.T) {
+// Renewal ALWAYS rotates the private key. There is no way to keep one.
+//
+// There used to be a -reuse-key flag. Keeping a key across renewals has no
+// purpose and one clear cost — a key that never changes is one a past
+// compromise keeps paying out on for as long as the machine lives, which is
+// most of what renewing is supposed to end.
+//
+// Asserted rather than assumed: rotation is invisible from the outside. A
+// renewal that quietly reused the key would look identical in every log and
+// every certificate field except the public key itself.
+func TestRenewRotatesThePrivateKey(t *testing.T) {
 	h := setup(t)
 	ts := h.serve(t, freeUDPPort(t))
 
-	host := h.createAndEnroll(t, ts, "reuse-key", "10.42.2.9", false, false, nil)
+	host := h.createAndEnroll(t, ts, "rotate-key", "10.42.2.9", false, false, nil)
 
 	certBefore := readFile(t, filepath.Join(host.dir, "host.crt"))
 	keyBefore := readFile(t, filepath.Join(host.dir, "host.key"))
@@ -224,29 +232,27 @@ func TestRenewReuseKeyKeepsPrivateKey(t *testing.T) {
 			Layout: layout, Reloader: agent.NoopReloader{},
 			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
-		Policy:   agent.DefaultRenewalPolicy(),
-		Layout:   layout,
-		Curve:    cert.Curve_P256,
-		ReuseKey: true,
-		State:    st,
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Policy: agent.DefaultRenewalPolicy(),
+		Layout: layout,
+		Curve:  cert.Curve_P256,
+		State:  st,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Wait past a second boundary. Nebula encodes validity to second
-	// granularity, so reusing the key inside the same second reproduces a
-	// byte-identical certificate, which InsertCertificate correctly treats as
-	// idempotent. Real renewals happen hours apart.
+	// granularity, so a renewal inside the same second could reproduce a
+	// byte-identical certificate. Real renewals happen hours apart.
 	time.Sleep(1100 * time.Millisecond)
 
 	if err := loop.RenewNow(context.Background()); err != nil {
-		t.Fatalf("renew with reuse-key: %v", err)
+		t.Fatalf("renew: %v", err)
 	}
 
-	if got := readFile(t, filepath.Join(host.dir, "host.key")); got != keyBefore {
-		t.Error("reuse-key renewal replaced the private key")
+	if got := readFile(t, filepath.Join(host.dir, "host.key")); got == keyBefore {
+		t.Error("renewal kept the private key; it must be rotated")
 	}
 	if got := readFile(t, filepath.Join(host.dir, "host.crt")); got == certBefore {
-		t.Error("reuse-key renewal did not issue a new certificate")
+		t.Error("renewal did not issue a new certificate")
 	}
 }
 

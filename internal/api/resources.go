@@ -622,12 +622,12 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	net := store.Network{
-		Name:              req.Name,
-		CIDRs:             cidrs,
-		CertTTL:           ttl,
+		Name:    req.Name,
+		CIDRs:   cidrs,
+		CertTTL: ttl,
 		// P-256, and not a request field. See migration 0021: a network's curve
-		// is permanent, and P-256 is the only one on which a host key can live
-		// in a TPM, a Secure Enclave, or Windows' Platform Crypto Provider.
+		// is permanent, so Orbit standardises on one rather than offering a
+		// choice nobody can undo.
 		Curve:             cert.Curve_P256.String(),
 		CertVer:           2,
 		IdentityPublicKey: identityPub,
@@ -636,10 +636,8 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	// silently given something else. Asking for P256 is a no-op.
 	if req.Curve != "" && req.Curve != cert.Curve_P256.String() {
 		writeErr(w, http.StatusBadRequest,
-			"curve must be P256: a network's curve is permanent, and P256 is the only "+
-				"one on which a host key can be hardware-backed (TPM 2.0 has no "+
-				"Curve25519, Apple's Secure Enclave is P-256 only, and nebula's PKCS#11 "+
-				"support exists only for P-256)")
+			"curve must be P256: a network's curve is permanent and Orbit uses one curve, "+
+				"so there is nothing to choose")
 		return
 	}
 	if req.CertVersion != 0 {
