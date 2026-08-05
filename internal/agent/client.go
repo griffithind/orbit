@@ -22,6 +22,11 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+
+	// escapeHost is the enrolled public endpoint whose connections bypass the
+	// tunnel. Empty when this host has no exit node, which is almost all of
+	// them. See escapehatch.go.
+	escapeHost string
 }
 
 func NewClient(baseURL string) *Client {

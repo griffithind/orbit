@@ -397,6 +397,18 @@ func (l *Loop) reconcileHost() {
 		return
 	}
 
+	// Before applying, not after. Apply is what installs the default route that
+	// captures the fallback path, so a hatch opened afterwards would leave a
+	// window — small, but exactly during the change most likely to be the one
+	// that needs reverting.
+	if l.Client != nil {
+		if want.ExitNode {
+			l.Client.SetEscapeHatch(l.State.BaseURL, want.SoMark)
+		} else {
+			l.Client.SetEscapeHatch("", 0)
+		}
+	}
+
 	if err := l.Host.Apply(want); err != nil {
 		// Not fatal to the data plane: nebula is already running and tunnels are
 		// unaffected. What is affected is everything BEHIND this gateway, so
