@@ -1023,17 +1023,29 @@ func (t *Tx) RegisterControlPlane(ctx context.Context, networkID, membershipID u
 	return mapErr(err, "register control plane")
 }
 
-// LiveControlPlanes returns replicas that have heartbeated recently.
+// LiveControlPlanes returns replicas that have heartbeated within staleAfter.
+//
+// A DURATION, not a cutoff instant, and the arithmetic happens in SQL. That is
+// the point of the signature: last_seen_at is stamped by the DATABASE
+// (RegisterControlPlane writes `now()`), so a caller computing `time.Now() -
+// stale` in Go would be comparing two different machines' clocks. orbitd and
+// Postgres are routinely not the same host, and a Go clock more than staleAfter
+// ahead of the database's silently returns nothing — every replica declared
+// dead, every agent quietly dropped back to the public URL, and no error
+// anywhere to attribute it to.
+//
+// Both sides of the comparison now come from `now()`, so no skew can reach it.
 //
 // Ordered by address rather than recency so every agent receives the same list
 // in the same order. Agents then rotate through it themselves, which spreads
 // load without the control plane having to coordinate anything.
-func (t *Tx) LiveControlPlanes(ctx context.Context, networkID uuid.UUID, since time.Time) ([]ControlPlane, error) {
+func (t *Tx) LiveControlPlanes(ctx context.Context, networkID uuid.UUID, staleAfter time.Duration) ([]ControlPlane, error) {
 	rows, err := t.tx.Query(ctx, `
 		SELECT membership_id, addr, agent_port, last_seen_at
 		  FROM orbit.control_plane
-		 WHERE network_id = $1 AND last_seen_at > $2
-		 ORDER BY addr`, networkID, since)
+		 WHERE network_id = $1
+		   AND last_seen_at > now() - make_interval(secs => $2)
+		 ORDER BY addr`, networkID, staleAfter.Seconds())
 	if err != nil {
 		return nil, mapErr(err, "live control planes")
 	}

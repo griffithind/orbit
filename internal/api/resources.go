@@ -423,7 +423,7 @@ func (s *Server) handleReplicas(w http.ResponseWriter, r *http.Request) {
 		}
 
 		live, err := tx.LiveControlPlanes(ctx, networkID,
-			time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
+			enroll.DefaultControlPlaneStaleAfter)
 		if err != nil {
 			return err
 		}

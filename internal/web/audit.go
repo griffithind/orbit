@@ -91,6 +91,16 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) error {
 	if a := q.Get("action"); a != "" && containsStr(auditActions, a) {
 		f.Action = a
 	}
+	// A Go-clock cutoff against a database-stamped column, which is the same
+	// shape as the bug fixed in LiveControlPlanes — and left alone here on
+	// purpose. This is a human's browsing window on a log page: skew shifts
+	// which entries appear at the boundary by however far the clocks differ,
+	// which is a cosmetic difference in a list somebody is reading. The
+	// liveness queries were load-bearing for a MACHINE — an empty replica list
+	// or a missing policy floor changes what a host does — and that is the
+	// distinction, not the clock arithmetic itself. Since/Until is also a
+	// general range filter that a caller may drive with absolute times, so a
+	// duration would not fit it.
 	hours := 0
 	if v := q.Get("hours"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 24*365 {

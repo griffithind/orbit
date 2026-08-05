@@ -276,7 +276,9 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 			return err
 		}
 
-		out.AgentEndpoints = s.agentEndpoints(ctx, tx, host.NetworkID)
+		if out.AgentEndpoints, err = s.agentEndpoints(ctx, tx, host.NetworkID); err != nil {
+			return err
+		}
 		resp = out
 		return nil
 	})
@@ -356,26 +358,38 @@ const DefaultControlPlaneStaleAfter = 3 * time.Minute
 //
 // An empty result is not an error: it means no replica has joined this network,
 // and the agent keeps talking to whatever endpoint it enrolled against.
-func (s *Service) agentEndpoints(ctx context.Context, tx *store.Tx, networkID uuid.UUID) []string {
+//
+// THE QUERY ERROR IS RETURNED, not swallowed — and that is the point, because
+// of the line above. A failure used to be logged and turned into an empty
+// slice, on the reasoning that failing an enrollment because a secondary field
+// could not be built is worse than handing back none.
+//
+// The reasoning has a hole: an empty list is not "no answer" here, it is an
+// ANSWER. The agent records it and stops looking for replicas over the overlay.
+// Turning a database failure into that claim tells the machine something false
+// and leaves nothing behind to attribute it to — an agent pinned to the public
+// URL with no failover, and the cause three days earlier in a log nobody kept.
+//
+// It is also not really secondary. This runs inside the same transaction as the
+// certificate insert, so a query failing here means that transaction is in
+// trouble anyway. Failing the whole enrollment is the honest outcome: atomic,
+// retried, and it says what went wrong.
+func (s *Service) agentEndpoints(ctx context.Context, tx *store.Tx, networkID uuid.UUID) ([]string, error) {
 	stale := s.cfg.ControlPlaneStaleAfter
 	if stale <= 0 {
 		stale = DefaultControlPlaneStaleAfter
 	}
 
-	live, err := tx.LiveControlPlanes(ctx, networkID, s.clock().Add(-stale))
+	live, err := tx.LiveControlPlanes(ctx, networkID, stale)
 	if err != nil {
-		// Not fatal. Failing enrollment because the endpoint list could not be
-		// built would be worse than handing back none: the host still gets a
-		// working certificate and can reach the public endpoint.
-		s.log.Warn("could not list control planes", "network", networkID, "error", err)
-		return nil
+		return nil, fmt.Errorf("list control planes for network %s: %w", networkID, err)
 	}
 
 	out := make([]string, 0, len(live))
 	for _, cp := range live {
 		out = append(out, fmt.Sprintf("http://%s:%d", cp.Addr, cp.AgentPort))
 	}
-	return out
+	return out, nil
 }
 
 // Renew issues a fresh certificate for an already-enrolled host.
@@ -404,7 +418,9 @@ func (s *Service) Renew(ctx context.Context, membershipID uuid.UUID, req wire.Re
 		}); err != nil {
 			return err
 		}
-		out.AgentEndpoints = s.agentEndpoints(ctx, tx, host.NetworkID)
+		if out.AgentEndpoints, err = s.agentEndpoints(ctx, tx, host.NetworkID); err != nil {
+			return err
+		}
 		resp = out
 		return nil
 	})
@@ -818,9 +834,14 @@ func (s *Service) compilePolicy(ctx context.Context, tx *store.Tx, host *store.M
 		return nil, fmt.Errorf("network %s policy: %w", net.Slug, err)
 	}
 
+	mgmt, err := s.managementEndpoints(ctx, tx, net.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	c := policy.Compiler{
 		Fleet:      policy.Snapshot{Members: fleet, CIDRs: net.CIDRs},
-		Management: s.managementEndpoints(ctx, tx, net.ID),
+		Management: mgmt,
 	}
 	rs, err := c.Membership(doc, host.ID.String())
 	if err != nil {
@@ -834,25 +855,28 @@ func (s *Service) compilePolicy(ctx context.Context, tx *store.Tx, host *store.M
 //
 // Read from the live registry, the same source agentEndpoints uses, so the
 // floor names the replicas that actually exist rather than a configured guess.
-// A failure here is deliberately not fatal in the same way agentEndpoints'
-// is not: rendering no floor is bad, and refusing to render a certificate is
-// worse.
-func (s *Service) managementEndpoints(ctx context.Context, tx *store.Tx, networkID uuid.UUID) []policy.Endpoint {
+//
+// THE ERROR IS RETURNED, and here it matters more than anywhere else. This is
+// the reachability the compiled policy may NOT remove — the rules that keep a
+// host able to reach the control plane whatever else the policy says. Rendering
+// no floor because a query failed hands the machine a configuration that can
+// lock it away from the only thing able to fix it, and does so silently. That
+// is the one failure mode with no way back over the network.
+func (s *Service) managementEndpoints(ctx context.Context, tx *store.Tx, networkID uuid.UUID) ([]policy.Endpoint, error) {
 	stale := s.cfg.ControlPlaneStaleAfter
 	if stale <= 0 {
 		stale = DefaultControlPlaneStaleAfter
 	}
-	live, err := tx.LiveControlPlanes(ctx, networkID, s.clock().Add(-stale))
+	live, err := tx.LiveControlPlanes(ctx, networkID, stale)
 	if err != nil {
-		s.log.Warn("could not list control planes for the policy management floor",
-			"network", networkID, "error", err)
-		return nil
+		return nil, fmt.Errorf("list control planes for the policy management floor "+
+			"of network %s: %w", networkID, err)
 	}
 	out := make([]policy.Endpoint, 0, len(live))
 	for _, cp := range live {
 		out = append(out, policy.Endpoint{Addr: cp.Addr, Port: cp.AgentPort})
 	}
-	return out
+	return out, nil
 }
 
 // certNetworks pairs each of a host's addresses with the prefix length of the

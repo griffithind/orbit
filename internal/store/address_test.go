@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -644,7 +643,7 @@ func TestAddressChangeImpactIsRoleAware(t *testing.T) {
 	var got *store.AddressImpact
 	if err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		got, err = tx.AddressChangeImpact(ctx, relay.ID, time.Time{})
+		got, err = tx.AddressChangeImpact(ctx, relay.ID, 0)
 		return err
 	}); err != nil {
 		t.Fatal(err)

@@ -481,16 +481,23 @@ func (i AddressImpact) OnlyControlPlane() bool { return i.IsControlPlane && i.Li
 // is a question the operator would otherwise have to ask by hand, one endpoint
 // at a time, while deciding whether to proceed.
 //
-// controlPlaneSince bounds what counts as a live replica; pass the same
-// staleness window the agent endpoint list uses, or a zero time to count every
+// controlPlaneStaleAfter bounds what counts as a live replica; pass the same
+// staleness window the agent endpoint list uses, or zero to count every
 // registered replica.
-func (t *Tx) AddressChangeImpact(ctx context.Context, membershipID uuid.UUID, controlPlaneSince time.Time) (*AddressImpact, error) {
+//
+// A DURATION rather than a cutoff instant, and the arithmetic happens in SQL,
+// for the same reason LiveControlPlanes takes one: cp.last_seen_at is stamped by
+// the DATABASE, so a caller subtracting from a Go clock would be comparing two
+// machines' clocks — and skew between them would silently change the answer to
+// "is this the only live control plane?", which is a question this gate exists
+// to answer correctly.
+func (t *Tx) AddressChangeImpact(ctx context.Context, membershipID uuid.UUID, controlPlaneStaleAfter time.Duration) (*AddressImpact, error) {
 	var i AddressImpact
 	i.MembershipID = membershipID
 
-	var since any
-	if !controlPlaneSince.IsZero() {
-		since = controlPlaneSince
+	var staleSecs any
+	if controlPlaneStaleAfter > 0 {
+		staleSecs = controlPlaneStaleAfter.Seconds()
 	}
 
 	err := t.tx.QueryRow(ctx, `
@@ -516,9 +523,9 @@ func (t *Tx) AddressChangeImpact(ctx context.Context, membershipID uuid.UUID, co
 		           AND x.state IN ('enrolled', 'active')),
 		       (SELECT count(*) FROM orbit.control_plane cp
 		         WHERE cp.network_id = h.network_id
-		           AND ($2::timestamptz IS NULL OR cp.last_seen_at > $2))
+		           AND ($2::float8 IS NULL OR cp.last_seen_at > now() - make_interval(secs => $2)))
 		  FROM orbit.membership h
-		 WHERE h.id = $1`, membershipID, since,
+		 WHERE h.id = $1`, membershipID, staleSecs,
 	).Scan(&i.MembershipName, &i.State, &i.IsLighthouse, &i.IsRelay,
 		&i.HasCertificate, &i.IsControlPlane,
 		&i.Lighthouses, &i.Relays, &i.RelayClients, &i.Memberships, &i.LiveControlPlanes)

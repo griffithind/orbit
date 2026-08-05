@@ -442,7 +442,9 @@ func (s *Service) Claim(ctx context.Context, req wire.ClaimRequest, from netip.A
 			return err
 		}
 
-		out.AgentEndpoints = s.agentEndpoints(ctx, tx, m.NetworkID)
+		if out.AgentEndpoints, err = s.agentEndpoints(ctx, tx, m.NetworkID); err != nil {
+			return err
+		}
 		resp = out
 		return nil
 	})

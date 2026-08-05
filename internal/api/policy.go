@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -377,7 +376,7 @@ var errPolicyWouldNotCompile = errors.New("policy document does not compile agai
 // A failure is not fatal, matching enroll.managementEndpoints: a preview missing
 // its floor is worse than one that has it and better than no answer at all.
 func (s *Server) managementFloor(ctx context.Context, tx *store.Tx, networkID uuid.UUID) []policy.Endpoint {
-	live, err := tx.LiveControlPlanes(ctx, networkID, time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
+	live, err := tx.LiveControlPlanes(ctx, networkID, enroll.DefaultControlPlaneStaleAfter)
 	if err != nil {
 		s.log.Warn("could not list control planes for the policy check management floor",
 			"network", networkID, "error", err)

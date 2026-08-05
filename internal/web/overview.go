@@ -236,7 +236,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 		// second opinion: an operator asking which replicas are live must get the
 		// answer the fleet is already acting on.
 		if live, err = tx.LiveControlPlanes(ctx, networkID,
-			now.Add(-enroll.DefaultControlPlaneStaleAfter)); err != nil {
+			enroll.DefaultControlPlaneStaleAfter); err != nil {
 			return err
 		}
 

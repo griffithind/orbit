@@ -1011,7 +1011,7 @@ func (s *Server) handleAddHostAddress(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
-		raw, err := tx.AddressChangeImpact(ctx, membershipID, time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
+		raw, err := tx.AddressChangeImpact(ctx, membershipID, enroll.DefaultControlPlaneStaleAfter)
 		if err != nil {
 			return err
 		}
@@ -1094,7 +1094,7 @@ func (s *Server) handleRemoveHostAddress(w http.ResponseWriter, r *http.Request)
 			return err
 		}
 
-		raw, err := tx.AddressChangeImpact(ctx, membershipID, time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
+		raw, err := tx.AddressChangeImpact(ctx, membershipID, enroll.DefaultControlPlaneStaleAfter)
 		if err != nil {
 			return err
 		}
