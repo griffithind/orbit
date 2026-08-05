@@ -1,6 +1,7 @@
 # Build output. Anchored to the root: unanchored "orbitd" would also match
 # cmd/orbitd, which is source.
 /bin/
+/orbit
 /orbitd
 /orbit-agent
 /orbit-migrate
