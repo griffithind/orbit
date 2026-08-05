@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"testing"
@@ -146,4 +147,60 @@ func freePort(t *testing.T) uint16 {
 	}
 	defer c.Close()
 	return uint16(c.LocalAddr().(*net.UDPAddr).Port)
+}
+
+// TestUnsupportedMachineStillServes: a host with no way to point itself at the resolver
+// must still answer for anything that asks it, and must not be treated as a failure that
+// gets retried and re-logged on every poll for the life of the machine.
+func TestUnsupportedMachineStillServes(t *testing.T) {
+	r := NewResolver(quietLogger{})
+	r.apply = func(_, _, _ string, _ bool) error { return ErrDNSUnsupported }
+	r.remove = func(_, _ string) error { return nil }
+	r.upstream = []string{"127.0.0.1:1"}
+
+	d, err := DNSStateFromConfig(dnsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Listen = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), freePort(t))
+	if err := r.Apply(d); err != nil {
+		t.Fatalf("an unsupported machine should still serve: %v", err)
+	}
+	defer r.Stop()
+
+	if r.current == "" {
+		t.Error("state was not recorded as applied, so every poll will repeat the warning")
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion("lab-pi.lab.internal.", dns.TypeA)
+	resp, _, err := (&dns.Client{}).Exchange(m, d.Listen.String())
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Errorf("resolver stopped answering: %d answers", len(resp.Answer))
+	}
+}
+
+// TestTransientFailureIsRetried is the other side: a permission error or a busy resolved
+// must NOT be recorded as applied, or the machine never gets pointed at its resolver.
+func TestTransientFailureIsRetried(t *testing.T) {
+	r := NewResolver(quietLogger{})
+	r.apply = func(_, _, _ string, _ bool) error { return errors.New("permission denied") }
+	r.remove = func(_, _ string) error { return nil }
+
+	d, err := DNSStateFromConfig(dnsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Listen = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), freePort(t))
+	if err := r.Apply(d); err == nil {
+		t.Fatal("a transient failure should be reported")
+	}
+	defer r.Stop()
+
+	if r.current != "" {
+		t.Error("a transient failure was recorded as applied, so it will never be retried")
+	}
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -24,6 +25,16 @@ import (
 // loop that ends in a stack overflow or a timeout, depending on the platform. So the
 // upstream servers are captured BEFORE the OS is changed and dialled explicitly, never
 // through net.Resolver's default path.
+
+// ErrDNSUnsupported means this machine has no mechanism Orbit is willing to use to change
+// its resolver.
+//
+// Distinct from an ordinary failure because the two deserve opposite handling. A
+// permission error or a busy resolved is transient, so the reconcile loop should keep
+// trying; a machine with no systemd-resolved will still have none next cycle, and
+// retrying forever would log the same line every poll for the life of the host. Said once
+// and then left alone.
+var ErrDNSUnsupported = errors.New("this machine has no supported way to point itself at the mesh resolver")
 
 // DNSState is the resolver's desired state, read from the verified configuration.
 type DNSState struct {
@@ -219,7 +230,16 @@ func (r *Resolver) Apply(d DNSState) error {
 	// current stays empty so the next cycle tries again rather than deciding
 	// nothing changed.
 	if err := r.apply(d.TunDev, d.Domain, d.Listen.String(), d.Global); err != nil {
-		return fmt.Errorf("point this machine at the mesh resolver: %w", err)
+		if !errors.Is(err, ErrDNSUnsupported) {
+			return fmt.Errorf("point this machine at the mesh resolver: %w", err)
+		}
+		// Nothing to retry. Recorded as applied so the next cycle is a string
+		// compare rather than the same complaint again, and said once at a
+		// level that will actually be read.
+		r.current = d.String()
+		r.log.Warn("serving mesh names, but this machine must be pointed at the resolver by hand",
+			"resolver", d.Listen, "domain", d.Domain, "reason", err)
+		return nil
 	}
 
 	r.current = d.String()
