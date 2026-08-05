@@ -19,7 +19,10 @@
 set -euo pipefail
 
 REPO_URL=${ORBIT_REPO_URL:-https://github.com/griffithind/orbit}
-VERSION=${ORBIT_VERSION:-0.3.5}
+# Resolved from the API, not pinned. A hardcoded default goes stale at every
+# release and installs an old control plane on a fresh machine — silently, since
+# nothing about the run looks wrong. --version pins it deliberately.
+VERSION=${ORBIT_VERSION:-}
 DIR=${ORBIT_DIR:-/opt/orbit}
 NETWORK=prod
 CIDR=10.42.0.0/16
@@ -48,7 +51,7 @@ Options:
   --overlay-addr <addr> the control plane's own overlay address, default $OVERLAY_ADDR
   --cert-ttl <dur>      host certificate lifetime, default $CERT_TTL
   --enroll-url <url>    what agents enroll against, default http://<public-ip>:8080/enroll/v1/enroll
-  --version <x.y.z>     Orbit version, default $VERSION
+  --version <x.y.z>     Orbit version; the latest release when unset
   --dir <path>          where to check the repository out, default $DIR
 EOF
 }
@@ -106,6 +109,17 @@ firewall-cmd --list-services | tr ' ' '\n' | grep -qx ssh \
 
 #------------------------------------------------------------------------------
 say "Source"
+
+# Resolved through the API rather than the /latest/download redirect, so the
+# version is known before anything is checked out and the SAME version ends up
+# in .env, in the image tag, and in the tag we check out. scripts/install.sh
+# resolves it identically; the two must not drift.
+if [ -z "$VERSION" ]; then
+    VERSION=$(curl -fsSL "https://api.github.com/repos/griffithind/orbit/releases/latest" |
+        sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$VERSION" ] || die "could not determine the latest version; pass --version"
+    echo "latest release is v$VERSION"
+fi
 
 if [ -d "$DIR/.git" ]; then
     git -C "$DIR" fetch --tags --quiet
@@ -380,13 +394,16 @@ because that request crossed the overlay to $OVERLAY_ADDR:8443. Do not test with
 'ping $OVERLAY_ADDR': the control plane accepts exactly one inbound port, the
 agent API, so it will not answer ICMP by design.
 
-Back up the CA key before anything depends on it. Nebula has no intermediate
-CAs, so losing it means every host re-enrolls by hand:
+Back up TWO things, and keep them apart. The CA key and the network identity
+key are rows in Postgres, encrypted under the KEK — so a backup is the database
+AND the passphrase, and either alone is worthless:
 
-  docker run --rm -v orbit_cakey:/v -v "\$PWD":/out busybox \\
-      tar czf /out/orbit-cakey.tgz -C /v .
+  docker compose exec -T postgres pg_dump -U postgres orbit | gzip > orbit-db.sql.gz
+  grep '^ORBIT_KEK_PASSPHRASE=' .env        # store this somewhere else entirely
 
-Keep that archive and ca-pass apart; one is useless without the other.
+That separation is the design: a leaked dump cannot mint a certificate. It also
+means losing the passphrase destroys the network exactly as losing the database
+does — nebula has no intermediate CAs, so every host re-enrolls by hand.
 
 Enrollment is over plain HTTP. Codes are single-use and expire in 15 minutes,
 but they do cross the wire in the clear — put TLS in front of :8080 and re-run

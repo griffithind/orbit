@@ -1,9 +1,15 @@
 # The control plane, as two containers.
 #
+# MOST PEOPLE SHOULD NOT RUN THIS BY HAND. scripts/setup-control-plane.sh does
+# every step below, generates the secrets, opens the ports, and mints the
+# break-glass token — it is the supported path, and this file is what it drives.
+# Read on only if you are adapting it.
+#
 #   1. Put a passphrase in ./ca-pass and a database password in ./.env
 #   2. docker compose run --rm orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
 #   3. docker compose run --rm orbitd bootstrap -network prod -cidr 10.42.0.0/16
-#      (the CA key lands in the cakey volume; the image works there by default)
+#      (the CA key is sealed into Postgres under ORBIT_KEK_PASSPHRASE; no file
+#      is written and no volume holds it)
 #   4. Put the printed network id in ./.env as ORBIT_NETWORK
 #   5. docker compose up -d
 #
@@ -76,9 +82,6 @@ services:
     secrets:
       - ca-pass
 
-    volumes:
-      - cakey:/var/lib/orbit
-
     command:
       - serve
       - -addr=0.0.0.0:8080
@@ -126,8 +129,17 @@ secrets:
     file: ./ca-pass
 
 volumes:
-  # The CA key. Nebula has no intermediate CAs, so this is a root of trust for
-  # the whole mesh — back it up, and treat losing it as every host re-enrolling
-  # by hand.
-  cakey:
+  # THE root of trust now lives here, and nowhere else.
+  #
+  # The CA key and the network identity key are rows in Postgres, sealed under
+  # ORBIT_KEK_PASSPHRASE — there is no key file and no `cakey` volume any more.
+  # That means a backup is TWO things, kept apart:
+  #
+  #   1. this volume (or a pg_dump of it)
+  #   2. ORBIT_KEK_PASSPHRASE, from .env
+  #
+  # Either alone is worthless, which is the design: a leaked dump cannot mint a
+  # certificate. Losing the passphrase destroys the network as surely as losing
+  # the database — nebula has no intermediate CAs, so every host re-enrolls by
+  # hand. See docs/key-custody.md.
   pgdata:

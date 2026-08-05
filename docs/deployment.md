@@ -136,78 +136,102 @@ the audit trail.
 
 ---
 
-## 3. The CA key
+## 3. The keys
 
-Nebula has no intermediate CAs, so this key is a root of trust for the entire
-mesh. It lives on this VM's disk; encrypt it.
+Nebula has no intermediate CAs, so a network's CA key is a root of trust for the
+entire mesh. **It is not a file.** The CA signing key and the network identity
+key are rows in Postgres, encrypted under a key encryption key (KEK) that the
+database never sees. See [key-custody.md](key-custody.md).
 
-```bash
-head -c 32 /dev/urandom | base64 > /tmp/ca-pass
-systemd-creds encrypt --name=ca-pass --with-key=host+tpm2 \
-    /tmp/ca-pass /etc/orbit/ca-pass.cred
-shred -u /tmp/ca-pass
-```
-
-`--with-key=host+tpm2` seals the passphrase to this machine's TPM: a stolen disk
-image, a snapshot, or a detached volume is useless without this host. Most cheap
-cloud VMs expose a vTPM; if yours does not, use `--with-key=host`, which still
-keeps the secret out of `ps` and out of anything that logs the environment.
-
-`orbitd bootstrap` encrypts the key automatically when
-`ORBIT_CA_KEY_PASSPHRASE_FILE` is set, and **warns loudly when it is not** —
-because an unencrypted key is a failure nothing else surfaces. Everything works.
-
-For an existing plaintext key: `orbitd ca encrypt -key /var/lib/orbit/ca.key`.
-
-**Run `bootstrap` as root, not as the service account.** The passphrase file is
-`0400 root` inside a `0700 root` directory, so a `sudo -u orbit` bootstrap fails
-with `permission denied` before it does anything. Root can read it, and the
-service account never needs to — at runtime systemd decrypts the credential into
-`$CREDENTIALS_DIRECTORY` owned by the service. Hand the key over afterwards:
+That leaves exactly one secret for you to hold:
 
 ```bash
-chown orbit:orbit /var/lib/orbit/ca.key
-chmod 0600 /var/lib/orbit/ca.key
+head -c 32 /dev/urandom | base64 > /tmp/kek
+systemd-creds encrypt --name=kek --with-key=host+tpm2 /tmp/kek /etc/orbit/kek.cred
+shred -u /tmp/kek
 ```
 
-`0600` is required rather than tidy: a key with any group or other bit set is
-refused at load, so a `0644` key fails at startup instead of quietly working.
+and one variable pointing at it — `ORBIT_KEK_PASSPHRASE_FILE`, or
+`ORBIT_KEK_PASSPHRASE` for the direct form. The file form is what
+`systemd-creds` produces: the passphrase is sealed to this machine's TPM and
+appears as a file the unit can read, never as an environment variable that `ps`,
+a crash dump, or `docker inspect` would carry.
 
-**No TPM?** Many cloud VMs expose none. Use `--with-key=host`. That still keeps the passphrase out of `ps` and out of
-anything that logs the environment, but it will not protect a stolen disk image,
+`--with-key=host+tpm2` seals it to this machine's TPM, so a stolen disk image, a
+snapshot, or a detached volume is useless without this host. Many cheap cloud
+VMs expose no vTPM; `--with-key=host` still keeps the secret out of `ps` and out
+of anything that logs the environment, but it will not protect a stolen image,
 which is the threat `host+tpm2` exists for. Know which one you have.
 
-Permissions are enforced, not suggested: a key with any group or other bit set
-is refused at load.
+### The property this preserves
+
+> Read access to the database does not let an attacker mint a certificate.
+
+An attacker needs the database **and** the KEK. That is the same two factors a
+key file on this VM required, on the same two hosts — what changed is the count:
+one secret per deployment instead of one key file per network, with nothing to
+copy to a replica and nothing to drift.
+
+Setting a wrong passphrase fails at **startup**, not at the first signing
+operation. A replica that started cleanly and failed the first time somebody
+added a machine would fail at the worst moment and be the hardest to attribute.
+
+### What it means for backups
+
+Two things, kept apart, and either alone is worthless:
+
+1. the database
+2. `ORBIT_KEK_PASSPHRASE`
+
+Losing the passphrase destroys the network exactly as losing the database does —
+every host re-enrolls by hand. §7 has the mechanics.
 
 **What this does not protect against:** code execution in `orbitd` yields the
-decrypted key, because the process must hold it. Encryption covers the storage
-layer — snapshots, backups, detached volumes — which is where the realistic
-exposure is on a rented VM.
+decrypted keys, because the process must hold them. Encryption covers the
+storage layer — snapshots, backups, detached volumes, a leaked `pg_dump` — which
+is where the realistic exposure is on a rented VM.
 
 ---
 
 ## 4. Bring-up
 
+**The supported path is one command**, and everything below it is the same
+sequence spelled out for a deployment that cannot use it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/griffithind/orbit/main/scripts/setup-control-plane.sh \
+    | sudo bash -s -- --public-ip 203.0.113.10
+```
+
+It does every step in this section — docker, ports, secrets, migrate,
+bootstrap, start, break-glass — and is safe to re-run: existing secrets are
+reused, and a bootstrapped network is not bootstrapped again. Prefer it. The
+native path exists for a host where containers are not an option, and it is
+where first deployments actually go wrong: `pg_hba`, firewalld, SELinux, unit
+file syntax, file ownership.
+
+### The same thing by hand
+
 On a single VM the control plane is also the lighthouse, which removes the
 awkward ordering that separating them creates.
 
 ```bash
-# 1. Bootstrap. Prints the network id, an admin token (once), and the -mesh flag.
-export ORBIT_CA_KEY_PASSPHRASE_FILE=/etc/orbit/ca-pass.plain
+# 1. Bootstrap. Prints the network id and an admin token (once). The CA and
+#    identity keys are sealed into Postgres under the KEK — no key file, and
+#    nothing to chown afterwards.
+export ORBIT_KEK_PASSPHRASE_FILE=/etc/orbit/kek.plain
 orbitd bootstrap -dsn "$ORBIT_DSN" \
-    -network prod -cidr 10.42.0.0/16 \
-    -ca-key /var/lib/orbit/ca.key \
-    -cert-ttl 168h
+    -network prod -cidr 10.42.0.0/16 -cert-ttl 168h \
+    -write-unit -overlay-addr 10.42.0.1 -lighthouse 203.0.113.10:4242 \
+    -enroll-url https://orbit.example.com/enroll/v1/enroll
 
-# 2. Start it, as its own lighthouse. Nothing else to install, nothing to
-#    enroll first.
-orbitd serve -mesh "$ORBIT_NETWORK=10.42.0.1" \
-    -lighthouse 203.0.113.10:4242
+# 2. Start it, as its own lighthouse. -write-unit above filled in the unit and
+#    the env file from this bootstrap's own results, so there is nothing to
+#    copy across and nothing to mistype.
+systemctl enable --now orbit-control
 
-# 3. Hand the key to the account that will load it, then drop the plaintext.
-chown orbit:orbit /var/lib/orbit/ca.key && chmod 0600 /var/lib/orbit/ca.key
-shred -u /etc/orbit/ca-pass.plain
+# 3. Drop the plaintext passphrase; the unit reads the sealed credential.
+shred -u /etc/orbit/kek.plain
 
 # 4. Mint the break-glass token now, while everything works. See section 5.
 orbitd token create -name break-glass -scopes '*'
@@ -535,16 +559,13 @@ Three things, with very different consequences.
 ```bash
 # Nightly is enough; certificates are re-issuable, the membership inventory is not.
 pg_dump orbit | age -r "$BACKUP_KEY" > orbit-$(date +%F).sql.age
-# The CA key is already encrypted at rest. Copy it as-is, and store the
-# passphrase somewhere the TPM-sealed copy is not — a sealed credential does
-# not survive the machine it is sealed to.
-# With keys in the database (the default), the dump above already contains them
-# — as ciphertext. What it does NOT contain, and must not, is the passphrase.
-# Escrow that separately; see section 5.
+# This dump already contains every CA key and identity key — as CIPHERTEXT, and
+# that is the whole design. What it does NOT contain, and must not, is the KEK
+# passphrase. Escrow that separately, somewhere the TPM-sealed copy is not: a
+# sealed credential does not survive the machine it is sealed to. See section 5.
 #
-# With -ca-key / -identity-key, copy those files as-is instead. They are already
-# encrypted at rest.
-cp /var/lib/orbit/ca.key ca.key.backup 2>/dev/null || true
+# There is no key file to copy. `file://` signer refs were removed rather than
+# deprecated, so a deployment cannot be half in the database and half on disk.
 # The control plane is a machine on its own network, so it has a device key too.
 # Small, never rotated, and not secret in the way the CA key is — it cannot mint
 # anything — but losing it makes this control plane a different machine.
@@ -806,10 +827,13 @@ would produce a control plane that starts cleanly, serves reads, and fails the
 first time somebody adds a machine — days after the mistake, with nothing
 connecting the two.
 
-A deployment that keeps its keys on disk (`orbitd bootstrap -ca-key … `) still
-has to copy those files, and `orbitd` says which mode it is in at startup:
+There is no other mode. `orbitd` says so at startup, once:
 
 ```
 key vault open; private keys are stored encrypted in the database
-no key vault for this deployment; keys are read from disk
 ```
+
+and a control plane that cannot open the vault does not start. Both were true
+choices once; keeping keys on disk was removed rather than deprecated, because
+two custody schemes meant two things to back up, two ways to lose a network, and
+a replica that could silently hold a stale key.

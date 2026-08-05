@@ -13,13 +13,16 @@ import (
 //
 // References are URLs so that adding a backend does not change any stored data:
 //
-//	file:///var/lib/orbit/ca.key   development and single-operator deployments
 //	db://<uuid>                    the vault: sealed in Postgres under the KEK
 //	awskms://<region>/<key-id>     not implemented
 //	pkcs11://<token>?<params>      not implemented
 //
-// The file scheme is built in. Everything else is registered by the binary that
-// needs it, so the core does not carry a cloud SDK it may never use.
+// `file://` was REMOVED, not deprecated — internal/vault rejects it by name.
+// Two custody schemes meant two things to back up, two ways to lose a network,
+// and a replica that could silently hold a stale key. See docs/key-custody.md.
+//
+// No scheme is built in. Each is registered by the binary that needs it, so the
+// core does not carry a cloud SDK it may never use.
 type SignerFactory func(ctx context.Context, ref string) (Signer, error)
 
 // Registry turns stored CA rows into ready-to-use Issuers, caching the result.

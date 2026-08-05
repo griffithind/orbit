@@ -68,23 +68,25 @@ git clone https://github.com/griffithind/orbit && cd orbit && make build
 
 ## Quickstart
 
-One VM, acting as its own lighthouse. This is a complete working mesh.
+One fresh VM, acting as its own lighthouse. This is a complete working mesh, and
+it is **the** way to stand one up:
 
 ```bash
-# Control plane. -write-unit leaves a systemd unit and an env file ready to go.
-orbitd migrate -dsn "postgres://postgres@localhost/orbit" -app-password '<secret>'
-orbitd bootstrap -dsn "$ORBIT_DSN" -network prod -cidr 10.42.0.0/16 \
-    -write-unit -enroll-url https://orbit.example.com/enroll/v1/enroll \
-    -overlay-addr 10.42.0.1 -lighthouse 203.0.113.10:4242
-systemctl enable --now orbit-control
-
-# Mint the break-glass token now, while everything works.
-orbitd token create -name break-glass -scopes '*'
+curl -fsSL https://raw.githubusercontent.com/griffithind/orbit/main/scripts/setup-control-plane.sh \
+    | sudo bash -s -- --public-ip 203.0.113.10
 ```
 
-Or skip the host entirely — `deploy/compose.yml` runs the control plane and
-Postgres as two containers, which removes `pg_hba`, firewalld, SELinux, unit
-files, and the CA key's file mode from the problem.
+It installs docker, opens the two ports, generates every secret, migrates the
+database, bootstraps the network, starts the control plane, and mints an admin
+token and a break-glass token — printing both once. Re-running it is safe:
+existing secrets are reused and a bootstrapped network is not bootstrapped
+again.
+
+Containers rather than a systemd unit, deliberately. It takes `pg_hba`,
+firewalld, SELinux, unit files, and file ownership out of the problem, and those
+are where a first deployment actually fails. `orbitd` runs natively just as well
+— [docs/deployment.md](docs/deployment.md) §2 has that path — but it is the
+alternative, not the default.
 
 Every machine after that: reserve a place from your laptop, then set the machine
 up and join it.

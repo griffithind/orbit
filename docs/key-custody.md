@@ -147,9 +147,12 @@ Notes on the details:
   control plane *given the KEK*, which is better than today (no separate key
   file to lose). The KEK must then be stored somewhere the database backup is
   not.
-- Keep `file://` working. It is the right answer for a single VM that already
-  has one, and `orbitd bootstrap -ca-key … -identity-key …` still chooses it.
-  The signer ref is a string, so a deployment can hold some keys in each.
+- ~~Keep `file://` working.~~ **Reversed.** This was the plan, on the reasoning
+  that the signer ref is a string so a deployment could hold some keys in each.
+  That flexibility is the problem: two custody schemes mean two things to back
+  up, two ways to lose a network, and a replica that can silently hold a stale
+  key while the other replicas moved on. `internal/vault` now rejects `file://`
+  by name, and `-ca-key` is gone.
 
 **What was built, and one thing that changed on contact:**
 

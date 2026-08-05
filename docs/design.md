@@ -635,22 +635,22 @@ depend on a service that needs the control plane to exist.
 
 | Implementation | Use |
 |---|---|
-| vault (`db://`) | **the default** — key sealed in Postgres under a passphrase-derived KEK that is not in Postgres. See [key-custody.md](key-custody.md) |
-| `FileSigner` (`file://`) | supported — key on local disk, encrypted at rest. `orbitd bootstrap -ca-key` chooses it |
+| vault (`db://`) | **the only one** — key sealed in Postgres under a passphrase-derived KEK that is not in Postgres. See [key-custody.md](key-custody.md) |
+| `file://` | **removed**, not deprecated. `internal/vault` rejects it by name |
 | `KMSSigner` + `RemoteSigner` | interface only; no backend ships today |
 | `NewMemorySigner` | tests and `--dev` only |
 
-Orbit targets a self-hosted deployment on an ordinary VM, so the CA key lives
-either in that VM's database or on its disk — and in both cases the thing that
-decrypts it is on the host, not in Postgres. Be clear-eyed about what that means:
-nebula has no intermediate CAs (§1.1), so this key is a root of trust for the
-entire mesh, and anyone who reads it can mint any identity the CA's constraints
-allow.
+Orbit targets a self-hosted deployment on an ordinary VM, so the CA key lives in
+that VM's database and the thing that decrypts it is on the host, not in
+Postgres. Be clear-eyed about what that means: nebula has no intermediate CAs
+(§1.1), so this key is a root of trust for the entire mesh, and anyone who reads
+it can mint any identity the CA's constraints allow.
 
-What the vault changes is the *operational* shape, not the trust boundary. An
+What the vault changed is the *operational* shape, not the trust boundary. An
 attacker needed (database read) + (file on the host); they now need (database
-read) + (the KEK, on the host). What it buys is that a second replica needs one
-secret instead of a copy of every key file.
+read) + (the KEK, on the host). Same two factors, same two hosts. What it buys
+is that a second replica needs one secret instead of a copy of every key file,
+and that there is exactly one thing to escrow.
 
 Three things bound that, and all of them are free:
 
@@ -660,22 +660,21 @@ key survives all three. It does *not* survive compromise of the running process,
 which necessarily holds the decrypted key in memory — so this is protection
 against your infrastructure provider's storage layer, not against RCE.
 
-`orbitd bootstrap` encrypts automatically when a passphrase is available and
-warns loudly when it is not, because an unencrypted key is a failure nothing
-else surfaces: everything works.
+A control plane with no KEK does not start, so there is no unencrypted state to
+fall into.
 
 ```
-ORBIT_CA_KEY_PASSPHRASE_FILE   read from a file  (preferred)
-ORBIT_CA_KEY_PASSPHRASE        read from the environment
+ORBIT_KEK_PASSPHRASE_FILE   read from a file  (preferred)
+ORBIT_KEK_PASSPHRASE        read from the environment
 ```
 
 The file form costs nothing and unlocks the good options on a plain VM. On
 systemd, `LoadCredentialEncrypted=` places a **TPM-sealed** secret in
-`$CREDENTIALS_DIRECTORY`; point `ORBIT_CA_KEY_PASSPHRASE_FILE` at it and a
-stolen disk image is useless without that machine's TPM. Docker's
-`/run/secrets/` works the same way. Neither keeps the passphrase from a process
-an attacker already controls, but both keep it out of `ps`, out of shell
-history, and out of anything that dumps the environment into a log.
+`$CREDENTIALS_DIRECTORY`; point `ORBIT_KEK_PASSPHRASE_FILE` at it and a stolen
+disk image is useless without that machine's TPM. Docker's `/run/secrets/` works
+the same way. Neither keeps the passphrase from a process an attacker already
+controls, but both keep it out of `ps`, out of shell history, and out of
+anything that dumps the environment into a log.
 
 **Permissions, enforced.** A CA key with any group or other permission bit is
 refused at load, not warned about. That mistake is silent otherwise, and it
