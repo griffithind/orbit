@@ -275,6 +275,14 @@ func (s *Server) adminRoutes() []route {
 		a("GET /v1/memberships/{id}/routes", "memberships:read", s.handleListRoutes),
 		a("POST /v1/memberships/{id}/routes", "memberships:write", s.handleCreateRoute),
 		a("DELETE /v1/routes/{routeId}", "memberships:write", s.handleDeleteRoute),
+
+		// Choosing an exit node is a request the MACHINE makes on its own
+		// behalf, so it reads with memberships:read and writes with
+		// memberships:write — the same pair as any other membership setting.
+		// It is not a separate scope: opting into a default route is choosing
+		// among gateways policy already permits, not granting yourself access.
+		a("GET /v1/memberships/{id}/exit-node", "memberships:read", s.handleListExitNodes),
+		a("PUT /v1/memberships/{id}/exit-node", "memberships:write", s.handleSetExitNode),
 		// The authorization queue.
 		//
 		// hosts:create, not hosts:write. Authorizing a pending join is what

@@ -368,3 +368,52 @@ func inlineMaterial(rendered, caBundle, certPEM, keyPEM string) (string, error) 
 	}
 	return string(out), nil
 }
+
+// reconcileHost makes the machine's forwarding and NAT match the signed config.
+//
+// EVERY CYCLE, not only when a generation changes, and that is the whole point
+// of it being here rather than in the apply path. Firewall rules live in a
+// table other things also write to: somebody flushes nftables, a package
+// upgrade reloads a ruleset, an operator experiments. Applying once and trusting
+// it would leave a gateway that the control plane believes is forwarding and
+// that silently is not.
+//
+// It is also cheap to be sure: the implementation replaces its own table
+// wholesale, so "repair" and "confirm" are the same operation and there is no
+// diff to get wrong.
+func (l *Loop) reconcileHost() {
+	if l.Host == nil {
+		return
+	}
+	yamlCfg, err := l.Applier.VerifiedConfig(l.networkKey(), l.State.MembershipID)
+	if err != nil {
+		// checkInstalled already reported whatever is wrong with the
+		// configuration; saying it twice per cycle would bury it.
+		return
+	}
+	want, err := HostStateFromConfig(yamlCfg)
+	if err != nil {
+		l.Log.Error("could not read this host's forwarding instructions", "error", err)
+		return
+	}
+
+	if err := l.Host.Apply(want); err != nil {
+		// Not fatal to the data plane: nebula is already running and tunnels are
+		// unaffected. What is affected is everything BEHIND this gateway, so
+		// this is an error rather than a warning even though nothing here can
+		// fix it.
+		l.Log.Error("could not apply this host's forwarding rules; traffic through "+
+			"this gateway will not be forwarded", "error", err, "state", want.String(),
+			"mechanism", l.Host.Describe())
+		return
+	}
+	if s := want.String(); s != l.lastHostState {
+		if want.Empty() {
+			l.Log.Info("this host is no longer a gateway; forwarding rules removed",
+				"mechanism", l.Host.Describe())
+		} else {
+			l.Log.Info("gateway forwarding applied", "state", s, "mechanism", l.Host.Describe())
+		}
+		l.lastHostState = s
+	}
+}

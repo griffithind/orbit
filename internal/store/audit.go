@@ -121,6 +121,7 @@ const (
 	ActionMembershipCreated   = "membership.created"
 	ActionRouteAdded          = "route.added"
 	ActionRouteRemoved        = "route.removed"
+	ActionExitNodeSet         = "exit_node.set"
 	ActionMembershipBlocked   = "membership.blocked"
 	ActionMembershipUnblocked = "membership.unblocked"
 	ActionMembershipDeleted   = "membership.deleted"

@@ -245,6 +245,15 @@ type Input struct {
 	// TunDisabled produces a lighthouse that needs no tun device and no root.
 	TunDisabled bool
 
+	// SoMark is nebula's packet mark, set only when this host has a default
+	// route. Zero omits it.
+	SoMark int
+
+	// Serves are the prefixes THIS host is a gateway for, with their NAT
+	// setting — the agent's instructions, not nebula's. Distinct from Routes,
+	// which is what this host reaches through somebody else.
+	Serves []Served
+
 	// Routes are the external prefixes this host may reach through gateways in
 	// the mesh, already grouped by prefix. Empty renders no unsafe_routes at
 	// all.
@@ -375,6 +384,19 @@ type lighthouseSection struct {
 type listenSection struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
+
+	// SoMark marks nebula's OWN outer packets so they are not routed back into
+	// the tunnel they carry.
+	//
+	// Only meaningful with a default route, and that is the only time it is
+	// emitted. With 0.0.0.0/0 pointing at the tun, nebula's UDP to the
+	// lighthouse matches its own default route: the tunnel carries the packet
+	// that carries the tunnel. The mark is what an `ip rule` uses to send
+	// marked traffic to the real gateway instead.
+	//
+	// Linux only — nebula implements SO_MARK in udp_linux.go and has no darwin
+	// equivalent, which is why a Mac can USE routes but not a default one.
+	SoMark int `yaml:"so_mark,omitempty"`
 }
 
 type punchySection struct {
@@ -440,6 +462,29 @@ type document struct {
 	// Logging is authoritative-mode only; nil omits the section entirely.
 	Logging  *loggingSection `yaml:"logging,omitempty"`
 	Firewall *Firewall       `yaml:"firewall"`
+
+	// Orbit is what the AGENT must do that nebula does not: enable forwarding,
+	// NAT a prefix. Nebula never reads it — config.C keeps every key in a map
+	// and only looks up the ones it knows, so an unrecognised top-level section
+	// is inert.
+	//
+	// In the SAME document on purpose. It is signed with everything else, so
+	// instructions to change a machine's firewall arrive with the same proof as
+	// its certificate paths and cannot be substituted independently. A second
+	// file would need its own signature, its own delivery and its own
+	// divergence check, and would eventually disagree with this one.
+	Orbit *orbitSection `yaml:"orbit,omitempty"`
+}
+
+// orbitSection is the agent's instructions, ignored by nebula.
+type orbitSection struct {
+	// Forward is true when this host is a gateway for something.
+	Forward bool `yaml:"forward,omitempty"`
+
+	// Masquerade lists prefixes whose forwarded traffic is NATed leaving this
+	// host. Per prefix rather than per host: a gateway can legitimately want
+	// NAT for 0.0.0.0/0 and not for a LAN it also serves.
+	Masquerade []string `yaml:"masquerade,omitempty"`
 }
 
 // staticHostMap marshals with sorted keys. Go map iteration order is random,
@@ -588,7 +633,8 @@ func Render(in Input) ([]byte, error) {
 			Hosts:        lhHosts,
 			Interval:     in.LighthouseInterval,
 		},
-		Listen: listenSection{Host: in.ListenHost, Port: in.ListenPort},
+		Listen: listenSection{
+			SoMark: in.SoMark, Host: in.ListenHost, Port: in.ListenPort},
 		Punchy: punchySection{
 			Punch:   !in.DisablePunchy,
 			Respond: !in.DisablePunchy,
@@ -608,6 +654,7 @@ func Render(in Input) ([]byte, error) {
 			UnsafeRoutes: renderRoutes(in.Routes),
 		},
 		Firewall: fw,
+		Orbit:    renderOrbit(in.Serves),
 	}
 	if in.LogLevel != "" || in.LogFormat != "" {
 		doc.Logging = &loggingSection{Level: in.LogLevel, Format: in.LogFormat}
@@ -649,6 +696,12 @@ type Route struct {
 	// answer for both however many machines reach it.
 	MTU     int
 	Install bool
+}
+
+// Served is one prefix this host forwards for.
+type Served struct {
+	Prefix     netip.Prefix
+	Masquerade bool
 }
 
 // Gateway is one machine offering a prefix, and its share of the traffic.
@@ -693,6 +746,24 @@ func renderRoutes(routes []Route) []unsafeRoute {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// renderOrbit describes what the agent must do to the host.
+//
+// Nil when this host serves nothing, so an ordinary machine's configuration is
+// byte-identical to what it was before routes existed — which is what keeps a
+// feature nobody uses from re-applying every config in a fleet.
+func renderOrbit(serves []Served) *orbitSection {
+	if len(serves) == 0 {
+		return nil
+	}
+	out := &orbitSection{Forward: true}
+	for _, s := range serves {
+		if s.Masquerade {
+			out.Masquerade = append(out.Masquerade, s.Prefix.String())
+		}
 	}
 	return out
 }

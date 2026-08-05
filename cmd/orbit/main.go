@@ -58,6 +58,8 @@ func main() {
 		err = deviceCmd(ctx, os.Args[2:])
 	case "route":
 		err = routeCmd(ctx, os.Args[2:])
+	case "exit-node":
+		err = exitNodeCmd(ctx, os.Args[2:])
 	case "converge":
 		err = convergeCmd(ctx, os.Args[2:])
 	case "network":

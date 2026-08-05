@@ -506,7 +506,7 @@ it and most needs the carve-out.
 
 ## 8. What is built
 
-Routes, end to end. Exit nodes, shield and the host-state layer are not.
+Routes, exit nodes and the gateway host-state layer. Shield is not.
 
 ```bash
 # The CA must permit it, and this is the only time it can be decided.
@@ -528,6 +528,9 @@ orbit route rm <uuid>
 | `tun.unsafe_routes` render | `nebulacfg.renderRoutes`, grouped by `enroll.routesFor` |
 | Routed subnets into policy | `store.PolicyFleet` → `policy.Membership.UnsafeNetworks` |
 | API | `GET/POST /v1/memberships/{id}/routes`, `DELETE /v1/routes/{id}` |
+| Exit-node opt-in | migration 0025, `GET/PUT /v1/memberships/{id}/exit-node` |
+| Gateway forwarding and NAT | `internal/agent/hoststate*.go`, nftables table `inet orbit` |
+| Agent instructions in the signed config | `nebulacfg.orbitSection`, read by `agent.HostStateFromConfig` |
 
 Three properties are pinned by tests, because each fails silently otherwise:
 
@@ -542,18 +545,73 @@ Three properties are pinned by tests, because each fails silently otherwise:
 The gateway is not given a route to its own prefix. It reaches that on a real
 interface, and an `unsafe_route` naming itself is a loop.
 
+### Exit nodes
+
+```bash
+orbit route add lab-pi 0.0.0.0/0 -masquerade   # the gateway offers it
+orbit exit-node ls laptop                       # what is on offer
+orbit exit-node use laptop <route-uuid>         # this machine chooses it
+orbit exit-node off laptop
+```
+
+**A default route reaches only the machine that chose it**, which is the
+property that separates it from an ordinary route and the one that fails
+expensively — rendering every `0.0.0.0/0` to everybody would move a fleet's
+internet traffic through whichever gateway was added most recently, visible a
+week later as a latency complaint nobody can attribute.
+
+The choice is a control-plane call, not a local edit. The agent runs only what
+the control plane signed, so `orbit exit-node use` PATCHes the membership and
+the route arrives in the next signed configuration. Local command, central
+authority.
+
+`so_mark` is emitted only for a host with a default route. Without it, nebula's
+own UDP matches the default route it just installed and the tunnel carries the
+packet that carries the tunnel.
+
+**Linux only, for the machine USING it.** `SO_MARK` is implemented in nebula's
+`udp_linux.go` and has no darwin equivalent, so a Mac can consume ordinary
+routes — nebula installs those itself — but not a default one.
+
+### The host-state layer
+
+A gateway needs two things nebula does not do: IP forwarding, and NAT. Both are
+carried in the **same signed document** as the configuration, under an `orbit:`
+key nebula ignores — so instructions to change a machine's firewall arrive with
+the same proof as its certificate paths and cannot be substituted separately.
+
+Ownership is the whole design, and it is one nftables table:
+
+```
+nft destroy table inet orbit
+```
+
+Verified on real Linux rather than asserted: the table applies, re-applies
+cleanly, and — after somebody else adds a rule and a chain to it — is still
+removed entirely by that one command, while an unrelated `inet notorbit` table
+survives untouched.
+
+It is **reconciled every cycle**, not applied once. Firewall rules live where
+other things also write: somebody flushes nftables, a package upgrade reloads a
+ruleset. Applying once and trusting it would leave a gateway the control plane
+believes is forwarding and that silently is not. `orbit agent uninstall`
+destroys the table by name, needing no memory of what was in it.
+
+IP forwarding is enabled and deliberately **not** disabled on uninstall —
+something else on the machine may want it, and a container runtime almost
+certainly does.
+
 ---
 
 ## 9. Order of the rest
 
 1. The UI, which has no route surface yet.
-2. The host-state layer: the nftables table, the `proto` number, the reconcile
+2. Shield: the nftables table, the `proto` number, the reconcile
    loop, and a test that uninstall leaves nothing behind. Before any rule is
    written in anger.
-3. Exit nodes and shield: `0.0.0.0/0`, the opt-in call, `ip_forward`, `so_mark`,
-   masquerade, the policy-routing rules and the management carve-out. Host
-   surgery, and it belongs behind a route feature that already works rather
-   than in front of it.
+3. A Mac path for default routes, if it is ever wanted: nebula has no SO_MARK
+   on darwin, so it needs the wg-quick approach of pinning the lighthouse
+   endpoints to the physical gateway with host routes.
 
 Access control needed no step and already works: `dst: [cidr:192.168.88.0/24]`
 in a policy document compiles, and the compiler emits the `local_cidr` that

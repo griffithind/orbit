@@ -795,6 +795,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	loop := &agent.Loop{
 		Client:  agent.NewClient(st.ControlURL()),
 		Applier: applier,
+		Host:    agent.NewHostConfigurer(nlog),
 		Policy:  agent.DefaultRenewalPolicy(),
 		Layout:  layout,
 		Curve:   c,
@@ -1003,6 +1004,23 @@ func uninstallCmd(args []string) error {
 		return err
 	}
 	fmt.Fprintf(errOut, "stopped %s\n", plan.Name)
+
+	// The forwarding rules, if this host was a gateway.
+	//
+	// BEFORE the directory goes, and without consulting it: Remove destroys the
+	// whole nftables table by name, so it does not need to know what was in it
+	// and works even if somebody edited the rules. A machine that had rules
+	// left behind here would keep forwarding for a network it is no longer part
+	// of, which is the one uninstall failure with a security consequence.
+	if err := agent.NewHostConfigurer(newLogger()).Remove(); err != nil {
+		// Reported, not fatal. The rest of the uninstall is still worth doing,
+		// and stopping here would leave a machine half-removed with no obvious
+		// way forward.
+		fmt.Fprintf(errOut, "WARNING: could not remove forwarding rules: %v\n"+
+			"Remove them by hand with: nft destroy table inet %s\n", err, agent.TableName)
+	} else {
+		fmt.Fprintf(errOut, "removed any forwarding rules (nft table inet %s)\n", agent.TableName)
+	}
 
 	removed, err := plan.RemoveUnit(len(others) > 0)
 	if err != nil {

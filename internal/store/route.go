@@ -180,3 +180,103 @@ func ParsePrefixes(raw []string) ([]netip.Prefix, error) {
 	}
 	return out, nil
 }
+
+// SetExitRoute points a membership at a default route, or clears it.
+//
+// Validated against what EXISTS rather than trusted: a caller naming a route
+// that is not a default route, or that belongs to another network, would
+// produce a membership with a default route through something that does not
+// offer one. Postgres catches the second through the foreign key; the first is
+// this function's job.
+func (t *Tx) SetExitRoute(ctx context.Context, membershipID uuid.UUID, routeID *uuid.UUID) error {
+	if routeID != nil {
+		var (
+			prefix    netip.Prefix
+			networkID uuid.UUID
+		)
+		err := t.tx.QueryRow(ctx,
+			`SELECT prefix, network_id FROM orbit.route WHERE id = $1`, routeID).
+			Scan(&prefix, &networkID)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				return ErrNotFound
+			}
+			return mapErr(err, "read exit route")
+		}
+		// A default route is one that covers everything. Checked by prefix
+		// length rather than by string, so ::/0 counts too.
+		if prefix.Bits() != 0 {
+			return fmt.Errorf("%w: route %s is %s, which is not a default route; "+
+				"an exit node offers 0.0.0.0/0 or ::/0", ErrInvalid, routeID, prefix)
+		}
+	}
+
+	tag, err := t.tx.Exec(ctx,
+		`UPDATE orbit.membership SET exit_route_id = $2 WHERE id = $1`, membershipID, routeID)
+	if err != nil {
+		return mapErr(err, "set exit route")
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	// Only this membership's configuration changes, but the epoch is per
+	// network and there is no per-membership generation to bump. The cost is
+	// every other machine re-rendering an identical configuration, which the
+	// signature makes free to detect: same bytes, same digest, nothing applied.
+	var networkID uuid.UUID
+	if err := t.tx.QueryRow(ctx,
+		`SELECT network_id FROM orbit.membership WHERE id = $1`, membershipID).
+		Scan(&networkID); err != nil {
+		return mapErr(err, "read membership network")
+	}
+	_, err = t.BumpEpoch(ctx, networkID, EpochConfig)
+	return err
+}
+
+// ExitRoute returns the default route a membership has chosen, or nil.
+func (t *Tx) ExitRoute(ctx context.Context, membershipID uuid.UUID) (*Route, error) {
+	var (
+		r    Route
+		addr *netip.Addr
+	)
+	err := t.tx.QueryRow(ctx, `
+		SELECT `+routeCols+`, a.addr
+		  FROM orbit.membership h
+		  JOIN orbit.route r ON r.id = h.exit_route_id
+		  LEFT JOIN LATERAL (
+		      SELECT ma.addr FROM orbit.membership_address ma
+		       WHERE ma.membership_id = r.membership_id ORDER BY ma.addr LIMIT 1
+		  ) a ON true
+		 WHERE h.id = $1`, membershipID).
+		Scan(&r.ID, &r.NetworkID, &r.MembershipID, &r.Prefix, &r.Weight,
+			&r.Masquerade, &r.Install, &r.MTU, &r.CreatedAt, &addr)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil // no exit node chosen, which is the normal case
+		}
+		return nil, mapErr(err, "exit route")
+	}
+	if addr != nil {
+		r.GatewayAddr = *addr
+	}
+	return &r, nil
+}
+
+// DefaultRoutes lists the exit nodes available in a network.
+//
+// What `orbit exit-node ls` shows. Policy still decides whether this membership
+// may actually use one; this is the menu, not the permission.
+func (t *Tx) DefaultRoutes(ctx context.Context, networkID uuid.UUID) ([]Route, error) {
+	all, err := t.NetworkRoutes(ctx, networkID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Route, 0, 2)
+	for _, r := range all {
+		if r.Prefix.Bits() == 0 {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}

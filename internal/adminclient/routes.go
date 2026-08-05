@@ -27,3 +27,18 @@ func (c *Client) RemoveRoute(ctx context.Context, routeID uuid.UUID) error {
 		"/v1/routes/"+routeID.String(), nil, nil)
 	return err
 }
+
+// ExitNodes lists the default routes available to a membership, and which one
+// it has chosen.
+func (c *Client) ExitNodes(ctx context.Context, membershipID uuid.UUID) (Result[wire.ExitNodeListResponse], error) {
+	return send[wire.ExitNodeListResponse](ctx, c, http.MethodGet,
+		"/v1/memberships/"+membershipID.String()+"/exit-node", nil, nil)
+}
+
+// SetExitNode chooses one, or clears the choice with an empty routeID.
+func (c *Client) SetExitNode(ctx context.Context, membershipID uuid.UUID, routeID string) error {
+	_, err := send[struct{}](ctx, c, http.MethodPut,
+		"/v1/memberships/"+membershipID.String()+"/exit-node", nil,
+		wire.SetExitNodeRequest{RouteID: routeID})
+	return err
+}

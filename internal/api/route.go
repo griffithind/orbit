@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/netip"
 
+	"github.com/google/uuid"
+
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -157,4 +159,86 @@ func routeResponse(r store.Route, membershipName string) wire.RouteResponse {
 		out.GatewayAddr = r.GatewayAddr.String()
 	}
 	return out
+}
+
+// Exit nodes: a default route, chosen rather than imposed.
+//
+// The choice is a control-plane call, not a file on the machine, and that is
+// deliberate. The agent runs only what the control plane signed
+// (config-integrity.md 7a), so a locally-injected default route is the one
+// thing that model exists to prevent. `orbit exit-node use` is a REQUEST: it
+// patches the membership, bumps the epoch, and the route arrives in the next
+// signed configuration. Local command, central authority.
+
+func (s *Server) handleListExitNodes(w http.ResponseWriter, r *http.Request) {
+	membershipID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	out := wire.ExitNodeListResponse{Available: []wire.RouteResponse{}}
+	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		m, err := tx.GetHost(ctx, membershipID)
+		if err != nil {
+			return err
+		}
+		avail, err := tx.DefaultRoutes(ctx, m.NetworkID)
+		if err != nil {
+			return err
+		}
+		for _, rt := range avail {
+			out.Available = append(out.Available, routeResponse(rt, ""))
+		}
+		cur, err := tx.ExitRoute(ctx, membershipID)
+		if err != nil {
+			return err
+		}
+		if cur != nil {
+			out.CurrentRouteID = cur.ID.String()
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "membership")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleSetExitNode(w http.ResponseWriter, r *http.Request) {
+	membershipID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req wire.SetExitNodeRequest
+	if !decode(w, r, &req) {
+		return
+	}
+
+	var routeID *uuid.UUID
+	if req.RouteID != "" {
+		id, err := uuid.Parse(req.RouteID)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "route_id must be a uuid")
+			return
+		}
+		routeID = &id
+	}
+
+	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if err := tx.SetExitRoute(ctx, membershipID, routeID); err != nil {
+			return err
+		}
+		return tx.AppendAudit(ctx, identityFrom(ctx).
+			Audit(store.ActionExitNodeSet, "membership", membershipID.String()))
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrInvalid) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.notFoundOr(w, err, "membership or route")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

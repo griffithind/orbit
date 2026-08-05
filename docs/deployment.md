@@ -388,10 +388,46 @@ allow:
     proto: any
 ```
 
-Two things the gateway still needs that Orbit does not yet do for you:
-`net.ipv4.ip_forward=1`, and a NAT rule if the far side has no route back. Exit
-nodes (`0.0.0.0/0`) are not supported yet — see
-[routes-and-exit-nodes.md](routes-and-exit-nodes.md).
+**Forwarding and NAT are handled for you**, on a Linux gateway. The agent
+enables IP forwarding and installs a masquerade rule when a route asks for one,
+in an nftables table it owns whole:
+
+```bash
+nft list table inet orbit     # exactly what Orbit did, in nft's own syntax
+```
+
+Removal is `nft destroy table inet orbit`, which `orbit agent uninstall` runs —
+it needs no record of what was in the table, so it works even if the rules were
+edited. Nothing Orbit adds goes into a chain anything else writes to. IP
+forwarding is left enabled on uninstall, because a container runtime probably
+wants it too.
+
+A **Linux** gateway. A Mac can use routes — nebula installs them itself — but
+cannot advertise one; the agent refuses rather than pretending.
+
+### Exit nodes
+
+An exit node is a route for `0.0.0.0/0`, and a machine takes one deliberately:
+
+```bash
+orbit route add lab-pi 0.0.0.0/0 -masquerade
+orbit exit-node ls laptop
+orbit exit-node use laptop <route-uuid>
+orbit exit-node off laptop
+```
+
+Nobody gets a default route by accident — it is rendered only for the machine
+that chose it. Choosing is a control-plane call rather than a local edit,
+because the agent runs only what the control plane signed.
+
+Two limits worth knowing:
+
+- **The machine using an exit node must be Linux.** Nebula marks its own packets
+  with `SO_MARK` so they are not routed into the tunnel they carry, and that is
+  implemented for Linux only.
+- **Choosing does not grant.** Policy still decides whether that membership may
+  reach `0.0.0.0/0` through that gateway. Choosing one it may not use produces a
+  default route that carries nothing.
 
 ### A dedicated lighthouse, provisioned unattended
 

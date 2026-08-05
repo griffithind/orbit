@@ -247,6 +247,14 @@ type Loop struct {
 	// filled in with DefaultGuard.
 	Guard GuardPolicy
 
+	// Host applies forwarding and NAT for a gateway. Nil on a machine that is
+	// not one, and on any platform that cannot be one.
+	Host HostConfigurer
+
+	// lastHostState is the last state successfully applied, so a reconcile that
+	// changes nothing does not log every cycle.
+	lastHostState string
+
 	// lastRenewAttempt throttles retries after a failure so a persistent
 	// problem does not become a hot loop against the control plane.
 	lastRenewAttempt time.Time
@@ -993,6 +1001,11 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 		// when someone would do it. It is a hash comparison against files
 		// already on this disk, so the steady-state cost is nothing.
 		l.checkInstalled()
+
+		// And the host's own forwarding rules, which live somewhere other
+		// things also write to and therefore have to be re-asserted rather
+		// than assumed.
+		l.reconcileHost()
 
 		if err := l.maybeRenew(ctx); err != nil {
 			l.Log.Warn("renewal failed", "error", err)

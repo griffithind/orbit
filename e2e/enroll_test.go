@@ -552,6 +552,30 @@ type enrolledHost struct {
 	respons *wire.EnrollResponse
 }
 
+// rerender fetches freshly-rendered material for a membership.
+//
+// Enrolment again rather than a peek at the database, because the point is
+// usually to check what a MACHINE would actually receive — including the
+// signature and the sections the render decides on. A second enrollment is what
+// a renewal does anyway.
+func (h *harness) rerender(t *testing.T, ts *httptest.Server, host *enrolledHost) wire.EnrollResponse {
+	t.Helper()
+
+	var code wire.EnrollmentCodeResponse
+	if c := h.adminPost(t, ts.URL+"/v1/memberships/"+host.id+"/enrollment-code", nil, &code); c != http.StatusCreated {
+		t.Fatalf("enrollment code for %s: status %d", host.name, c)
+	}
+	kp, err := agent.GenerateKeypair(h.curve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := agent.NewClient(ts.URL).Enroll(context.Background(), code.Code, kp, "e2e")
+	if err != nil {
+		t.Fatalf("re-enroll %s: %v", host.name, err)
+	}
+	return *resp
+}
+
 // createAndEnroll runs the full operator-then-agent flow.
 func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr string, lighthouse, relay bool, staticAddrs []string) *enrolledHost {
 	t.Helper()

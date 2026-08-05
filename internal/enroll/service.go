@@ -763,9 +763,28 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 	// Routes this host may reach through somebody else. Its OWN routes are
 	// excluded: a gateway reaches its prefix on a real interface, and pointing
 	// it back through the overlay at itself is a loop.
-	routes, err := s.routesFor(ctx, tx, host, net)
+	// The exit node this host CHOSE, if any. Not automatic: a default route
+	// captures everything, so it is rendered only for a machine that asked.
+	exit, err := tx.ExitRoute(ctx, host.ID)
 	if err != nil {
 		return nil, "", err
+	}
+
+	routes, err := s.routesFor(ctx, tx, host, net, exit)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// What THIS host forwards for, which is the other half: routesFor excluded
+	// its own prefixes because it reaches them on a real interface, but it still
+	// has to be told to enable forwarding and NAT them.
+	own, err := tx.MembershipRoutes(ctx, host.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	serves := make([]nebulacfg.Served, 0, len(own))
+	for _, r := range own {
+		serves = append(serves, nebulacfg.Served{Prefix: r.Prefix, Masquerade: r.Masquerade})
 	}
 
 	blocklist, err := tx.LiveBlocklist(ctx, net.ID, s.clock())
@@ -816,6 +835,8 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		Firewall:     fw,
 		Policy:       compiled,
 		Routes:       routes,
+		Serves:       serves,
+		SoMark:       soMarkFor(exit),
 		ListenPort:   inst.listenPort,
 		TunDev:       tunDev,
 		// A lighthouse with no tun device needs no root. Only safe when it is
@@ -827,6 +848,27 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		return nil, "", err
 	}
 	return fragment, bundle, nil
+}
+
+// DefaultRouteSoMark is the packet mark nebula puts on its own traffic when
+// this host has a default route.
+//
+// A constant rather than a setting: the mark only has to be unique among the
+// things marking packets on one machine, and a knob would be a number two
+// operators pick differently for no benefit. 0x4242 is chosen to be recognisable
+// in `nft list ruleset` and outside the ranges systemd-networkd and Docker use.
+const DefaultRouteSoMark = 0x4242
+
+// soMarkFor returns the mark, or zero when this host has no default route.
+//
+// Zero omits so_mark entirely, which matters: the setting is Linux-only, and
+// emitting it on a Mac's configuration would be a key nebula ignores there but
+// that reads as though something is configured.
+func soMarkFor(exit *store.Route) int {
+	if exit == nil {
+		return 0
+	}
+	return DefaultRouteSoMark
 }
 
 // routesFor groups a network's routes by prefix, ready to render.
@@ -841,7 +883,7 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 // an unsafe_route naming itself as the gateway is a loop nebula has no reason
 // to detect.
 func (s *Service) routesFor(ctx context.Context, tx *store.Tx,
-	host *store.Membership, net *store.Network) ([]nebulacfg.Route, error) {
+	host *store.Membership, net *store.Network, exit *store.Route) ([]nebulacfg.Route, error) {
 
 	rows, err := tx.NetworkRoutes(ctx, net.ID)
 	if err != nil {
@@ -855,6 +897,14 @@ func (s *Service) routesFor(ctx context.Context, tx *store.Tx,
 	var out []nebulacfg.Route
 	for _, r := range rows {
 		if r.MembershipID == host.ID {
+			continue
+		}
+		// A DEFAULT route reaches only the machine that asked for it. Rendering
+		// every 0.0.0.0/0 in the network to everybody would move a whole
+		// fleet's internet traffic through whichever gateway somebody added
+		// most recently — a change nobody made, visible as a latency complaint
+		// a week later.
+		if r.Prefix.Bits() == 0 && (exit == nil || exit.ID != r.ID) {
 			continue
 		}
 		mtu := 0

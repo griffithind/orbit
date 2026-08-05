@@ -1629,3 +1629,26 @@ type RouteResponse struct {
 type RouteListResponse struct {
 	Routes []RouteResponse `json:"routes"`
 }
+
+// SetExitNodeRequest chooses this membership's default route, or clears it.
+//
+// One at a time. Two default routes is a tie broken by whichever weight happens
+// to be larger, which is not a decision anybody made.
+type SetExitNodeRequest struct {
+	// RouteID names a 0.0.0.0/0 route offered by some gateway. Empty clears the
+	// choice and returns this machine to its local internet.
+	RouteID string `json:"route_id,omitempty"`
+}
+
+// ExitNodeListResponse is the menu, not the permission.
+//
+// Policy still decides whether this membership may reach 0.0.0.0/0 through a
+// given gateway; choosing one it may not use produces a default route that
+// carries nothing.
+type ExitNodeListResponse struct {
+	// Available are the default routes offered in this network.
+	Available []RouteResponse `json:"available"`
+
+	// CurrentRouteID is what this membership has chosen, empty for none.
+	CurrentRouteID string `json:"current_route_id,omitempty"`
+}
