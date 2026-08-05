@@ -245,6 +245,16 @@ type Input struct {
 	// TunDisabled produces a lighthouse that needs no tun device and no root.
 	TunDisabled bool
 
+	// Routes are the external prefixes this host may reach through gateways in
+	// the mesh, already grouped by prefix. Empty renders no unsafe_routes at
+	// all.
+	//
+	// The gateway's own config does NOT list its routes here: it reaches them
+	// on its own interfaces, and a route pointing at itself is a loop. The
+	// caller filters, because only the caller knows which host it is rendering
+	// for.
+	Routes []Route
+
 	// TunDev is the interface name, allocated per (host, network) so that two
 	// nebula processes on one machine do not fight over one device.
 	//
@@ -384,6 +394,34 @@ type tunSection struct {
 	// suggestion the agent may override; see Input.TunDev.
 	Dev string `yaml:"dev,omitempty"`
 	MTU int    `yaml:"mtu,omitempty"`
+
+	// UnsafeRoutes reaches things that cannot run nebula. Omitted entirely when
+	// there are none, so an ordinary host's config is unchanged by the feature
+	// existing.
+	UnsafeRoutes []unsafeRoute `yaml:"unsafe_routes,omitempty"`
+}
+
+// unsafeRoute is one prefix and the gateways that reach it.
+//
+// One entry per PREFIX, not per gateway: nebula takes a list of `via` and load
+// balances across it by weight, falling to a survivor when one stops answering.
+// Rendering one entry per gateway would produce a config nebula accepts and
+// treats as a single path, quietly losing the redundancy.
+type unsafeRoute struct {
+	Route string     `yaml:"route"`
+	Via   []routeVia `yaml:"via"`
+	MTU   int        `yaml:"mtu,omitempty"`
+	// Install is a pointer so `false` is emitted. Nebula defaults it to true,
+	// so omitting a false would install a route the operator asked to keep out
+	// of the system routing table.
+	Install *bool `yaml:"install,omitempty"`
+}
+
+type routeVia struct {
+	Gateway string `yaml:"gateway"`
+	// Weight is omitted at 1, which is nebula's default for an unweighted
+	// gateway, so the common case renders as the documentation writes it.
+	Weight int `yaml:"weight,omitempty"`
 }
 
 type loggingSection struct {
@@ -564,9 +602,10 @@ func Render(in Input) ([]byte, error) {
 			Relays:    relays,
 		},
 		Tun: tunSection{
-			Disabled: in.TunDisabled,
-			Dev:      in.TunDev,
-			MTU:      in.TunMTU,
+			Disabled:     in.TunDisabled,
+			Dev:          in.TunDev,
+			MTU:          in.TunMTU,
+			UnsafeRoutes: renderRoutes(in.Routes),
 		},
 		Firewall: fw,
 	}
@@ -599,4 +638,61 @@ func Render(in Input) ([]byte, error) {
 	}
 
 	return append([]byte(authoritativeHeader), body...), nil
+}
+
+// Route is one prefix and the gateways offering it, as the caller assembled it.
+type Route struct {
+	Prefix   netip.Prefix
+	Gateways []Gateway
+
+	// MTU and Install come from the route, not the gateway: a prefix has one
+	// answer for both however many machines reach it.
+	MTU     int
+	Install bool
+}
+
+// Gateway is one machine offering a prefix, and its share of the traffic.
+type Gateway struct {
+	Addr   netip.Addr
+	Weight int
+}
+
+// renderRoutes turns the caller's prefixes into nebula's unsafe_routes.
+//
+// Gateways with no address are dropped rather than rendered as an empty string:
+// nebula would refuse the config, and refusing the whole configuration because
+// one gateway is half-enrolled would take down a host that has nothing to do
+// with it. A prefix left with no gateways is dropped whole, for the same
+// reason — an unsafe_route with an empty via list is a config error, not a
+// route that goes nowhere.
+func renderRoutes(routes []Route) []unsafeRoute {
+	out := make([]unsafeRoute, 0, len(routes))
+	for _, r := range routes {
+		via := make([]routeVia, 0, len(r.Gateways))
+		for _, g := range r.Gateways {
+			if !g.Addr.IsValid() {
+				continue
+			}
+			w := g.Weight
+			if w == 1 {
+				w = 0 // omitted; nebula's default for an unweighted gateway
+			}
+			via = append(via, routeVia{Gateway: g.Addr.String(), Weight: w})
+		}
+		if len(via) == 0 {
+			continue
+		}
+		e := unsafeRoute{Route: r.Prefix.String(), Via: via, MTU: r.MTU}
+		if !r.Install {
+			// Only when false. Nebula defaults to true, so emitting it always
+			// would be noise in every config that never wanted the knob.
+			no := false
+			e.Install = &no
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

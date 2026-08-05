@@ -1281,12 +1281,22 @@ func (s *Server) handleCreateCA(w http.ResponseWriter, r *http.Request) {
 	defer signer.Close()
 
 	now := time.Now()
+	// Explicit, never defaulted. A CA that silently permitted a route range
+	// would be granting authority nobody asked for, and it could not be taken
+	// back without a rotation.
+	unsafe, err := store.ParsePrefixes(req.UnsafeNetworks)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	caCert, err := ca.CreateCA(r.Context(), signer, ca.CAParams{
-		Name:      req.Name,
-		Networks:  networks,
-		Groups:    req.Groups,
-		NotBefore: now.Add(-time.Minute),
-		NotAfter:  now.AddDate(0, 0, days),
+		Name:           req.Name,
+		Networks:       networks,
+		UnsafeNetworks: unsafe,
+		Groups:         req.Groups,
+		NotBefore:      now.Add(-time.Minute),
+		NotAfter:       now.AddDate(0, 0, days),
 	})
 	if err != nil {
 		s.log.Error("create CA failed", "error", err)
@@ -1299,7 +1309,8 @@ func (s *Server) handleCreateCA(w http.ResponseWriter, r *http.Request) {
 	row := store.CA{
 		NetworkID: networkID, Name: req.Name, Fingerprint: fingerprint,
 		CertPEM: string(pem), Curve: signer.Curve().String(),
-		NotBefore: caCert.NotBefore(), NotAfter: caCert.NotAfter(),
+		UnsafeNetworks: req.UnsafeNetworks,
+		NotBefore:      caCert.NotBefore(), NotAfter: caCert.NotAfter(),
 	}
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		// Sealed in the same transaction as the row that references it: a key
@@ -1819,6 +1830,7 @@ func caResponse(c *store.CA, includePEM bool, activeCerts int) wire.CAResponse {
 		NotBefore: c.NotBefore.Format(time.RFC3339),
 		NotAfter:  c.NotAfter.Format(time.RFC3339),
 
+		UnsafeNetworks:     c.UnsafeNetworks,
 		ActiveCertificates: activeCerts,
 	}
 	if includePEM {

@@ -504,22 +504,57 @@ it and most needs the carve-out.
 
 ---
 
-## 8. Order of work
+## 8. What is built
 
-1. `orbit.route` and the CA default, together — the second gates the first and
-   is permanent, so it is not a thing to leave until the feature works.
-2. Enrollment carries the gateway's prefixes into `HostParams.UnsafeNetworks`,
-   and `policy.Membership.UnsafeNetworks` stops being empty. The compiler
-   already does the rest.
-3. `nebulacfg` renders `tun.unsafe_routes`, grouping rows by prefix so multiple
-   gateways become one entry with weighted `via` list.
-4. API, CLI and UI for offering and revoking a route.
-5. The host-state layer: the nftables table, the `proto` number, the reconcile
+Routes, end to end. Exit nodes, shield and the host-state layer are not.
+
+```bash
+# The CA must permit it, and this is the only time it can be decided.
+orbitd bootstrap -network prod -cidr 10.42.0.0/16 \
+    -unsafe-networks 192.168.88.0/24
+
+# Then, per gateway:
+orbit route add lab-pi 192.168.88.0/24
+orbit route add spare-pi 192.168.88.0/24 -weight 5   # redundancy, that is all
+orbit route ls lab-pi
+orbit route rm <uuid>
+```
+
+| Piece | Where |
+|---|---|
+| `orbit.route`, CA `unsafe_networks` | migration 0024 |
+| Storage and grouping | `internal/store/route.go` |
+| Prefixes into the certificate | `enroll.issueAndRender` → `ca.HostParams` |
+| `tun.unsafe_routes` render | `nebulacfg.renderRoutes`, grouped by `enroll.routesFor` |
+| Routed subnets into policy | `store.PolicyFleet` → `policy.Membership.UnsafeNetworks` |
+| API | `GET/POST /v1/memberships/{id}/routes`, `DELETE /v1/routes/{id}` |
+
+Three properties are pinned by tests, because each fails silently otherwise:
+
+- **A peer's config names the prefix and the gateway** — the route reaches
+  somebody.
+- **Two gateways for one prefix render as ONE entry with two `via`.** Two
+  entries would be accepted by nebula and treated as a single path, losing the
+  redundancy that motivated the second gateway, and looking correct.
+- **A prefix outside the CA's constraint is refused at issuance.** Not rendered
+  and ignored — refused, with a message naming the CA.
+
+The gateway is not given a route to its own prefix. It reaches that on a real
+interface, and an `unsafe_route` naming itself is a loop.
+
+---
+
+## 9. Order of the rest
+
+1. The UI, which has no route surface yet.
+2. The host-state layer: the nftables table, the `proto` number, the reconcile
    loop, and a test that uninstall leaves nothing behind. Before any rule is
    written in anger.
-6. Exit nodes and shield: `0.0.0.0/0`, the opt-in call, `ip_forward`, `so_mark`,
+3. Exit nodes and shield: `0.0.0.0/0`, the opt-in call, `ip_forward`, `so_mark`,
    masquerade, the policy-routing rules and the management carve-out. Host
    surgery, and it belongs behind a route feature that already works rather
    than in front of it.
 
-Access control needs no step. It already works.
+Access control needed no step and already works: `dst: [cidr:192.168.88.0/24]`
+in a policy document compiles, and the compiler emits the `local_cidr` that
+makes it bite on the gateway.

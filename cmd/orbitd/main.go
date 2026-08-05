@@ -640,6 +640,15 @@ func bootstrap(args []string) error {
 		// would make rotating the first mean touching the second.
 		groupsCS = fs.String("groups", "default", "comma separated groups the CA may delegate")
 
+		// Explicit and never defaulted. A CA that quietly permitted a range
+		// would grant routing authority nobody asked for — and it cannot be
+		// narrowed afterwards any more than it can be widened, because the
+		// constraint is signed into the certificate.
+		unsafeCS = fs.String("unsafe-networks", "",
+			"comma separated external prefixes gateways under this CA may route "+
+				"(e.g. 192.168.88.0/24). Empty permits none. PERMANENT: widening "+
+				"this later is a new CA and a rotation")
+
 		// Writing the unit is opt-in rather than the default: bootstrap is also
 		// run inside a container and from a laptop against a remote database,
 		// where writing to /etc/systemd would be wrong and surprising.
@@ -714,12 +723,18 @@ func bootstrap(args []string) error {
 	signer := ca.NewMemorySigner(curve, caPub, caPriv)
 
 	now := time.Now()
+	unsafeNets, err := store.ParsePrefixes(splitCSV(*unsafeCS))
+	if err != nil {
+		return fmt.Errorf("-unsafe-networks: %w", err)
+	}
+
 	caCert, err := ca.CreateCA(ctx, signer, ca.CAParams{
-		Name:      *caName,
-		Networks:  []netip.Prefix{prefix},
-		Groups:    groups,
-		NotBefore: now.Add(-time.Minute),
-		NotAfter:  now.AddDate(0, 0, *caDays),
+		Name:           *caName,
+		Networks:       []netip.Prefix{prefix},
+		UnsafeNetworks: unsafeNets,
+		Groups:         groups,
+		NotBefore:      now.Add(-time.Minute),
+		NotAfter:       now.AddDate(0, 0, *caDays),
 	})
 	if err != nil {
 		return fmt.Errorf("create ca: %w", err)
@@ -798,8 +813,11 @@ func bootstrap(args []string) error {
 			CertPEM:     string(caPEM),
 			SignerRef:   caRef,
 			Curve:       curve.String(),
-			NotBefore:   caCert.NotBefore(),
-			NotAfter:    caCert.NotAfter(),
+			// The readable copy of what was signed. splitCSV rather than the
+			// parsed prefixes so the stored text is what the operator typed.
+			UnsafeNetworks: splitCSV(*unsafeCS),
+			NotBefore:      caCert.NotBefore(),
+			NotAfter:       caCert.NotAfter(),
 		}
 		if err := tx.CreateCA(ctx, &caRow); err != nil {
 			return err

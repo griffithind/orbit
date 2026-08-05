@@ -614,14 +614,27 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		return nil, err
 	}
 
+	// The prefixes this machine is allowed to route, INTO THE CERTIFICATE.
+	//
+	// This is what makes a route real. The route table is intent; nebula
+	// requires the gateway's certificate to carry the prefix, and the issuer
+	// refuses anything the CA does not permit — so a route the CA was never
+	// widened for fails here, loudly, rather than rendering into a config that
+	// silently reaches nobody.
+	routes, err := tx.MembershipRoutes(ctx, host.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	membershipCert, err := issuer.IssueHost(ctx, ca.HostParams{
-		Name:      host.Name,
-		Version:   cert.Version(net.CertVer),
-		Networks:  networks,
-		Groups:    groups,
-		PublicKey: pub,
-		NotBefore: notBefore,
-		NotAfter:  notAfter,
+		Name:           host.Name,
+		Version:        cert.Version(net.CertVer),
+		Networks:       networks,
+		UnsafeNetworks: store.RoutePrefixes(routes),
+		Groups:         groups,
+		PublicKey:      pub,
+		NotBefore:      notBefore,
+		NotAfter:       notAfter,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("issue certificate: %w", err)
@@ -747,6 +760,14 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		}
 	}
 
+	// Routes this host may reach through somebody else. Its OWN routes are
+	// excluded: a gateway reaches its prefix on a real interface, and pointing
+	// it back through the overlay at itself is a loop.
+	routes, err := s.routesFor(ctx, tx, host, net)
+	if err != nil {
+		return nil, "", err
+	}
+
 	blocklist, err := tx.LiveBlocklist(ctx, net.ID, s.clock())
 	if err != nil {
 		return nil, "", err
@@ -794,6 +815,7 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		Blocklist:    blocklist,
 		Firewall:     fw,
 		Policy:       compiled,
+		Routes:       routes,
 		ListenPort:   inst.listenPort,
 		TunDev:       tunDev,
 		// A lighthouse with no tun device needs no root. Only safe when it is
@@ -805,6 +827,53 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		return nil, "", err
 	}
 	return fragment, bundle, nil
+}
+
+// routesFor groups a network's routes by prefix, ready to render.
+//
+// Grouping is the point: two memberships offering one prefix become one
+// unsafe_routes entry with two `via` gateways, which is what makes nebula load
+// balance and fail between them. One entry each would be accepted and treated
+// as a single path, losing exactly the redundancy that motivated the second
+// gateway.
+//
+// A host's own routes are excluded. It reaches those on its own interfaces, and
+// an unsafe_route naming itself as the gateway is a loop nebula has no reason
+// to detect.
+func (s *Service) routesFor(ctx context.Context, tx *store.Tx,
+	host *store.Membership, net *store.Network) ([]nebulacfg.Route, error) {
+
+	rows, err := tx.NetworkRoutes(ctx, net.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// NetworkRoutes orders by prefix, so a linear pass groups them and the
+	// output order is the query's — deterministic, which matters because the
+	// rendered configuration is signed and a reordering would change its digest
+	// and re-apply a configuration that had not changed.
+	var out []nebulacfg.Route
+	for _, r := range rows {
+		if r.MembershipID == host.ID {
+			continue
+		}
+		mtu := 0
+		if r.MTU != nil {
+			mtu = *r.MTU
+		}
+		if n := len(out); n > 0 && out[n-1].Prefix == r.Prefix {
+			out[n-1].Gateways = append(out[n-1].Gateways,
+				nebulacfg.Gateway{Addr: r.GatewayAddr, Weight: r.Weight})
+			continue
+		}
+		out = append(out, nebulacfg.Route{
+			Prefix:   r.Prefix,
+			MTU:      mtu,
+			Install:  r.Install,
+			Gateways: []nebulacfg.Gateway{{Addr: r.GatewayAddr, Weight: r.Weight}},
+		})
+	}
+	return out, nil
 }
 
 // compilePolicy resolves the network's policy into this host's rules, or

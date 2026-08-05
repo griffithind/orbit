@@ -369,7 +369,14 @@ func (t *Tx) PolicyFleet(ctx context.Context, networkID uuid.UUID) ([]policy.Mem
 	rows, err := t.tx.Query(ctx, `
 		SELECT h.id, h.name, coalesce(r.name, ''), h.tags,
 		       coalesce(array(SELECT a.addr FROM orbit.membership_address a
-		                       WHERE a.membership_id = h.id ORDER BY a.addr), '{}')
+		                       WHERE a.membership_id = h.id ORDER BY a.addr), '{}'),
+		       -- The prefixes this host ROUTES, which the compiler needs in
+		       -- order to emit an explicit local_cidr for them. Without it a
+		       -- rule naming a routed subnet renders, deploys, and silently
+		       -- matches nothing: nebula's local_cidr default is the host's own
+		       -- addresses, not the ones it forwards for.
+		       coalesce(array(SELECT rt.prefix::text FROM orbit.route rt
+		                       WHERE rt.membership_id = h.id ORDER BY rt.prefix), '{}')
 		  FROM orbit.membership h
 		  LEFT JOIN orbit.role r ON (r.network_id, r.id) = (h.network_id, h.role_id)
 		 WHERE h.network_id = $1 AND h.state <> 'deleted'
@@ -385,8 +392,12 @@ func (t *Tx) PolicyFleet(ctx context.Context, networkID uuid.UUID) ([]policy.Mem
 			id uuid.UUID
 			h  policy.Membership
 		)
-		if err := rows.Scan(&id, &h.Name, &h.Role, &h.Tags, &h.Addrs); err != nil {
+		var unsafe []string
+		if err := rows.Scan(&id, &h.Name, &h.Role, &h.Tags, &h.Addrs, &unsafe); err != nil {
 			return nil, mapErr(err, "scan policy fleet host")
+		}
+		if h.UnsafeNetworks, err = ParsePrefixes(unsafe); err != nil {
+			return nil, fmt.Errorf("host %s: %w", h.Name, err)
 		}
 		h.ID = id.String()
 		out = append(out, h)

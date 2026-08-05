@@ -1058,6 +1058,16 @@ type CreateCARequest struct {
 	// CAs, so this is the only blast-radius control there is.
 	Networks []string `json:"networks,omitempty"`
 	Groups   []string `json:"groups,omitempty"`
+
+	// UnsafeNetworks bounds which EXTERNAL prefixes a gateway signed by this CA
+	// may route — nebula's unsafe networks. Empty means none, and that is the
+	// default on purpose: a CA permitting 0.0.0.0/0 lets any host it signs claim
+	// authority over every destination.
+	//
+	// It cannot be widened later. The constraint is signed into the CA
+	// certificate, so extending it is a new CA and a rotation. Decide it when
+	// the CA is created, or plan the rotation.
+	UnsafeNetworks []string `json:"unsafe_networks,omitempty"`
 }
 
 // ActivateCARequest promotes a CA to signing.
@@ -1085,6 +1095,10 @@ type CAResponse struct {
 	NotAfter    string `json:"not_after"`
 	// CertPEM is what operators add to a trust bundle during rotation.
 	CertPEM string `json:"cert_pem,omitempty"`
+
+	// UnsafeNetworks are the external prefixes gateways signed by this CA may
+	// route. Empty means none, and it cannot be widened without a new CA.
+	UnsafeNetworks []string `json:"unsafe_networks,omitempty"`
 
 	// ActiveCertificates is how many live certificates this CA signed. A
 	// retiring CA can be retired once this reaches zero.
@@ -1562,4 +1576,56 @@ type ReserveRequest struct {
 	// that will be racked next week needs longer than the fifteen minutes that
 	// suit an installer being run right now.
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
+}
+
+// CreateRouteRequest offers a prefix through one membership.
+//
+// The membership is in the URL, not here: a route belongs to the gateway that
+// serves it, and a body that could name a different one would be a second way
+// to say the same thing that can disagree with the first.
+type CreateRouteRequest struct {
+	// Prefix is CIDR, with no host bits set. 192.168.88.0/24, not
+	// 192.168.88.5/24 — the second is the typo that renders a route matching
+	// nothing.
+	Prefix string `json:"prefix"`
+
+	// Weight splits traffic among gateways offering the SAME prefix. Zero means
+	// 1. It does not order different prefixes: longest-prefix match does that.
+	Weight int `json:"weight,omitempty"`
+
+	// Masquerade NATs forwarded traffic, per route. 0.0.0.0/0 usually wants it;
+	// a LAN prefix usually does not, because the far side can be told a static
+	// route and the operator would rather see real source addresses.
+	Masquerade bool `json:"masquerade,omitempty"`
+
+	// Install puts the route in the consumer's system routing table. Defaults
+	// to true; a pointer so false is distinguishable from unset.
+	Install *bool `json:"install,omitempty"`
+
+	MTU int `json:"mtu,omitempty"`
+}
+
+// RouteResponse is one prefix offered by one gateway.
+type RouteResponse struct {
+	ID           string `json:"id"`
+	NetworkID    string `json:"network_id"`
+	MembershipID string `json:"membership_id"`
+
+	// MembershipName so a listing reads without a second lookup.
+	MembershipName string `json:"membership_name,omitempty"`
+
+	Prefix     string `json:"prefix"`
+	Weight     int    `json:"weight"`
+	Masquerade bool   `json:"masquerade"`
+	Install    bool   `json:"install"`
+	MTU        int    `json:"mtu,omitempty"`
+
+	// GatewayAddr is the overlay address other machines route through. Empty
+	// until the gateway has an address, which is what a half-enrolled one looks
+	// like.
+	GatewayAddr string `json:"gateway_addr,omitempty"`
+}
+
+type RouteListResponse struct {
+	Routes []RouteResponse `json:"routes"`
 }

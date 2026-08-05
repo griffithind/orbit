@@ -462,11 +462,13 @@ func (t *Tx) CreateCA(ctx context.Context, c *CA) error {
 	}
 	err := t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.ca (network_id, name, fingerprint, cert_pem,
-		                      signer_ref, curve, not_before, not_after, state)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		                      signer_ref, curve, unsafe_networks,
+		                      not_before, not_after, state)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, created_at`,
 		c.NetworkID, c.Name, c.Fingerprint, c.CertPEM,
-		c.SignerRef, c.Curve, c.NotBefore, c.NotAfter, c.State,
+		c.SignerRef, c.Curve, nonNil(c.UnsafeNetworks),
+		c.NotBefore, c.NotAfter, c.State,
 	).Scan(&c.ID, &c.CreatedAt)
 	if err != nil {
 		return mapErr(err, "create ca")
@@ -477,12 +479,13 @@ func (t *Tx) CreateCA(ctx context.Context, c *CA) error {
 }
 
 const caCols = `id, network_id, name, fingerprint, cert_pem, signer_ref,
-	curve, not_before, not_after, state, created_at`
+	curve, unsafe_networks, not_before, not_after, state, created_at`
 
 func (t *Tx) scanCA(row interface{ Scan(...any) error }) (*CA, error) {
 	var c CA
 	err := row.Scan(&c.ID, &c.NetworkID, &c.Name, &c.Fingerprint,
-		&c.CertPEM, &c.SignerRef, &c.Curve, &c.NotBefore, &c.NotAfter, &c.State, &c.CreatedAt)
+		&c.CertPEM, &c.SignerRef, &c.Curve, &c.UnsafeNetworks,
+		&c.NotBefore, &c.NotAfter, &c.State, &c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

@@ -119,6 +119,8 @@ const (
 	ActionCAForceActivated    = "ca.force_activated"
 	ActionCARetired           = "ca.retired"
 	ActionMembershipCreated   = "membership.created"
+	ActionRouteAdded          = "route.added"
+	ActionRouteRemoved        = "route.removed"
 	ActionMembershipBlocked   = "membership.blocked"
 	ActionMembershipUnblocked = "membership.unblocked"
 	ActionMembershipDeleted   = "membership.deleted"

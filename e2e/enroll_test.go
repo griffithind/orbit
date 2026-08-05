@@ -92,11 +92,31 @@ type harness struct {
 	// with it, and reading it from one place is what stops a test hardcoding a
 	// curve its network does not use.
 	curve cert.Curve
+
+	// unsafeNetworks is what this harness's CA permits gateways to route.
+	// Empty unless a test asked, because that is what a real CA is created
+	// with — the authority has to be granted deliberately.
+	unsafeNetworks []netip.Prefix
 }
 
 func setup(t *testing.T) *harness {
 	t.Helper()
 	return setupCurve(t, cert.Curve_P256)
+}
+
+// setupRoutable is setup on a network whose CA permits routing the given
+// prefixes.
+//
+// A separate constructor rather than a flag on setup, because it is the
+// unusual case and should read as one: a CA that permits external routes has
+// been granted authority no ordinary network's CA has.
+func setupRoutable(t *testing.T, prefixes ...string) *harness {
+	t.Helper()
+	var ps []netip.Prefix
+	for _, p := range prefixes {
+		ps = append(ps, netip.MustParsePrefix(p))
+	}
+	return setupWith(t, cert.Curve_P256, ps)
 }
 
 // setupCurve is setup on a network of the given curve.
@@ -106,6 +126,10 @@ func setup(t *testing.T) *harness {
 // site — the shape that let bootstrap default to P256 while every agent
 // defaulted to CURVE25519 without either noticing.
 func setupCurve(t *testing.T, curve cert.Curve) *harness {
+	return setupWith(t, curve, nil)
+}
+
+func setupWith(t *testing.T, curve cert.Curve, unsafe []netip.Prefix) *harness {
 	t.Helper()
 	ctx := context.Background()
 
@@ -131,7 +155,7 @@ func setupCurve(t *testing.T, curve cert.Curve) *harness {
 	}
 	t.Cleanup(st.Close)
 
-	h := &harness{t: t, store: st, curve: curve, membershipDevices: map[string]*device.Identity{}}
+	h := &harness{t: t, store: st, curve: curve, unsafeNetworks: unsafe, membershipDevices: map[string]*device.Identity{}}
 
 	// The vault, exactly as `orbitd bootstrap` and `orbitd serve` build it.
 	// There is no other key path: every private key this control plane holds is
@@ -168,11 +192,14 @@ func (h *harness) bootstrap(t *testing.T) {
 	signer := ca.NewMemorySigner(h.curve, caPub, caPriv)
 	now := time.Now()
 	caCert, err := ca.CreateCA(ctx, signer, ca.CAParams{
-		Name:      "e2e-ca",
-		Networks:  []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
-		Groups:    []string{"default"},
-		NotBefore: now.Add(-time.Minute),
-		NotAfter:  now.Add(90 * 24 * time.Hour),
+		Name:     "e2e-ca",
+		Networks: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
+		// Empty for every test but the route ones, which is the real default:
+		// a CA permits no external routes unless somebody said so.
+		UnsafeNetworks: h.unsafeNetworks,
+		Groups:         []string{"default"},
+		NotBefore:      now.Add(-time.Minute),
+		NotAfter:       now.Add(90 * 24 * time.Hour),
 	})
 	if err != nil {
 		t.Fatalf("create ca: %v", err)

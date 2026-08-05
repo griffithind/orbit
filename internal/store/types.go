@@ -117,10 +117,50 @@ type CA struct {
 	// key material. Today there is one scheme: db://<uuid>, the vault.
 	SignerRef string
 	Curve     string
+
+	// UnsafeNetworks are the external prefixes this CA may permit its
+	// subordinates to route. A readable copy of what was signed into the
+	// certificate — the certificate remains the authority, exactly as it is for
+	// Curve.
+	//
+	// Empty means this CA permits no routes at all, and widening it is a new CA
+	// rather than an UPDATE: the constraint is signed, and a signature cannot be
+	// edited.
+	UnsafeNetworks []string
+
 	NotBefore time.Time
 	NotAfter  time.Time
 	State     string
 	CreatedAt time.Time
+}
+
+// Route is one prefix one gateway offers, and the unit of high availability:
+// two rows for one prefix is two gateways, which nebula load-balances by weight
+// and falls between when one stops answering.
+type Route struct {
+	ID           uuid.UUID
+	NetworkID    uuid.UUID
+	MembershipID uuid.UUID
+
+	Prefix netip.Prefix
+
+	// Weight orders gateways offering the SAME prefix. It does not order
+	// different prefixes against each other — longest-prefix match does that,
+	// automatically, and a knob suggesting otherwise would do nothing.
+	Weight int
+
+	Masquerade bool
+	Install    bool
+
+	// MTU is nil for "use the tun's".
+	MTU *int
+
+	CreatedAt time.Time
+
+	// GatewayAddr is the gateway's overlay address, filled by queries that join
+	// the membership. Not stored: it is the membership's address, and copying it
+	// here would be a second place for it to be wrong.
+	GatewayAddr netip.Addr
 }
 
 type Role struct {
@@ -128,9 +168,9 @@ type Role struct {
 	NetworkID uuid.UUID
 	Name      string
 	Groups    []string
-	// FirewallRules is stored as jsonb and rendered into the managed config
-	// fragment. Nebula appends rules across config files rather than replacing
-	// them, so these coexist with whatever the operator maintains.
+	// FirewallRules is stored as jsonb and rendered into the managed
+	// configuration, which Orbit owns whole — so these are the rules, not an
+	// addition to somebody else's.
 	FirewallRules []byte
 	CreatedAt     time.Time
 }

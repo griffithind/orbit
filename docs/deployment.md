@@ -342,6 +342,57 @@ The config epoch advances, every agent stops listing the old address on its next
 poll, and the control plane picks up the new lighthouse the same way — it
 refreshes its own configuration on an epoch change like any other host.
 
+### Reaching a network that cannot run Orbit
+
+A machine in the mesh can forward for a prefix that is not in the overlay — a
+Raspberry Pi in front of a lab network, a jump box in front of a VPC.
+
+**The CA has to permit it, and that is decided once.** Nebula requires the
+gateway's certificate to carry the prefix, and a CA constrains what it will
+sign. There is no default, deliberately: a CA that quietly permitted a range
+would grant routing authority nobody asked for.
+
+```bash
+orbitd bootstrap -network prod -cidr 10.42.0.0/16 \
+    -unsafe-networks 192.168.88.0/24,10.90.0.0/16
+```
+
+**Widening it later is a new CA and a rotation**, because the constraint is
+signed and a signature cannot be edited. Rotation is a rehearsed operation
+(§6 of [design.md](design.md)) — the new bundle reaches every machine before the
+new CA signs anything — but it is a scheduled change, so it is worth listing the
+prefixes you might ever route while you are here.
+
+Then, per gateway:
+
+```bash
+orbit route add lab-pi 192.168.88.0/24
+```
+
+The route takes effect at that gateway's next renewal, because the prefix has to
+be in its certificate. A second gateway for the same prefix is the whole of high
+availability — nebula load-balances across them by weight and falls to a
+survivor when one stops answering:
+
+```bash
+orbit route add spare-pi 192.168.88.0/24 -weight 5
+```
+
+**Who may use it is ordinary policy.** A routed subnet is a destination like any
+other:
+
+```yaml
+allow:
+  - src: [role:laptop]
+    dst: [cidr:192.168.88.0/24]
+    proto: any
+```
+
+Two things the gateway still needs that Orbit does not yet do for you:
+`net.ipv4.ip_forward=1`, and a NAT rule if the far side has no route back. Exit
+nodes (`0.0.0.0/0`) are not supported yet — see
+[routes-and-exit-nodes.md](routes-and-exit-nodes.md).
+
 ### A dedicated lighthouse, provisioned unattended
 
 A lighthouse is the machine you least want to finish by hand: a fixed-address

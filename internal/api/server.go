@@ -268,6 +268,13 @@ func (s *Server) adminRoutes() []route {
 		// the stronger outcome through a different verb.
 		a("DELETE /v1/memberships/{id}", "memberships:block", s.handleDeleteHost),
 		a("POST /v1/memberships/{id}/enrollment-code", "memberships:enroll", s.handleCreateEnrollCode),
+
+		// Routes are scoped under the gateway that serves them. Writing one is
+		// memberships:write rather than a scope of its own: offering a prefix
+		// is changing what a membership IS, in the same way a topology flag is.
+		a("GET /v1/memberships/{id}/routes", "memberships:read", s.handleListRoutes),
+		a("POST /v1/memberships/{id}/routes", "memberships:write", s.handleCreateRoute),
+		a("DELETE /v1/routes/{routeId}", "memberships:write", s.handleDeleteRoute),
 		// The authorization queue.
 		//
 		// hosts:create, not hosts:write. Authorizing a pending join is what

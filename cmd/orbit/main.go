@@ -56,6 +56,8 @@ func main() {
 		err = membershipCmd(ctx, os.Args[2:])
 	case "device":
 		err = deviceCmd(ctx, os.Args[2:])
+	case "route":
+		err = routeCmd(ctx, os.Args[2:])
 	case "converge":
 		err = convergeCmd(ctx, os.Args[2:])
 	case "network":
