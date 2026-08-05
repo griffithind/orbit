@@ -1,0 +1,267 @@
+package agent
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/wire"
+)
+
+// Is the configuration on disk still the one the control plane sent?
+//
+// Nothing used to ask. The agent fetches material only when its epoch differs
+// from the control plane's, and reports back the epoch it RECEIVED — so an
+// operator who edits nebula.yml gets a machine running an unrendered config
+// while the control plane's convergence view says it converged. The edit is
+// invisible while it is live and disappears without trace when a later epoch
+// overwrites it. Both halves are wrong, and the second is worse: it means the
+// number that gates CA rotation and backs the revocation SLO is a number about
+// what was sent, not about what is running.
+//
+// This does not stop an operator with root from doing whatever they like. It
+// makes them unable to do it QUIETLY, which is the achievable half. See
+// docs/config-integrity.md §2.
+
+// ErrConfigDiverged means the installed configuration is not the one that was
+// signed. Distinct from a bad signature: the material is authentic, the copy on
+// disk has been changed since.
+var ErrConfigDiverged = errors.New("the installed configuration is not the one the control plane sent")
+
+// ErrNoSignature means this generation was installed without one.
+//
+// Expected exactly once per host — on a generation installed by a version that
+// did not sign — and not otherwise. Separate from a verification failure so the
+// two do not report as the same thing while that is still possible.
+var ErrNoSignature = errors.New("this generation was installed without a signature")
+
+// VerifyInstalled checks the configuration on disk against the signature stored
+// beside it.
+//
+// networkKey is the network identity public key the agent pinned at join. An
+// empty one is a caller that has not pinned yet, and is refused rather than
+// skipped: "verified against nothing" must not be reportable as "verified".
+//
+// Three things are checked, and the third is the one that catches an edit:
+//
+//  1. the signature over the envelope, under the pinned key
+//  2. the digests in the envelope, recomputed from the files
+//  3. localize(signed original) == the installed config, byte for byte
+//
+// The third works because localize is a pure function of the signed bytes and
+// this layout — it rewrites exactly pki.ca, pki.cert and pki.key — so
+// re-deriving it accounts for every byte of the installed file. There is no
+// part of it the check does not cover.
+func (a *Applier) VerifyInstalled(networkKey []byte, membershipID string) error {
+	if len(networkKey) == 0 {
+		return errors.New("no network key is pinned, so the installed configuration " +
+			"cannot be verified; re-run `orbit agent join`")
+	}
+
+	signed, err := os.ReadFile(a.Layout.SignedConfigPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNoSignature
+	} else if err != nil {
+		return fmt.Errorf("read the signed configuration: %w", err)
+	}
+
+	sigJSON, err := os.ReadFile(a.Layout.SigPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNoSignature
+	} else if err != nil {
+		return fmt.Errorf("read the configuration signature: %w", err)
+	}
+
+	var sig wire.ConfigSignature
+	if err := json.Unmarshal(sigJSON, &sig); err != nil {
+		return fmt.Errorf("%w: the signature file is unreadable: %v", ErrConfigDiverged, err)
+	}
+
+	bundle, err := os.ReadFile(a.Layout.Paths.CA)
+	if err != nil {
+		return fmt.Errorf("read the trust bundle: %w", err)
+	}
+
+	if err := VerifyMaterial(networkKey, membershipID, &sig, string(signed), string(bundle)); err != nil {
+		return err
+	}
+
+	installed, err := os.ReadFile(a.Layout.ConfigPath())
+	if err != nil {
+		return fmt.Errorf("read the installed configuration: %w", err)
+	}
+	if want := a.localize(string(signed)); want != string(installed) {
+		return fmt.Errorf("%w: %s has been edited since it was installed",
+			ErrConfigDiverged, a.Layout.ConfigPath())
+	}
+	return nil
+}
+
+// ErrNotForThisMachine means the envelope names a different membership.
+var ErrNotForThisMachine = errors.New("this configuration was rendered for a different machine")
+
+// VerifyMaterial checks material that has just arrived, before it is installed.
+//
+// Separate from VerifyInstalled because it runs at a different moment against
+// different inputs: this one has the bytes in memory and no disk to compare
+// against, and it is the gate that keeps unsigned or forged material from ever
+// being written.
+//
+// membershipID IS PART OF THE CHECK, not context. Binding the membership into
+// the envelope only helps if the verifier confirms the envelope names ITSELF:
+// two machines with the same role are handed byte-identical configs, so machine
+// A's envelope — genuinely signed, genuinely matching its digests — verifies
+// against that config anywhere unless someone asks who it was rendered for.
+// An e2e test found exactly that, with the binding already in place and nobody
+// reading it.
+//
+// An empty membershipID skips the comparison, for a caller that genuinely does
+// not know yet — the first claim, where the response is what tells this machine
+// its membership id. That case is safe because the material and the id come from
+// the same authenticated response.
+func VerifyMaterial(networkKey []byte, membershipID string, sig *wire.ConfigSignature, config, caBundle string) error {
+	if sig == nil {
+		return ErrNoSignature
+	}
+	if membershipID != "" && sig.MembershipID != membershipID {
+		return fmt.Errorf("%w: it names membership %s, this machine is %s",
+			ErrNotForThisMachine, sig.MembershipID, membershipID)
+	}
+	raw, err := base64.StdEncoding.DecodeString(sig.Signature)
+	if err != nil {
+		return fmt.Errorf("%w: the signature is not valid base64: %v", ca.ErrConfigSignature, err)
+	}
+	return ca.VerifyConfig(networkKey, ca.ConfigEnvelope{
+		NetworkID:      sig.NetworkID,
+		MembershipID:   sig.MembershipID,
+		ConfigEpoch:    sig.ConfigEpoch,
+		BlocklistEpoch: sig.BlocklistEpoch,
+		ConfigSHA256:   sig.ConfigSHA256,
+		CABundleSHA256: sig.CABundleSHA256,
+	}, raw, config, caBundle)
+}
+
+//------------------------------------------------------------------------------
+// The loop's side: pinning, and the gate before every apply
+//------------------------------------------------------------------------------
+
+// networkKey returns the pinned network identity public key, or nil.
+func (l *Loop) networkKey() []byte {
+	if l.State.NetworkKey == "" {
+		return nil
+	}
+	key, err := base64.StdEncoding.DecodeString(l.State.NetworkKey)
+	if err != nil {
+		// Unreadable rather than absent, so it must not silently degrade to
+		// "unpinned" — that would turn a corrupt state file into a host that
+		// accepts anything.
+		l.Log.Error("the pinned network key is unreadable; configuration signatures "+
+			"cannot be checked until `orbit agent join` is re-run", "error", err)
+		return nil
+	}
+	return key
+}
+
+// pinNetworkKey adopts a network key when this host holds none.
+//
+// ONCE, and never an update. The first pin comes from a response the agent has
+// already authenticated — at join, verifyNetwork proves the control plane holds
+// the private half of the key its network ID names — so adopting it is keeping
+// what that proof established. Accepting a LATER one would discard it.
+func (l *Loop) pinNetworkKey(b64 string) {
+	if b64 == "" {
+		return
+	}
+	if l.State.NetworkKey != "" {
+		if l.State.NetworkKey != b64 {
+			// Not fatal here: the signature check is what enforces the pin, and
+			// it will fail on its own if this response's material was signed by
+			// the other key. Loud, because the only innocent explanation is a
+			// network that rotated an identity key it is documented never to
+			// rotate.
+			l.Log.Error("the control plane presented a different network identity key; " +
+				"keeping the one pinned at join. Configuration from this control plane " +
+				"will be refused if it was signed by the new key")
+		}
+		return
+	}
+	l.State.NetworkKey = b64
+	l.Log.Info("pinned this network's identity key; configuration is now verified before it is applied")
+}
+
+// checkMaterial is the gate every apply passes through.
+//
+// Two rules, and the asymmetry between them is the rollout:
+//
+//   - A host that HAS pinned a key requires a valid signature. No exception, no
+//     flag: an agent that can be talked out of verifying has not verified.
+//   - A host that has NOT pinned one yet accepts material and says so. This is
+//     the only window, it closes at the next renewal — where the response
+//     carries the key — and it exists so upgrading the control plane does not
+//     strand every host that enrolled before signing existed.
+func (l *Loop) checkMaterial(sig *wire.ConfigSignature, config, caBundle string) error {
+	key := l.networkKey()
+	if key == nil {
+		l.Log.Warn("applying configuration without verifying it: no network key is pinned yet. " +
+			"This host will pin one at its next renewal and verify from then on")
+		return nil
+	}
+	if err := VerifyMaterial(key, l.State.MembershipID, sig, config, caBundle); err != nil {
+		if errors.Is(err, ErrNoSignature) {
+			return fmt.Errorf("refusing unsigned configuration: this host has pinned a "+
+				"network key, so material must carry a signature. The control plane is "+
+				"older than this agent (%w)", err)
+		}
+		if errors.Is(err, ErrNotForThisMachine) {
+			return fmt.Errorf("refusing configuration rendered for another machine: %w", err)
+		}
+		return fmt.Errorf("refusing configuration: %w", err)
+	}
+	return nil
+}
+
+// checkInstalled compares the configuration on disk against what was signed,
+// and self-heals when they differ.
+//
+// Resetting the known epoch is what makes the fix automatic: the control plane
+// answers a poll with material only when the agent says it is behind, so
+// declaring this host behind is the whole repair. The next poll re-installs the
+// correct generation.
+//
+// It also makes the FLEET VIEW honest immediately, before any repair lands. The
+// agent stops claiming to have applied epoch 47 the moment it discovers it is
+// not running epoch 47 — and that number is what gates CA rotation and backs the
+// revocation SLO, so a machine lying about it is worse than a machine running an
+// edit.
+//
+// Nebula is not stopped. A running tunnel is not made safer by dropping it, and
+// an agent that halts the mesh over an extra newline is an agent that gets
+// disabled — after which nothing checks anything.
+func (l *Loop) checkInstalled() {
+	if l.networkKey() == nil {
+		return // not pinned yet; the warning in checkMaterial already says so
+	}
+	err := l.Applier.VerifyInstalled(l.networkKey(), l.State.MembershipID)
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, ErrNoSignature):
+		// This generation predates signing. Expected once per host, and it
+		// resolves itself: the next generation is written with a signature.
+		l.Log.Debug("the installed generation has no signature; it will get one on the next update")
+		return
+	}
+
+	l.Log.Error("the installed configuration is not the one the control plane sent; "+
+		"re-fetching. Local edits to this file do not take effect — change it through "+
+		"the control plane", "error", err, "config", l.Layout.ConfigPath())
+
+	l.State.ConfigEpoch = 0
+	l.State.BlocklistEpoch = 0
+	if err := WriteState(l.Layout.Dir, l.State); err != nil {
+		l.Log.Error("persist agent state failed", "error", err)
+	}
+}

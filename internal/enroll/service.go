@@ -510,12 +510,44 @@ func (s *Service) State(ctx context.Context, membershipID uuid.UUID, knownConfig
 		}
 		resp.Config = string(fragment)
 		resp.CABundle = bundle
-		return nil
+		resp.ConfigSig, err = s.signMaterial(ctx, net, host.ID.String(), resp.Config, resp.CABundle)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// signMaterial produces the proof that this control plane rendered a
+// generation.
+//
+// Called wherever material is put on the wire, and the call is not optional: an
+// agent that accepts unsigned material has none of the property this exists for,
+// so a rendering path that forgot to sign would silently opt its hosts out. Both
+// producers — issueAndRender and State — go through here for that reason.
+func (s *Service) signMaterial(ctx context.Context, net *store.Network,
+	membershipID, config, bundle string) (*wire.ConfigSignature, error) {
+
+	priv, err := s.networkIdentity(ctx, net)
+	if err != nil {
+		return nil, err
+	}
+	e := ca.NewConfigEnvelope(net.NetworkID, membershipID,
+		net.ConfigEpoch, net.BlocklistEpoch, config, bundle)
+	sig, err := ca.SignConfig(priv, e)
+	if err != nil {
+		return nil, err
+	}
+	return &wire.ConfigSignature{
+		NetworkID:      e.NetworkID,
+		MembershipID:   e.MembershipID,
+		ConfigEpoch:    e.ConfigEpoch,
+		BlocklistEpoch: e.BlocklistEpoch,
+		ConfigSHA256:   e.ConfigSHA256,
+		CABundleSHA256: e.CABundleSHA256,
+		Signature:      base64.StdEncoding.EncodeToString(sig),
+	}, nil
 }
 
 // issueAndRender mints a certificate and renders the matching configuration.
@@ -610,8 +642,15 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		return nil, err
 	}
 
+	sig, err := s.signMaterial(ctx, net, host.ID.String(), string(fragment), bundle)
+	if err != nil {
+		return nil, err
+	}
+
 	return &wire.EnrollResponse{
 		MembershipID:   host.ID.String(),
+		ConfigSig:      sig,
+		NetworkKey:     base64.StdEncoding.EncodeToString(net.IdentityPublicKey),
 		MembershipName: host.Name,
 		Certificate:    string(pem),
 		CABundle:       bundle,

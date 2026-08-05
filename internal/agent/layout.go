@@ -160,6 +160,22 @@ const (
 	CertName = "host.crt"
 	KeyName  = "host.key"
 
+	// SignedConfigName is the config EXACTLY as the control plane sent it, and
+	// SigName is the envelope and signature over it.
+	//
+	// Two extra files rather than a signature over the installed config,
+	// because the agent rewrites what it installs: localize substitutes
+	// pki.ca, pki.cert and pki.key, since the control plane renders canonical
+	// paths and cannot know where this host keeps its files — or whether its
+	// key is a file at all. The bytes on disk are therefore not the bytes that
+	// were signed.
+	//
+	// Keeping the original makes the installed file a deterministic function of
+	// it: verify the signature over the original, re-run localize, and compare.
+	// That is what turns an operator's edit from invisible into detected.
+	SignedConfigName = "nebula.signed.yml"
+	SigName          = "nebula.sig.json"
+
 	// StateFileName holds the agent's own state: control plane URL, epochs,
 	// guard state. Not part of a generation and never backed up — it describes
 	// the agent, not the configuration.
@@ -270,8 +286,21 @@ func (l Layout) generation() []struct{ Name, Path string } {
 		{CertName, l.Paths.Cert},
 		{KeyName, l.Paths.Key},
 		{l.ConfigName(), l.ConfigPath()},
+		{SignedConfigName, l.SignedConfigPath()},
+		{SigName, l.SigPath()},
 	}
 }
+
+// SignedConfigPath is the untouched config the control plane signed.
+//
+// Beside the state file rather than beside the installed config, because in
+// fragment mode the installed config lives in config.d/ next to an operator's
+// own files, and a directory nebula merges is the wrong place to put something
+// nebula must not read.
+func (l Layout) SignedConfigPath() string { return filepath.Join(l.Dir, SignedConfigName) }
+
+// SigPath is the envelope and signature over SignedConfigPath.
+func (l Layout) SigPath() string { return filepath.Join(l.Dir, SigName) }
 
 func (l Layout) targets() map[string]string {
 	out := map[string]string{}

@@ -20,6 +20,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -129,6 +130,15 @@ type Material struct {
 	// changed does not get one — nebula would refuse it, and the host would keep
 	// running the old certificate until it expired.
 	RequiresRestart bool
+
+	// ConfigSig is the control plane's proof that it produced Config and
+	// CABundle. Persisted beside the installed files, with Config as it arrived,
+	// so a later start can tell whether what is on disk is still what was sent.
+	//
+	// Nil only on the paths that do not go through the control plane at all —
+	// the control plane rendering its own material in-process, where there is no
+	// transport and no disk to diverge from.
+	ConfigSig *wire.ConfigSignature
 }
 
 // Apply installs a generation.
@@ -157,6 +167,12 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 	if err := a.ensureDirs(); err != nil {
 		return err
 	}
+
+	// Captured BEFORE localize, because this is what was signed. The rewrite
+	// below is the agent's own, so the bytes that reach disk as nebula.yml are
+	// not the bytes the control plane put its name to — and keeping the original
+	// is what makes the installed file checkable later.
+	signedConfig := m.Config
 
 	// The control plane renders canonical paths because it cannot know where
 	// this host keeps its files. The agent does, so it rewrites them. This is
@@ -196,6 +212,23 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 	}
 	if err := stage(a.Layout.ConfigName(), m.Config, 0o644); err != nil {
 		return err
+	}
+
+	// The signed original and its proof are part of the generation, so they are
+	// staged, backed up and rolled back with everything else. A revert that
+	// restored the config but left the previous signature behind would leave
+	// every later check failing against a generation that is running correctly.
+	if m.ConfigSig != nil {
+		sigJSON, err := json.Marshal(m.ConfigSig)
+		if err != nil {
+			return fmt.Errorf("encode config signature: %w", err)
+		}
+		if err := stage(SignedConfigName, signedConfig, 0o644); err != nil {
+			return err
+		}
+		if err := stage(SigName, string(sigJSON), 0o644); err != nil {
+			return err
+		}
 	}
 
 	// Validate against the staged material, not the live material. The rendered
@@ -768,5 +801,6 @@ func MaterialFromEnroll(resp *wire.EnrollResponse, privateKeyPEM string) Materia
 		CABundle:    resp.CABundle,
 		Certificate: resp.Certificate,
 		PrivateKey:  privateKeyPEM,
+		ConfigSig:   resp.ConfigSig,
 	}
 }

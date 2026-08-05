@@ -52,6 +52,19 @@ type State struct {
 	ConfigEpoch    int64  `json:"config_epoch"`
 	BlocklistEpoch int64  `json:"blocklist_epoch"`
 
+	// NetworkKey is the network's identity public key, base64 — the anchor
+	// every configuration signature is checked against.
+	//
+	// WRITE-ONCE. Adopted from an enrollment or renewal response when this host
+	// holds none, and never replaced afterwards. A key a response can overwrite
+	// is not a trust anchor: a control plane that could hand out a new one could
+	// hand out its own, and the signature check would pass on anything it sent.
+	//
+	// The value is already established out of band at join, where verifyNetwork
+	// checks it hashes to the network ID and that the proof verifies under it
+	// before anything else is acted on. This just keeps what that step proved.
+	NetworkKey string `json:"network_key,omitempty"`
+
 	// KeyRef says where this host's private key lives FOR THIS NETWORK. Empty
 	// means the key file in the layout directory; a "pkcs11:" URI means a
 	// token, and no key file exists.
@@ -784,10 +797,18 @@ func (l *Loop) doRenew(ctx context.Context) error {
 		return err
 	}
 
+	// The renewal response is where a host that has never pinned a network key
+	// gets one, so this runs before the gate below rather than after it.
+	l.pinNetworkKey(resp.NetworkKey)
+	if err := l.checkMaterial(resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
+		return err
+	}
+
 	material := Material{
 		Config:      resp.Config,
 		CABundle:    resp.CABundle,
 		Certificate: resp.Certificate,
+		ConfigSig:   resp.ConfigSig,
 	}
 	// Empty for a token key by construction — KeypairFromToken has no private
 	// half to return — and Applier stages nothing for empty content, so a token
@@ -870,11 +891,16 @@ func (l *Loop) poll(ctx context.Context) error {
 	l.Log.Info("applying configuration update",
 		"configEpoch", resp.ConfigEpoch, "blocklistEpoch", resp.BlocklistEpoch)
 
+	if err := l.checkMaterial(resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
+		return err
+	}
+
 	if err := l.Applier.Apply(ctx, Material{
 		Config:          resp.Config,
 		CABundle:        resp.CABundle,
 		Certificate:     resp.Certificate,
 		RequiresRestart: l.restartRequired(resp),
+		ConfigSig:       resp.ConfigSig,
 	}); err != nil {
 		if undeliverable(err) {
 			l.quarantineEpoch(resp.ConfigEpoch, err)
@@ -1055,6 +1081,12 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 		l.checkGuard(ctx)
 		l.checkDataPlane(ctx)
 
+		// Every cycle, including the first. The first matters most: the machine
+		// may have been edited while the agent was stopped, which is exactly
+		// when someone would do it. It is a hash comparison against files
+		// already on this disk, so the steady-state cost is nothing.
+		l.checkInstalled()
+
 		if err := l.maybeRenew(ctx); err != nil {
 			l.Log.Warn("renewal failed", "error", err)
 		}
@@ -1149,11 +1181,16 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 	l.Log.Info("applying pushed update",
 		"configEpoch", resp.ConfigEpoch, "blocklistEpoch", resp.BlocklistEpoch)
 
+	if err := l.checkMaterial(resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
+		return watchIdle, err
+	}
+
 	if err := l.Applier.Apply(ctx, Material{
 		Config:          resp.Config,
 		CABundle:        resp.CABundle,
 		Certificate:     resp.Certificate,
 		RequiresRestart: l.restartRequired(resp),
+		ConfigSig:       resp.ConfigSig,
 	}); err != nil {
 		if undeliverable(err) {
 			// Quarantined, so the next watch is refused rather than retried —

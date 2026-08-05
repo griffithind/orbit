@@ -292,6 +292,12 @@ func enrollCmd(args []string) error {
 			"keep using the public URL and has no replica to fail over to")
 	}
 
+	// The network key comes from the enrollment response here rather than from a
+	// join proof: a machine that enrolled with a code never called
+	// /enroll/v1/join and has never seen one. That is trust on first use —
+	// weaker than a key checked against a network ID given out of band, and
+	// still enough to make every LATER generation verifiable, which is what this
+	// is for. Hosts that join by network ID get the stronger form.
 	if err := agent.WriteState(*dir, agent.State{
 		BaseURL:        *url,
 		AgentURLs:      resp.AgentEndpoints,
@@ -299,6 +305,7 @@ func enrollCmd(args []string) error {
 		BlocklistEpoch: resp.BlocklistEpoch,
 		MembershipID:   resp.MembershipID,
 		KeyRef:         *keyRef,
+		NetworkKey:     resp.NetworkKey,
 	}); err != nil {
 		return err
 	}

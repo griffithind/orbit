@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -127,7 +128,12 @@ func joinCmd(args []string) error {
 	fmt.Printf("\nwaiting for an operator to authorize (up to %s). Meanwhile, they run:\n"+
 		"  orbit host authorize %s\n\n", *wait, joined.MembershipID)
 
-	return awaitAuthorization(ctx, client, id, joined.MembershipID, dir, c, *keyRef, *wait, *poll, log)
+	// joined.NetworkKey is the key verifyNetwork just proved the control plane
+	// holds. Carried through so it is PINNED rather than re-learned later: what
+	// makes it a trust anchor is that it was established here, at the one moment
+	// this machine checked it against a network ID given out of band.
+	return awaitAuthorization(ctx, client, id, joined.MembershipID, joined.NetworkKey,
+		dir, c, *keyRef, *wait, *poll, log)
 }
 
 // awaitAuthorization polls the claim endpoint until the membership is approved,
@@ -138,7 +144,8 @@ func joinCmd(args []string) error {
 // — an agent that gave up on the first 409 would need approval to land inside
 // one polling interval of the join.
 func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Identity,
-	membershipID, dir string, c cert.Curve, keyRef string, wait, poll time.Duration, log *slog.Logger) error {
+	membershipID, networkKey, dir string, c cert.Curve, keyRef string,
+	wait, poll time.Duration, log *slog.Logger) error {
 
 	// One mesh keypair for the whole wait, re-signed on each attempt.
 	//
@@ -180,6 +187,19 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 				KeyRef:            keyRef,
 				Log:               log,
 			}
+
+			// Verified before the first byte is written, against the key this
+			// machine proved at join. The very first generation is the one worth
+			// checking hardest: everything after it is delivered to a host that
+			// already trusts this control plane, and this one is not.
+			key, err := base64.StdEncoding.DecodeString(networkKey)
+			if err != nil {
+				return fmt.Errorf("the control plane sent an unreadable network key: %w", err)
+			}
+			if err := agent.VerifyMaterial(key, resp.MembershipID, resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
+				return fmt.Errorf("refusing the first configuration: %w", err)
+			}
+
 			if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 				return err
 			}
@@ -190,6 +210,7 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 				BlocklistEpoch: resp.BlocklistEpoch,
 				MembershipID:   resp.MembershipID,
 				KeyRef:         keyRef,
+				NetworkKey:     networkKey,
 			}); err != nil {
 				return err
 			}

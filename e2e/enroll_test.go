@@ -516,6 +516,10 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 		MembershipID:   resp.MembershipID,
 		ConfigEpoch:    resp.ConfigEpoch,
 		BlocklistEpoch: resp.BlocklistEpoch,
+		// Pinned exactly as `orbit agent enroll` pins it. Without this the
+		// harness would build hosts that can never verify a generation, and
+		// every test here would be exercising the unpinned path.
+		NetworkKey: resp.NetworkKey,
 	}); err != nil {
 		t.Fatalf("write agent state: %v", err)
 	}

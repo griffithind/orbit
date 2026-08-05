@@ -73,6 +73,18 @@ type EnrollResponse struct {
 	// layout once and then keep both.
 	ConfigMode  string `json:"config_mode,omitempty"`
 	NetworkSlug string `json:"network_slug,omitempty"`
+
+	// ConfigSig proves the control plane produced Config and CABundle.
+	ConfigSig *ConfigSignature `json:"config_sig,omitempty"`
+
+	// NetworkKey is the network's identity public key, base64. The agent PINS
+	// this at join and verifies every later generation against it.
+	//
+	// Also sent here, on the enrollment path, because a machine that enrolled
+	// with a code never went through /enroll/v1/join and so has never seen it.
+	// The agent takes it only when it holds none — a key a response can replace
+	// is not a trust anchor, it is a suggestion.
+	NetworkKey string `json:"network_key,omitempty"`
 }
 
 // StateResponse is what the agent polls for.
@@ -85,6 +97,9 @@ type StateResponse struct {
 	Config      string `json:"config,omitempty"`
 	CABundle    string `json:"ca_bundle,omitempty"`
 	Certificate string `json:"certificate,omitempty"`
+
+	// ConfigSig accompanies Config, and is absent exactly when Config is.
+	ConfigSig *ConfigSignature `json:"config_sig,omitempty"`
 
 	// RenewAfter is the control plane's view of when this host should renew, and
 	// NotAfter when its certificate dies.
@@ -1509,6 +1524,36 @@ type BlockDeviceRequest struct {
 // created host was a row that named no machine; a reservation is intent recorded
 // on a credential, redeemed into a membership that names its machine from the
 // moment it exists.
+// ConfigSignature carries the proof that the control plane produced this
+// generation.
+//
+// Present on every response that carries Config. An agent verifies it against
+// the network public key it pinned at join, BEFORE installing anything, so
+// material no longer has to arrive over a trusted transport to be trustworthy —
+// which is what lets the agent channel eventually leave the overlay.
+//
+// See docs/config-integrity.md and internal/ca/configsig.go.
+type ConfigSignature struct {
+	// NetworkID, MembershipID and the epochs are the envelope's bound fields.
+	// They are repeated here rather than inferred from the surrounding response
+	// because the SIGNATURE is over these, and a verifier that rebuilt the
+	// envelope from neighbouring fields would be checking a different message
+	// than the one that was signed.
+	NetworkID      string `json:"network_id"`
+	MembershipID   string `json:"membership_id"`
+	ConfigEpoch    int64  `json:"config_epoch"`
+	BlocklistEpoch int64  `json:"blocklist_epoch"`
+
+	// Lowercase hex digests of the config and the trust bundle, recomputed by
+	// the verifier rather than taken on trust.
+	ConfigSHA256   string `json:"config_sha256"`
+	CABundleSHA256 string `json:"ca_bundle_sha256"`
+
+	// Signature is base64 standard encoding of the Ed25519 signature over the
+	// canonical envelope.
+	Signature string `json:"signature"`
+}
+
 type ReserveRequest struct {
 	// Name the membership will take. The reservation decides it, not the
 	// joining machine — a machine must not be able to take a reserved place
