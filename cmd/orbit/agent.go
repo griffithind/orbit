@@ -196,8 +196,8 @@ func newLogger() *slog.Logger {
 func enrollCmd(args []string) error {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	var (
-		url   = fs.String("url", "", "control plane base URL")
-		code  = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
+		url  = fs.String("url", "", "control plane base URL")
+		code = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
 
 		// A token URI rather than a boolean, because which object on which
 		// token is not something the agent can guess, and getting it wrong must
@@ -917,6 +917,16 @@ func installCmd(args []string) error {
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		dryRun    = fs.Bool("dry-run", false, "print what would be written and installed, and change nothing")
 		noStart   = fs.Bool("no-start", false, "write the service definition but do not enable or start it")
+
+		// The MACHINE's identity key, not a network's mesh key — different keys
+		// with different jobs, and -key on `join` is the other one. Decided here
+		// because install is the per-machine step, and recorded so that no later
+		// join has to repeat it.
+		deviceKey = fs.String("device-key", "",
+			"PKCS#11 URI of a token-resident DEVICE identity key, e.g. "+
+				"pkcs11:token=orbit;object=device-key. Empty generates one on this host. "+
+				"Works on a TPM, unlike the mesh key - see docs/credential-model.md 7. "+
+				"Requires a binary built with -tags pkcs11")
 	)
 	_ = fs.Parse(args)
 
@@ -937,8 +947,16 @@ func installCmd(args []string) error {
 	}
 
 	if *dryRun {
-		fmt.Fprintf(errOut, "would write the device key under %s\nwould write %s (%s)\nwould run: %s\n\n",
-			*root, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
+		// What happens to the device key depends on where it lives, and saying
+		// "would write the device key" about a token-backed one is the exact
+		// opposite of the truth — the whole point is that nothing is written.
+		keyLine := fmt.Sprintf("would write the device key under %s", *root)
+		if *deviceKey != "" {
+			keyLine = fmt.Sprintf("would use the token-resident device key %s\n"+
+				"  no private key would be written to disk", *deviceKey)
+		}
+		fmt.Fprintf(errOut, "%s\nwould write %s (%s)\nwould run: %s\n\n",
+			keyLine, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
 		fmt.Fprintln(out, plan.Contents)
 		return nil
 	}
@@ -948,9 +966,27 @@ func installCmd(args []string) error {
 	// never expiring, and the same key for every network it will ever join. An
 	// operator can read the fingerprint off this output and recognise the
 	// machine in the authorization queue before it has joined anything.
-	id, err := device.LoadOrCreate(agent.DeviceKeyPath(*root))
+	// A token URI is VERIFIED before it is recorded. Writing the pointer first
+	// and finding at the next join that the object does not exist would leave a
+	// machine that cannot join anything, with the operator long gone.
+	ref := agent.DeviceKeyRef(*root)
+	if *deviceKey != "" {
+		if !device.IsTokenRef(*deviceKey) {
+			return usageErrorf("-device-key must be a pkcs11: URI, got %q", *deviceKey)
+		}
+		ref = *deviceKey
+	}
+	id, err := device.Open(ref)
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
+	}
+	if *deviceKey != "" {
+		if err := agent.WriteDeviceKeyRef(*root, *deviceKey); err != nil {
+			return fmt.Errorf("record the device key reference: %w", err)
+		}
+		if agent.URIHasInlinePIN(*deviceKey) {
+			fmt.Fprintf(errOut, "\nWARNING: %s\n\n", agent.RecommendPinSource)
+		}
 	}
 
 	if err := plan.Write(); err != nil {

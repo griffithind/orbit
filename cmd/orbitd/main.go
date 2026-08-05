@@ -438,7 +438,11 @@ func serve(args []string) error {
 	var selfDevice *device.Identity
 	if len(meshes) > 0 {
 		var err error
-		selfDevice, err = device.LoadOrCreate(*deviceKeyPath)
+		// device.Open, so -device-key takes a pkcs11: URI as well as a path. The
+		// control plane is a machine on its own network and holds a device key
+		// like any other; no reason its identity should be less protectable
+		// than a laptop's.
+		selfDevice, err = device.Open(*deviceKeyPath)
 		if err != nil {
 			return fmt.Errorf("control plane device key: %w", err)
 		}

@@ -84,7 +84,10 @@ func joinCmd(args []string) error {
 	// The device key, generated on first use and never again. Everything after
 	// this point is the same key no matter which network is being joined or
 	// which control plane is being talked to.
-	id, err := device.LoadOrCreate(agent.DeviceKeyPath(*root))
+	// Whatever `orbit agent install` recorded: a token URI, or the key file.
+	// Join takes no -device-key of its own — one machine has one identity, and
+	// a flag here would let two networks disagree about what it is.
+	id, err := device.Open(agent.DeviceKeyRef(*root))
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
 	}
@@ -95,7 +98,10 @@ func joinCmd(args []string) error {
 	// the two are different keys with different jobs — nebula needs CKA_DERIVE,
 	// an identity needs CKA_SIGN, and one object cannot be both.
 	client := agent.NewClient(*url)
-	joined, err := client.JoinWithCode(ctx, id, *network, *name, hostname, "", *code, time.Now())
+	// id.Backing(), not "". The control plane records where this machine says
+	// its identity key lives, and it was previously always told "file" —
+	// including by a machine whose key was on a token, because nothing asked.
+	joined, err := client.JoinWithCode(ctx, id, *network, *name, hostname, id.Backing(), *code, time.Now())
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {

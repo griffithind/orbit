@@ -201,6 +201,45 @@ A **PKCS#11 token that does implement `CKM_ECDH1_DERIVE`** — a YubiKey via
 `ykcs11`, a SoftHSM token, an HSM — still works, and that is what the
 `-tags pkcs11` build is for. It is the TPM specifically that is blocked.
 
+### The DEVICE key, which a TPM can hold
+
+The mesh key is blocked. **The device identity key is not**, and the difference
+is the operation rather than the hardware: a device key only ever **signs**.
+`tpm2-pkcs11` implements `CKM_ECDSA_SHA256` and advertises it on an `ecc256`
+key; it is only the derive mechanism that is missing.
+
+Tested, against the same software TPM: a device identity opened from a
+TPM-resident key signed a join statement, and the signature verified through
+`device.Verify` against the SPKI derived from the token's own EC point.
+
+```bash
+orbit agent install -device-key 'pkcs11:token=orbit;object=device-key'
+```
+
+records the URI in `device-key.ref` and writes **no private key file** — the
+private half is created on the token by `tpm2_ptool` and never leaves it.
+`orbit agent join` then uses whatever install recorded, on every network, so the
+choice is made once per machine.
+
+This is the more valuable half. The device key is what Orbit's identity model
+rests on: joining is a signature over it, no secret travels, and a machine whose
+certificate expired still gets back in because that key never expires. A stolen
+disk image is no longer a stolen identity.
+
+**Two limits, both real.**
+
+*It is claimed, not attested.* `KeyBacking` is what the agent reports about
+itself. A machine whose agent has been replaced can report `token` while using a
+file. Proving TPM residency needs the TPM to certify the key — `TPM2_Certify`
+under an attestation key whose own certificate chains to the manufacturer — and
+that is a different feature. Treat the field as inventory, not evidence.
+
+*A PIN in the URI is a secret on the disk.* `pin-value=` in `device-key.ref`
+means anyone who can read that file can ask the chip to use the key, which is
+most of what moving the key into a chip was for. Orbit writes the file `0600`
+when it sees one and warns; `pin-source=` naming a `0600` file, or no PIN at all
+with the module prompting, is better.
+
 **No Nebula fork is required.** `pki.go` dispatches on the `pkcs11:` string
 prefix, so any conforming PKCS#11 module plugs in unmodified. The cost is the
 `cgo` and `pkcs11` build tags, which means hosts wanting hardware keys lose the

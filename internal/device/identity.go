@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // The curve is P-256, and this is not a preference.
@@ -54,12 +55,69 @@ var ErrNoKey = errors.New("no device key")
 // Identity is a device's keypair. The private half never leaves the machine and
 // has no wire representation anywhere in this codebase.
 type Identity struct {
-	key *ecdsa.PrivateKey
+	// signer is the private half, wherever it lives: in this process's memory,
+	// or on a token that will not surrender it.
+	signer signer
 
 	// spki is the marshalled public key, computed once. It is what gets sent,
 	// stored, and fingerprinted, and recomputing it per use would be three
 	// chances for one of them to marshal differently.
 	spki []byte
+
+	// backing is BackingFile or BackingToken — what this identity actually is,
+	// not what somebody configured. It is reported to the control plane.
+	backing string
+}
+
+// Where a device's private key lives. The same strings store.DeviceKeyBacking
+// uses; they cannot be shared as constants because this package must not import
+// the store (see Fingerprint's comment).
+const (
+	BackingFile  = "file"
+	BackingToken = "token"
+)
+
+// signer is the private half of a device identity.
+//
+// It signs a MESSAGE, not a digest, and that is the whole reason this is not
+// crypto.Signer. A PKCS#11 token signs with CKM_ECDSA_SHA256 — it hashes on the
+// chip — so handing it a digest would hash twice and produce a signature over
+// the wrong thing. The mismatch would verify nowhere and be invisible in a code
+// review, because both halves would look correct.
+type signer interface {
+	signMessage(msg []byte) ([]byte, error)
+}
+
+// fileSigner holds the key in this process's memory.
+type fileSigner struct{ key *ecdsa.PrivateKey }
+
+func (f fileSigner) signMessage(msg []byte) ([]byte, error) {
+	sum := sha256.Sum256(msg)
+	return f.key.Sign(rand.Reader, sum[:], crypto.SHA256)
+}
+
+// TokenRefPrefix marks a key reference as a PKCS#11 URI rather than a path.
+const TokenRefPrefix = "pkcs11:"
+
+// IsTokenRef reports whether ref names a token object rather than a file.
+func IsTokenRef(ref string) bool { return strings.HasPrefix(ref, TokenRefPrefix) }
+
+// Open resolves a device key reference: a file path, or a pkcs11: URI.
+//
+// The file form CREATES one if it is missing, because a machine's first start
+// has to produce an identity from nothing. The token form NEVER creates: the
+// key is made on the token by that token's own tooling — tpm2_ptool, ykman —
+// with policies and PINs Orbit has no business inventing, and silently
+// generating one would put a key somewhere the operator did not choose.
+func Open(ref string) (*Identity, error) {
+	if IsTokenRef(ref) {
+		sgn, spki, err := openToken(ref)
+		if err != nil {
+			return nil, err
+		}
+		return &Identity{signer: sgn, spki: spki, backing: BackingToken}, nil
+	}
+	return LoadOrCreate(ref)
 }
 
 // Generate creates a new device identity.
@@ -76,7 +134,7 @@ func fromKey(k *ecdsa.PrivateKey) (*Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal device public key: %w", err)
 	}
-	return &Identity{key: k, spki: spki}, nil
+	return &Identity{signer: fileSigner{key: k}, spki: spki, backing: BackingFile}, nil
 }
 
 // PublicKey returns the DER SubjectPublicKeyInfo.
@@ -112,9 +170,18 @@ func Fingerprint(publicKey []byte) string {
 // agree on, so the token-backed implementation can slot in behind this without
 // changing what a verifier accepts.
 func (i *Identity) Sign(msg []byte) ([]byte, error) {
-	sum := sha256.Sum256(msg)
-	return i.key.Sign(rand.Reader, sum[:], crypto.SHA256)
+	return i.signer.signMessage(msg)
 }
+
+// Backing reports where the private half actually lives.
+//
+// CLAIMED, NOT ATTESTED, and the distinction matters enough to state at the
+// source. This is what the agent observed about itself and reports; a machine
+// whose agent has been replaced can report anything. Proving a key is really
+// TPM-resident needs the TPM to certify it — TPM2_Certify under an attestation
+// key whose own certificate chains to the manufacturer — which is a different
+// feature and not this one. Treat this as inventory, not as evidence.
+func (i *Identity) Backing() string { return i.backing }
 
 // Verify checks a device signature against a marshalled public key.
 //
@@ -215,7 +282,14 @@ func LoadOrCreate(path string) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	der, err := x509.MarshalECPrivateKey(id.key)
+	// Only a file-backed identity can be written out, and Generate always
+	// produces one. A token key is created on the token by its own tooling and
+	// never passes through here.
+	fs, ok := id.signer.(fileSigner)
+	if !ok {
+		return nil, fmt.Errorf("refusing to write a device key that is not in memory")
+	}
+	der, err := x509.MarshalECPrivateKey(fs.key)
 	if err != nil {
 		return nil, fmt.Errorf("marshal device key: %w", err)
 	}
