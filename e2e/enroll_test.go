@@ -438,17 +438,80 @@ func (h *harness) reqAs(t *testing.T, token, method, url string, body, out any) 
 	return resp.StatusCode
 }
 
-// freeUDPPort asks the kernel for an unused port. There is a small race between
-// releasing it and nebula binding it, which is acceptable in a test and much
-// better than hardcoding ports that collide with whatever else is running.
+// freeUDPPort returns a UDP port nothing else in this run will use.
+//
+// It hands out ports from a private range and NEVER REPEATS ONE within a run,
+// which is the part that matters. Asking the kernel for :0 does not do that: the
+// probe socket is closed before this function returns, so the very next call can
+// legitimately be handed the same port back — and a single test boots several
+// nebulas. That is the collision, and it is not rare, it is just quiet: whichever
+// nebula binds second fails with "address already in use" on a port the test was
+// told was free.
+//
+// Three things make a candidate safe, and all three are needed:
+//
+//   - handedOut, so this process never issues a port twice. The dedup, not the
+//     probe, is what fixes the common case.
+//   - a range BELOW the ephemeral range (Linux 32768-60999, macOS 49152-65535),
+//     so the kernel will not hand the same port to some unrelated outbound
+//     connection between this probe and nebula's bind. The failing port in the
+//     original report, 49213, was squarely inside macOS's ephemeral range.
+//   - a PID-derived starting offset, so `go test ./...` running several package
+//     binaries at once does not have them all walking the range from the same
+//     place.
+//
+// The probe binds the DUAL-STACK wildcard, matching what nebula does (the
+// rendered config sets listen.host to "::"). The old probe bound 127.0.0.1,
+// which cannot see a conflict on any other address — so it could call a port
+// free that nebula then failed to bind.
+//
+// A residual window remains between the probe closing and nebula binding, and it
+// cannot be removed: nebula has to bind the port itself, so the probe must let
+// go first. Holding the socket open until the caller "released" it would buy
+// nothing the dedup does not already buy. What is left is a port outside the
+// range the kernel allocates from, that no other test in this run will pick.
+const (
+	portLo = 20000
+	portHi = 32000
+)
+
+var (
+	portMu    sync.Mutex
+	handedOut = map[int]bool{}
+	nextPort  int
+)
+
 func freeUDPPort(t *testing.T) int {
 	t.Helper()
-	c, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	portMu.Lock()
+	defer portMu.Unlock()
+
+	if nextPort == 0 {
+		// Deterministic rather than random, so a failing run can be reproduced
+		// from its pid, and spread so concurrent package binaries do not
+		// contend for the same first candidates.
+		nextPort = portLo + (os.Getpid()*64)%(portHi-portLo)
 	}
-	defer c.Close()
-	return c.LocalAddr().(*net.UDPAddr).Port
+
+	for range portHi - portLo {
+		p := nextPort
+		nextPort++
+		if nextPort >= portHi {
+			nextPort = portLo
+		}
+		if handedOut[p] {
+			continue
+		}
+		c, err := net.ListenPacket("udp", fmt.Sprintf(":%d", p))
+		if err != nil {
+			continue // in use by something outside this process
+		}
+		c.Close()
+		handedOut[p] = true
+		return p
+	}
+	t.Fatalf("no free UDP port in %d-%d after trying every one", portLo, portHi)
+	return 0
 }
 
 // enrolledHost is a host that has been created, enrolled, and had its
