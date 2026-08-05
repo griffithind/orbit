@@ -155,3 +155,14 @@ func (f AuditFilter) values() url.Values {
 func (c *Client) ListAudit(ctx context.Context, f AuditFilter) (Result[[]wire.AuditRecordResponse], error) {
 	return get[[]wire.AuditRecordResponse](ctx, c, "/v1/audit-logs", f.values())
 }
+
+// CreateCA mints a new certificate authority for a network.
+//
+// The CA is created but NOT signing: it has to be distributed to every host before
+// anything is signed by it, which is what `orbit ca activate` does once they have it.
+// That two-step is the whole of rotation, and it is why this returns a CA nobody is using
+// yet rather than one that has already taken over.
+func (c *Client) CreateCA(ctx context.Context, networkID uuid.UUID, req wire.CreateCARequest) (Result[wire.CAResponse], error) {
+	q := url.Values{"network_id": {networkID.String()}}
+	return send[wire.CAResponse](ctx, c, http.MethodPost, "/v1/cas", q, req)
+}

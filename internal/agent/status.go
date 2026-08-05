@@ -20,6 +20,8 @@ import (
 
 	"github.com/slackhq/nebula"
 	"github.com/slackhq/nebula/cert"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // The agent's local status socket.
@@ -94,6 +96,11 @@ type NetworkStatus struct {
 	DataPlaneDownSince time.Time `json:"data_plane_down_since,omitempty"`
 	UnconfirmedSince   time.Time `json:"unconfirmed_since,omitempty"`
 	QuarantinedEpoch   int64     `json:"quarantined_config_epoch,omitempty"`
+
+	// Host is what the control plane told this machine to do to itself:
+	// routes, forwarding, NAT and DNS. Nil when it was told nothing, so an
+	// ordinary member's status is what it always was.
+	Host *HostStatus `json:"host,omitempty"`
 }
 
 // NebulaStatus is the embedded data plane.
@@ -492,4 +499,79 @@ func fetch(ctx context.Context, path, route string, into any) error {
 		return fmt.Errorf("parse agent response: %w", err)
 	}
 	return nil
+}
+
+// HostStatus is what this machine was told to do to itself, and to resolve with.
+//
+// READ FROM THE SAME VERIFIED CONFIGURATION the reconcilers act on, not from the kernel
+// and not from a cache. Status that reads the machine would answer "what is true", which
+// sounds better but is the wrong question here: an operator looking at `orbit status`
+// after adding a route needs to know whether the instruction ARRIVED. If it arrived and
+// did not take, the reconcile error says so on the next line, and the two together name
+// the failure. A status that only inspected the kernel could not tell "the control plane
+// never sent it" from "it was sent and failed".
+type HostStatus struct {
+	// Routes are the external prefixes this host reaches through the mesh.
+	Routes []string `json:"routes,omitempty"`
+
+	// ExitNode is true when one of those is a default route.
+	ExitNode bool `json:"exit_node,omitempty"`
+
+	// Forwarding and Masquerade are the gateway side: what this host carries
+	// for others.
+	Forwarding bool     `json:"forwarding,omitempty"`
+	Masquerade []string `json:"masquerade,omitempty"`
+
+	// Resolver, Domain and Names describe the DNS this host serves itself.
+	Resolver string `json:"resolver,omitempty"`
+	Domain   string `json:"dns_domain,omitempty"`
+	Names    int    `json:"dns_names,omitempty"`
+}
+
+// Empty reports whether this host was told nothing beyond plain membership, so status can
+// leave the whole section out rather than print a row of zeroes.
+func (h HostStatus) Empty() bool {
+	return len(h.Routes) == 0 && !h.Forwarding && len(h.Masquerade) == 0 && h.Resolver == ""
+}
+
+// HostStatusFromConfig reads all of it out of one verified configuration.
+func HostStatusFromConfig(yamlCfg string) (HostStatus, error) {
+	var out HostStatus
+
+	hs, err := HostStateFromConfig(yamlCfg)
+	if err != nil {
+		return out, err
+	}
+	out.Forwarding = hs.Forward
+	out.ExitNode = hs.ExitNode
+	for _, p := range hs.Masquerade {
+		out.Masquerade = append(out.Masquerade, p.String())
+	}
+
+	if d, err := DNSStateFromConfig(yamlCfg); err == nil && !d.Empty() {
+		out.Resolver = d.Listen.String()
+		out.Domain = d.Domain
+		// Halved: every machine is stored under both its bare and its qualified
+		// name, and reporting the map size would tell an operator there are
+		// twice as many hosts as they have.
+		out.Names = len(d.Hosts) / 2
+		if d.Domain == "" {
+			out.Names = len(d.Hosts)
+		}
+	}
+
+	var doc struct {
+		Tun struct {
+			UnsafeRoutes []struct {
+				Route string `yaml:"route"`
+			} `yaml:"unsafe_routes"`
+		} `yaml:"tun"`
+	}
+	if err := yaml.Unmarshal([]byte(yamlCfg), &doc); err != nil {
+		return out, fmt.Errorf("read routes from the configuration: %w", err)
+	}
+	for _, r := range doc.Tun.UnsafeRoutes {
+		out.Routes = append(out.Routes, r.Route)
+	}
+	return out, nil
 }

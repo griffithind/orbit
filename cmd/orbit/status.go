@@ -127,6 +127,33 @@ func printNetwork(r renderer, n agent.NetworkStatus) {
 	}
 	field("last poll", poll)
 
+	// What the control plane told this machine to do to itself. Printed only
+	// when it was told something, so an ordinary member's status is unchanged.
+	//
+	// These are the instructions most likely to be believed and not true: a
+	// route the certificate does not permit, a gateway that is not forwarding, a
+	// resolver nothing points at. Showing what ARRIVED, beside the reconcile
+	// errors above, is what separates "never sent" from "sent and failed".
+	if h := n.Host; h != nil {
+		if len(h.Routes) > 0 {
+			label := "routes"
+			if h.ExitNode {
+				label = "routes (exit node)"
+			}
+			field(label, strings.Join(h.Routes, ", "))
+		}
+		if h.Forwarding {
+			gw := "forwarding"
+			if len(h.Masquerade) > 0 {
+				gw += ", NAT for " + strings.Join(h.Masquerade, ", ")
+			}
+			field("gateway", gw)
+		}
+		if h.Resolver != "" {
+			field("resolver", fmt.Sprintf("%s  %s  (%d names)", h.Resolver, h.Domain, h.Names))
+		}
+	}
+
 	// The stuck states, printed only when true. Each one is a specific
 	// condition with a specific remedy, and none is visible from the epochs.
 	if !n.DataPlaneDownSince.IsZero() {

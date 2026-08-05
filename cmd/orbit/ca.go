@@ -8,18 +8,23 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/griffithind/orbit/internal/wire"
 )
 
-const caVerbs = "ls, activate, retire"
+const caVerbs = "create, ls, activate, retire"
 
 func caCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return subUsage("ca",
+			"create     mint a new CA, ready to distribute but not yet signing",
 			"ls         list a network's certificate authorities",
 			"activate   promote a CA to signing",
 			"retire     drop a CA from distribution once nothing it signed is live")
 	}
 	switch args[0] {
+	case "create":
+		return caCreate(ctx, args[1:])
 	case "ls":
 		return caLs(ctx, args[1:])
 	case "activate":
@@ -29,6 +34,80 @@ func caCmd(ctx context.Context, args []string) error {
 	default:
 		return unknownSub("ca", args[0], caVerbs)
 	}
+}
+
+// caCreate mints a CA. It does not start signing with it.
+//
+// The two steps are the whole of rotation: every host must hold the new CA before
+// anything is signed by it, or the first machine to renew gets a certificate its peers do
+// not trust and drops off the mesh. `orbit ca activate` is the second step, and it
+// refuses while hosts are still behind.
+//
+// This is also the only way to widen what gateways may route. UnsafeNetworks is signed
+// into the certificate, so it cannot be edited — adding a prefix later means a new CA and
+// a rotation. Deciding it here is cheaper than discovering it after ten machines have
+// joined.
+func caCreate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("ca create", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	var (
+		days = fs.Int("days", 0,
+			"certificate lifetime; 0 uses the network's default")
+		networks = fs.String("networks", "",
+			"comma-separated overlay prefixes subordinates may claim; "+
+				"empty uses the network's own CIDRs")
+		groups = fs.String("groups", "",
+			"comma-separated groups subordinates may claim; empty means unconstrained")
+		unsafe = fs.String("unsafe-networks", "",
+			"comma-separated EXTERNAL prefixes gateways signed by this CA may route, "+
+				"e.g. 192.168.88.0/24,0.0.0.0/0. Empty permits none. This CANNOT be "+
+				"widened later — it is signed into the certificate, so adding a prefix "+
+				"means another CA and another rotation")
+	)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: orbit ca create <name>\n\n" +
+			"Example, for a network that will test a LAN route and an exit node:\n" +
+			"  orbit ca create lab-ca -unsafe-networks 192.168.88.0/24,0.0.0.0/0")
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	networkID, err := o.networkID(ctx)
+	if err != nil {
+		return err
+	}
+	res, err := o.client.CreateCA(ctx, networkID, wire.CreateCARequest{
+		Name:           fs.Arg(0),
+		Days:           *days,
+		Networks:       splitCSV(*networks),
+		Groups:         splitCSV(*groups),
+		UnsafeNetworks: splitCSV(*unsafe),
+	})
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	fmt.Fprintf(out, "created %s (%s)\n", res.Value.Name, res.Value.Fingerprint)
+	if len(res.Value.UnsafeNetworks) > 0 {
+		fmt.Fprintf(out, "  may route: %s\n", strings.Join(res.Value.UnsafeNetworks, ", "))
+	} else {
+		fmt.Fprintf(out, "  may route: nothing. Gateways signed by this CA cannot carry routes.\n")
+	}
+
+	// The half an operator forgets, said where they will read it. A CA that
+	// exists and is not activated signs nothing, and a CA activated before its
+	// hosts have it partitions them off the mesh.
+	fmt.Fprintf(errOut, "\nIt is NOT signing yet. Hosts pick it up on their next poll; once they\n"+
+		"have it:\n\n  orbit ca activate %s\n", res.Value.Name)
+	return nil
 }
 
 func caLs(ctx context.Context, args []string) error {

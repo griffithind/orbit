@@ -168,6 +168,22 @@ func (s State) NetworkKeyBytes() []byte {
 }
 
 // networkKey returns the pinned network identity public key, or nil.
+// VerifiedConfig returns this network's configuration, signature checked.
+//
+// Exported so callers that only want to READ the configuration — status, diagnostics —
+// go through the same verification the reconcilers do, instead of assembling the network
+// key and membership id themselves and getting one of them subtly wrong.
+func (l *Loop) VerifiedConfig() (string, error) {
+	// Guarded because the callers are read-only paths. A loop can be alive with
+	// no applier yet — mid-construction, or a network that failed to set up and
+	// is being retried — and `orbit status` reporting on it must not be able to
+	// take the agent down with it.
+	if l == nil || l.Applier == nil {
+		return "", errors.New("this network has no configuration yet")
+	}
+	return l.Applier.VerifiedConfig(l.networkKey(), l.State.MembershipID)
+}
+
 func (l *Loop) networkKey() []byte {
 	if l.State.NetworkKey == "" {
 		return nil

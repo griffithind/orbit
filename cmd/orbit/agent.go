@@ -745,6 +745,15 @@ func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
 	if cs, err := agent.ReadCertStatus(layout.Paths.Cert); err == nil {
 		out.Certificate = cs
 	}
+
+	// From the VERIFIED bytes, like everything else that reads this
+	// configuration. Status showing instructions that failed verification would
+	// tell an operator the machine was told something it will never act on.
+	if cfg, err := n.loop.VerifiedConfig(); err == nil {
+		if hs, err := agent.HostStatusFromConfig(cfg); err == nil && !hs.Empty() {
+			out.Host = &hs
+		}
+	}
 	return out
 }
 
