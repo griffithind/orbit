@@ -2,12 +2,14 @@ package enroll
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,13 +50,19 @@ type Config struct {
 	// audit record. Nil discards it.
 	Log *slog.Logger
 
+	// NetworkIdentity resolves a network's identity signer ref into the private
+	// key that signs join proofs.
+	//
+	// A function rather than a *vault.Vault, for the reason PolicySource is one:
+	// internal/enroll would otherwise import the vault, the vault imports the
+	// store, and a test that wanted to check a join proof would need a database
+	// and a passphrase. Nil falls back to reading a file:// ref directly, which
+	// is what a deployment with no vault does anyway.
+	NetworkIdentity func(ctx context.Context, ref string) (ed25519.PrivateKey, error)
+
 	// ControlPlaneStaleAfter is how long a replica may go without heartbeating
 	// before it stops being advertised to agents. Zero uses the default.
 	ControlPlaneStaleAfter time.Duration
-
-	// RecoveryGrace is how long past expiry a host may still recover. Zero uses
-	// DefaultRecoveryGrace.
-	RecoveryGrace time.Duration
 
 	// Policy supplies a network's compiled-policy inputs.
 	//
@@ -94,7 +102,7 @@ type Config struct {
 // are read at the same instant as the rest of the render: a fleet from one
 // snapshot compiled against a document from another would produce rules for a
 // network that never existed.
-type PolicySource func(ctx context.Context, tx *store.Tx, networkID uuid.UUID) (doc []byte, fleet []policy.Host, err error)
+type PolicySource func(ctx context.Context, tx *store.Tx, networkID uuid.UUID) (doc []byte, fleet []policy.Membership, err error)
 
 // The store's implementation has to keep fitting. An assertion here rather than
 // at the wiring site because the wiring site is a struct literal, where a
@@ -106,15 +114,20 @@ var _ PolicySource = store.NetworkPolicy
 type Service struct {
 	store    *store.Store
 	registry *ca.Registry
-	hasher   *Hasher
 	cfg      Config
 	log      *slog.Logger
 
 	// now is injectable for tests.
 	now func() time.Time
+
+	// identityKeys caches each network's identity private key, which every join
+	// needs to sign its proof. Cached because the alternative is reading and
+	// Argon2-decrypting a file on a public, unauthenticated endpoint.
+	identityMu   sync.Mutex
+	identityKeys map[uuid.UUID]ed25519.PrivateKey
 }
 
-func NewService(st *store.Store, reg *ca.Registry, h *Hasher, cfg Config) *Service {
+func NewService(st *store.Store, reg *ca.Registry, cfg Config) *Service {
 	if cfg.Paths.CA == "" {
 		cfg.Paths = nebulacfg.DefaultPaths()
 	}
@@ -129,7 +142,7 @@ func NewService(st *store.Store, reg *ca.Registry, h *Hasher, cfg Config) *Servi
 	if cfg.Policy == nil && !cfg.DisablePolicy {
 		cfg.Policy = store.NetworkPolicy
 	}
-	return &Service{store: st, registry: reg, hasher: h, cfg: cfg, log: log, now: time.Now}
+	return &Service{store: st, registry: reg, cfg: cfg, log: log, now: time.Now}
 }
 
 func (s *Service) clock() time.Time {
@@ -147,34 +160,34 @@ func (s *Service) clock() time.Time {
 // actor is threaded through rather than a bare id string: this previously took
 // one and recorded it as actor_type "user" while every caller passed a token
 // uuid, which is precisely the mislabel an audit trail must not have.
-func (s *Service) CreateCode(ctx context.Context, hostID uuid.UUID, ttl time.Duration, actor store.Identity) (*wire.EnrollmentCodeResponse, error) {
+func (s *Service) CreateCode(ctx context.Context, membershipID uuid.UUID, ttl time.Duration, actor store.Identity) (*wire.EnrollmentCodeResponse, error) {
 	if ttl <= 0 {
 		ttl = DefaultCodeTTL
 	}
 
-	plaintext, stored, err := s.hasher.NewCredential()
+	plaintext, stored, err := NewCredential()
 	if err != nil {
 		return nil, err
 	}
 	expiresAt := s.clock().Add(ttl)
 
 	err = s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
 		// A blocked host must not be re-enrollable; that would turn blocking
 		// into a temporary inconvenience.
-		if host.State == store.HostSuspended {
+		if host.State == store.MembershipSuspended {
 			return ErrHostBlocked
 		}
 
 		cred := store.EnrollmentCredential{
-			NetworkID: host.NetworkID,
-			HostID:    &host.ID,
-			Method:    store.MethodCode,
-			ExpiresAt: expiresAt,
-			CreatedBy: actor.Subject,
+			NetworkID:    host.NetworkID,
+			MembershipID: &host.ID,
+			Method:       store.MethodCode,
+			ExpiresAt:    expiresAt,
+			CreatedBy:    actor.Subject,
 		}
 		if err := tx.CreateEnrollmentCredential(ctx, &cred, stored); err != nil {
 			return err
@@ -203,7 +216,7 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 	// only do for the one caller that actually consumed the credential; doing
 	// any of it beforehand would let an attacker with an already-used code
 	// still cost us a certificate issuance.
-	redeemed, err := s.store.RedeemEnrollmentCredential(ctx, s.hasher.Hash(req.Credential), from)
+	redeemed, err := s.store.RedeemEnrollmentCredential(ctx, Hash(req.Credential), from)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Audited with no target: the credential did not resolve, so there
@@ -217,8 +230,8 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 		}
 		return nil, err
 	}
-	if redeemed.HostID == nil {
-		// Unreachable: host_id is NOT NULL as of migration 0003. Kept as an
+	if redeemed.MembershipID == nil {
+		// Unreachable: membership_id is NOT NULL as of migration 0003. Kept as an
 		// assertion because the alternative to failing here is inventing a
 		// host, and a control plane that mints an identity out of a NULL is a
 		// worse outcome than an error nobody ever sees.
@@ -227,11 +240,11 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 
 	var resp *wire.EnrollResponse
 	err = s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, *redeemed.HostID)
+		host, err := tx.GetHost(ctx, *redeemed.MembershipID)
 		if err != nil {
 			return err
 		}
-		if host.State == store.HostSuspended {
+		if host.State == store.MembershipSuspended {
 			return ErrHostBlocked
 		}
 
@@ -240,7 +253,7 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 			return err
 		}
 
-		if err := tx.SetHostState(ctx, host.ID, store.HostEnrolled); err != nil {
+		if err := tx.SetHostState(ctx, host.ID, store.MembershipEnrolled); err != nil {
 			return err
 		}
 		if err := tx.RecordAgentReport(ctx, host.ID, store.AgentReport{
@@ -313,8 +326,8 @@ func (s *Service) auditEnrollFailure(ctx context.Context, redeemed *store.Redeem
 		ip = &from
 	}
 	target := ""
-	if redeemed.HostID != nil {
-		target = redeemed.HostID.String()
+	if redeemed.MembershipID != nil {
+		target = redeemed.MembershipID.String()
 	}
 
 	err := s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
@@ -369,14 +382,14 @@ func (s *Service) agentEndpoints(ctx context.Context, tx *store.Tx, networkID uu
 //
 // Identity comes from the caller, which on the overlay-bound agent API is the
 // verified source address rather than anything in the request body.
-func (s *Service) Renew(ctx context.Context, hostID uuid.UUID, req wire.RenewRequest) (*wire.EnrollResponse, error) {
+func (s *Service) Renew(ctx context.Context, membershipID uuid.UUID, req wire.RenewRequest) (*wire.EnrollResponse, error) {
 	var resp *wire.EnrollResponse
 	err := s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
-		if host.State == store.HostSuspended {
+		if host.State == store.MembershipSuspended {
 			return ErrHostBlocked
 		}
 
@@ -403,10 +416,10 @@ func (s *Service) Renew(ctx context.Context, hostID uuid.UUID, req wire.RenewReq
 
 // State answers an agent poll. Config and certificate material are included
 // only when the agent is behind, so a steady-state poll stays small.
-func (s *Service) State(ctx context.Context, hostID uuid.UUID, knownConfig, knownBlock int64) (*wire.StateResponse, error) {
+func (s *Service) State(ctx context.Context, membershipID uuid.UUID, knownConfig, knownBlock int64) (*wire.StateResponse, error) {
 	var resp wire.StateResponse
 	err := s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
@@ -506,7 +519,7 @@ func (s *Service) State(ctx context.Context, hostID uuid.UUID, knownConfig, know
 }
 
 // issueAndRender mints a certificate and renders the matching configuration.
-func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.Host, pubKeyB64, curveName string) (*wire.EnrollResponse, error) {
+func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.Membership, pubKeyB64, curveName string) (*wire.EnrollResponse, error) {
 	net, err := tx.GetNetwork(ctx, host.NetworkID)
 	if err != nil {
 		return nil, err
@@ -557,7 +570,7 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		return nil, err
 	}
 
-	hostCert, err := issuer.IssueHost(ctx, ca.HostParams{
+	membershipCert, err := issuer.IssueHost(ctx, ca.HostParams{
 		Name:      host.Name,
 		Version:   cert.Version(net.CertVer),
 		Networks:  networks,
@@ -570,17 +583,17 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		return nil, fmt.Errorf("issue certificate: %w", err)
 	}
 
-	pem, err := hostCert.MarshalPEM()
+	pem, err := membershipCert.MarshalPEM()
 	if err != nil {
 		return nil, err
 	}
-	fingerprint, err := hostCert.Fingerprint()
+	fingerprint, err := membershipCert.Fingerprint()
 	if err != nil {
 		return nil, err
 	}
 
 	rec := store.Certificate{
-		HostID: host.ID, CAID: caRow.ID, Fingerprint: fingerprint, PEM: string(pem),
+		MembershipID: host.ID, CAID: caRow.ID, Fingerprint: fingerprint, PEM: string(pem),
 		CertVer: net.CertVer, NotBefore: notBefore, NotAfter: notAfter,
 	}
 	if err := tx.InsertCertificate(ctx, &rec); err != nil {
@@ -598,8 +611,8 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 	}
 
 	return &wire.EnrollResponse{
-		HostID:         host.ID.String(),
-		HostName:       host.Name,
+		MembershipID:   host.ID.String(),
+		MembershipName: host.Name,
 		Certificate:    string(pem),
 		CABundle:       bundle,
 		Config:         string(fragment),
@@ -633,7 +646,7 @@ type instance struct {
 	overrides  map[string]any
 }
 
-func (s *Service) instanceFor(host *store.Host, net *store.Network) (instance, error) {
+func (s *Service) instanceFor(host *store.Membership, net *store.Network) (instance, error) {
 	in := instance{mode: host.ConfigMode}
 	if in.mode == "" {
 		in.mode = net.ConfigMode
@@ -678,7 +691,7 @@ func (s *Service) instanceFor(host *store.Host, net *store.Network) (instance, e
 }
 
 // renderFor assembles a host's configuration and trust bundle.
-func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Host, net *store.Network) ([]byte, string, error) {
+func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membership, net *store.Network) ([]byte, string, error) {
 	topology, err := tx.NetworkTopology(ctx, net.ID)
 	if err != nil {
 		return nil, "", err
@@ -770,7 +783,7 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Host,
 // Nil is the answer for every network that has not opted in, and it is the
 // answer that leaves the render byte-identical to what it was before this
 // existed. Anything else here is a change to a running fleet's firewall.
-func (s *Service) compilePolicy(ctx context.Context, tx *store.Tx, host *store.Host, net *store.Network) (*policy.Ruleset, error) {
+func (s *Service) compilePolicy(ctx context.Context, tx *store.Tx, host *store.Membership, net *store.Network) (*policy.Ruleset, error) {
 	if s.cfg.Policy == nil {
 		return nil, nil
 	}
@@ -795,7 +808,7 @@ func (s *Service) compilePolicy(ctx context.Context, tx *store.Tx, host *store.H
 		Fleet:      policy.Snapshot{Members: fleet, CIDRs: net.CIDRs},
 		Management: s.managementEndpoints(ctx, tx, net.ID),
 	}
-	rs, err := c.Host(doc, host.ID.String())
+	rs, err := c.Membership(doc, host.ID.String())
 	if err != nil {
 		return nil, fmt.Errorf("compile policy for host %s: %w", host.Name, err)
 	}
@@ -857,15 +870,14 @@ func certNetworks(addrs []netip.Addr, cidrs []netip.Prefix) ([]netip.Prefix, err
 	return out, nil
 }
 
+// parseCurve is ca.ParseCurve plus the wire's compatibility default: an agent
+// that sends no curve at all is talking about CURVE25519, which is what every
+// agent predating P-256 support meant.
 func parseCurve(name string) (cert.Curve, error) {
-	switch name {
-	case "CURVE25519", "25519", "":
+	if name == "" {
 		return cert.Curve_CURVE25519, nil
-	case "P256":
-		return cert.Curve_P256, nil
-	default:
-		return 0, fmt.Errorf("unknown curve %q", name)
 	}
+	return ca.ParseCurve(name)
 }
 
 // validatePublicKey rejects keys that are structurally wrong for the curve.
@@ -901,12 +913,12 @@ func validatePublicKey(curve cert.Curve, pub []byte) error {
 
 // SelfIssued is a generation for the control plane's own mesh membership.
 type SelfIssued struct {
-	HostID      uuid.UUID
-	Config      string
-	Certificate string
-	CABundle    string
-	PrivateKey  string
-	NotAfter    time.Time
+	MembershipID uuid.UUID
+	Config       string
+	Certificate  string
+	CABundle     string
+	PrivateKey   string
+	NotAfter     time.Time
 	// Created is true when this call created the host record, meaning the
 	// seeded roles took effect rather than being ignored.
 	Created bool
@@ -945,7 +957,16 @@ type SelfIssueRoles struct {
 	StaticAddrs []string
 }
 
-func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip.Addr, name string, roles SelfIssueRoles) (*SelfIssued, error) {
+// deviceKey is the control plane's own device public key, DER SPKI.
+//
+// The control plane is a machine on its own network, and under the device model
+// a membership names one — there is no "system" exemption, and adding one would
+// mean a nullable column and a nil branch on every read, for exactly one row.
+//
+// It is the SAME key for every network this instance joins, because it is one
+// machine. That falls out of the model rather than being arranged: a device
+// outlives every network it joins.
+func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip.Addr, name string, deviceKey []byte, roles SelfIssueRoles) (*SelfIssued, error) {
 	var out *SelfIssued
 
 	var created bool
@@ -961,18 +982,39 @@ func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip
 			return fmt.Errorf("%s is not within network %s (%v)", addr, net.Slug, net.CIDRs)
 		}
 
+		// Recorded on every start, not only on first creation: last_seen_at is
+		// how an operator tells a running control plane from a stale row, and
+		// the control plane is the one machine that never reports through the
+		// agent API.
+		self := store.Device{
+			PublicKey:  deviceKey,
+			KeyBacking: store.DeviceKeyFile,
+			Hostname:   name,
+		}
+		if err := tx.SeeDevice(ctx, &self); err != nil {
+			return fmt.Errorf("record the control plane device: %w", err)
+		}
+		if self.Blocked() {
+			// Blocking the control plane's own device would otherwise be a
+			// silent way to break every start after the next one. Refusing
+			// loudly is better than a mesh node that never comes up.
+			return fmt.Errorf("%w: this control plane's own device (%s)",
+				store.ErrDeviceBlocked, self.KeyFingerprint)
+		}
+
 		host, err := tx.FindHostByAddr(ctx, networkID, addr)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			host = &store.Host{
+			host = &store.Membership{
 				NetworkID:    networkID,
 				Name:         name,
 				Addrs:        []netip.Addr{addr},
-				State:        store.HostActive,
+				State:        store.MembershipActive,
 				Tags:         []string{"orbit-control-plane"},
 				IsLighthouse: roles.IsLighthouse,
 				IsRelay:      roles.IsRelay,
 				StaticAddrs:  roles.StaticAddrs,
+				DeviceID:     &self.ID,
 			}
 			if err := tx.CreateHost(ctx, host); err != nil {
 				return fmt.Errorf("create control plane host: %w", err)
@@ -1008,13 +1050,13 @@ func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip
 		}
 
 		out = &SelfIssued{
-			HostID:      host.ID,
-			Config:      resp.Config,
-			Certificate: resp.Certificate,
-			CABundle:    resp.CABundle,
-			PrivateKey:  string(cert.MarshalPrivateKeyToPEM(curve, priv)),
-			NotAfter:    resp.NotAfter,
-			Created:     created,
+			MembershipID: host.ID,
+			Config:       resp.Config,
+			Certificate:  resp.Certificate,
+			CABundle:     resp.CABundle,
+			PrivateKey:   string(cert.MarshalPrivateKeyToPEM(curve, priv)),
+			NotAfter:     resp.NotAfter,
+			Created:      created,
 		}
 		return nil
 	})
@@ -1049,9 +1091,9 @@ func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip
 // the same monotonicity, the same last_seen_at, the same audit behaviour.
 // AgentVersion is Orbit's own build, because on this host the agent and the
 // control plane are the same process.
-func (s *Service) ReportControlPlaneApplied(ctx context.Context, hostID uuid.UUID, configEpoch, blocklistEpoch int64) error {
+func (s *Service) ReportControlPlaneApplied(ctx context.Context, membershipID uuid.UUID, configEpoch, blocklistEpoch int64) error {
 	return s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		return tx.RecordAgentReport(ctx, hostID, store.AgentReport{
+		return tx.RecordAgentReport(ctx, membershipID, store.AgentReport{
 			ConfigEpoch:    configEpoch,
 			BlocklistEpoch: blocklistEpoch,
 			AgentVersion:   version.Version,
@@ -1062,9 +1104,9 @@ func (s *Service) ReportControlPlaneApplied(ctx context.Context, hostID uuid.UUI
 // ControlPlaneEpochs reports the network generation the control plane's host
 // record belongs to, so a caller that has just applied a rendered config knows
 // which generation it applied.
-func (s *Service) ControlPlaneEpochs(ctx context.Context, hostID uuid.UUID) (configEpoch, blocklistEpoch int64, err error) {
+func (s *Service) ControlPlaneEpochs(ctx context.Context, membershipID uuid.UUID) (configEpoch, blocklistEpoch int64, err error) {
 	err = s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
@@ -1078,9 +1120,9 @@ func (s *Service) ControlPlaneEpochs(ctx context.Context, hostID uuid.UUID) (con
 	return configEpoch, blocklistEpoch, err
 }
 
-func (s *Service) ControlPlaneMaterial(ctx context.Context, hostID uuid.UUID) (config, caBundle string, err error) {
+func (s *Service) ControlPlaneMaterial(ctx context.Context, membershipID uuid.UUID) (config, caBundle string, err error) {
 	err = s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
@@ -1100,14 +1142,14 @@ func (s *Service) ControlPlaneMaterial(ctx context.Context, hostID uuid.UUID) (c
 
 // ControlPlaneCertificate returns the control plane's current certificate
 // window, so it can renew before it expires.
-func (s *Service) ControlPlaneCertificate(ctx context.Context, hostID uuid.UUID) (notBefore, notAfter time.Time, err error) {
+func (s *Service) ControlPlaneCertificate(ctx context.Context, membershipID uuid.UUID) (notBefore, notAfter time.Time, err error) {
 	err = s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
-		certs, err := tx.ActiveCertificates(ctx, hostID)
+		certs, err := tx.ActiveCertificates(ctx, membershipID)
 		if err != nil {
 			return err
 		}
 		if len(certs) == 0 {
-			return fmt.Errorf("control plane host %s has no active certificate", hostID)
+			return fmt.Errorf("control plane host %s has no active certificate", membershipID)
 		}
 		c := certs[len(certs)-1]
 		notBefore, notAfter = c.NotBefore, c.NotAfter
@@ -1117,11 +1159,11 @@ func (s *Service) ControlPlaneCertificate(ctx context.Context, hostID uuid.UUID)
 }
 
 // HostRoles reads a host's current data-plane roles.
-func (s *Service) HostRoles(ctx context.Context, hostID uuid.UUID) (*store.Host, error) {
-	var h *store.Host
+func (s *Service) HostRoles(ctx context.Context, membershipID uuid.UUID) (*store.Membership, error) {
+	var h *store.Membership
 	err := s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		h, err = tx.GetHost(ctx, hostID)
+		h, err = tx.GetHost(ctx, membershipID)
 		return err
 	})
 	return h, err

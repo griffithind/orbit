@@ -1,6 +1,6 @@
 # Revocation Propagation
 
-The central security claim of a mesh control plane is: *when I block a host, it
+The central security claim of a mesh control plane is: *when I block a membership, it
 loses access.* This document specifies how fast that actually happens, why, and
 how to measure it rather than assert it.
 
@@ -82,10 +82,10 @@ the previous one's failure mode.
 ```
      block issued
           │
-          ├─ L1 push (long-poll/SSE)   ~100–500 ms   connected hosts
-          ├─ L2 epoch piggyback        ≤ 1 RTT       hosts mid-request
+          ├─ L1 push (long-poll/SSE)   ~100–500 ms   connected memberships
+          ├─ L2 epoch piggyback        ≤ 1 RTT       memberships mid-request
           ├─ L3 poll fallback          ≤ interval    long-poll broken
-          └─ L4 certificate expiry     ≤ cert TTL    partitioned hosts
+          └─ L4 certificate expiry     ≤ cert TTL    partitioned memberships
 ```
 
 ### L1 — Push
@@ -96,7 +96,7 @@ returns immediately and the agent fetches the new state.
 Fan-out across control-plane replicas uses Postgres `LISTEN`/`NOTIFY`: the
 transaction that writes the blocklist entry also issues `NOTIFY orbit_epoch`,
 so every replica wakes every watcher it holds. This avoids operating a message
-broker on day one and is sufficient into the five figures of hosts. Revisit when
+broker on day one and is sufficient into the five figures of memberships. Revisit when
 a single Postgres cannot hold the connection count.
 
 Implementation notes that matter:
@@ -109,7 +109,7 @@ Implementation notes that matter:
   The cap fails soft: an agent that cannot get a slot falls back to polling.
 - The watch endpoint is on the overlay, so a blocked host loses its tunnel and
   therefore its own watch connection. That is fine and expected: the
-  *other* hosts are the ones that need the update.
+  *other* memberships are the ones that need the update.
 
 ### L2 — Epoch piggyback
 
@@ -120,8 +120,8 @@ Every agent API response carries the current epochs:
 ```
 
 An agent that observes an epoch newer than its applied one fetches immediately.
-This closes the window where a host is mid-request when a block lands, and it
-converges hosts that missed a push without waiting for the poll interval.
+This closes the window where a membership is mid-request when a block lands, and it
+converges memberships that missed a push without waiting for the poll interval.
 
 Cheap to implement, and it turns every request into an opportunistic sync.
 
@@ -140,7 +140,7 @@ simultaneously forever.
 
 **The only layer that works under partition, and therefore the real backstop.**
 
-With a 24-hour certificate lifetime, a host that never hears from Orbit again
+With a 24-hour certificate lifetime, a membership that never hears from Orbit again
 still loses access within 24 hours. Nothing else provides that bound.
 
 This is why `design.md` argues for short lifetimes even though they cost more
@@ -158,7 +158,7 @@ days means revocation is effectively unbounded for a partitioned host, and the
 UI should say so in those words.
 
 Signing cost at 24-hour TTL is one operation per host per 12 hours: for 10,000
-hosts, roughly 20,000 KMS operations per day. That is negligible in money and
+memberships, roughly 20,000 KMS operations per day. That is negligible in money and
 well within default rate limits, but it is worth confirming against your
 provider's per-second quota before choosing an aggressive TTL for a large fleet.
 
@@ -167,11 +167,11 @@ provider's per-second quota before choosing an aggressive TTL for a large fleet.
 ## 4. The blocking flow
 
 ```
-POST /v1/hosts/:id/block
+POST /v1/memberships/:id/block
   │
   ├─ transaction:
   │    host.state ← suspended
-  │    certificate.state ← revoked        (all active certs for the host)
+  │    certificate.state ← revoked        (all active certs for the membership)
   │    INSERT blocklist_entry(fingerprint, reason, epoch = nextval)
   │    network.blocklist_epoch ← that epoch
   │    INSERT audit_log
@@ -203,7 +203,7 @@ argument for short lifetimes: long-lived certificates mean a permanently growing
 blocklist in every host's config.
 
 Pruning runs in `internal/sched`, on a 15-minute sweep by default, with a grace
-period past expiry (clock skew between the control plane and a host makes
+period past expiry (clock skew between the control plane and a membership makes
 "expired" fuzzy at the boundary, and a stale fingerprint costs bytes where a gap
 costs trust). The same sweep removes spent enrollment credentials and reports
 certificates whose agents have stopped renewing.
@@ -227,7 +227,7 @@ GET /v1/networks/:id/convergence
 { "config_epoch": 42, "blocklist_epoch": 18,
   "hosts_total": 1204,
   "converged": 1198,
-  "lagging": [ { "host_id": "host_…", "name": "edge-07",
+  "lagging": [ { "membership_id": "host_…", "name": "edge-07",
                  "applied_blocklist_epoch": 17,
                  "last_seen_at": "2026-08-03T20:58:11Z" } ],
   "p50_ms": 180, "p95_ms": 420, "p99_ms": 1900 }
@@ -266,9 +266,9 @@ practical:
 
 ```
 1. stand up Orbit against an ephemeral Postgres
-2. enrol N simulated hosts (N ∈ {10, 100, 1000})
+2. enrol N simulated memberships (N ∈ {10, 100, 1000})
 3. establish a full mesh; assert connectivity
-4. t₀: POST /v1/hosts/:victim/block
+4. t₀: POST /v1/memberships/:victim/block
 5. for each remaining host, record t₁ = the moment its tunnel to the victim
    is torn down (observable via Control.ListHostmapHosts)
 6. report the distribution of t₁ − t₀
@@ -296,7 +296,7 @@ Implemented in `internal/metrics`, served on `127.0.0.1:9464/metrics`.
 | `orbit_hosts_blocklist_converged` | gauge, per network | numerator for convergence |
 | `orbit_convergence_lag_seconds` | gauge, per network | the real SLO |
 | `orbit_watch_connections` | gauge | pool exhaustion early warning |
-| `orbit_agent_poll_fallback_total` | counter | how many hosts lost long-poll |
+| `orbit_agent_poll_fallback_total` | counter | how many memberships lost long-poll |
 | `orbit_certificates_expiring_soon` | gauge, per network | catches stalled renewal before outage |
 | `orbit_epoch_listener_up` | gauge | push is down; everyone is polling |
 
@@ -308,7 +308,7 @@ increase in `poll_fallback` (something in the network path changed); and
 **Two deviations from the original design here, both because the proposed type
 was wrong.** Convergence lag and certificate expiry were specified as
 histograms. A histogram measures the distribution of *completed events*; both of
-these are *levels*. At any instant a host either is or is not behind, and what
+these are *levels*. At any instant a membership either is or is not behind, and what
 matters is how long the worst one has been — a question a gauge answers directly
 and a histogram cannot answer at all without inventing an event to observe.
 
@@ -326,13 +326,13 @@ State these in the README. They are properties of Nebula's trust model, not
 Orbit bugs, and users will find them regardless.
 
 1. **A partitioned host cannot learn about revocation.** Only expiry bounds it.
-   Certificate TTL *is* the revocation SLA for disconnected hosts, and the UI
+   Certificate TTL *is* the revocation SLA for disconnected memberships, and the UI
    should present it that way when an operator picks a lifetime.
 
 2. **Blocking is not instantaneous, and cannot be.** The floor is Nebula's
    `connection_alive_interval` (~5 s) plus distribution time.
 
-3. **An attacker with code execution on a host keeps its private key.** Blocking
+3. **An attacker with code execution on a membership keeps its private key.** Blocking
    revokes the certificate, not the key. Until the block converges, a stolen key
    remains usable against any peer that has not yet received the update.
 

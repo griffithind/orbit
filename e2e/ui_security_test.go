@@ -55,14 +55,10 @@ func (h *harness) serveWeb(t *testing.T) *uiHarness {
 func (h *harness) serveWebWith(t *testing.T, notifier *notify.Notifier) *uiHarness {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatalf("hasher: %v", err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: 4242,
 		EnrollURL:  "https://orbit.example.com/enroll/v1/enroll",
@@ -387,25 +383,25 @@ func TestUIFormTokenIsRequired(t *testing.T) {
 func TestUIReadOnlySessionCannotBlock(t *testing.T) {
 	h := setup(t)
 	u := h.serveWeb(t)
-	hostID := h.createHostRow(t, "read-only-target")
+	membershipID := h.createHostRow(t, "read-only-target")
 
 	u.signInBrowser(t, false) // the default: read-only
 
-	page := body(t, u.get(t, "/ui/hosts/"+hostID.String()))
+	page := body(t, u.get(t, "/ui/memberships/"+membershipID.String()))
 	if !strings.Contains(page, "read-only") {
 		t.Error("a read-only session is not marked as one; an operator would hunt for a missing button")
 	}
-	if strings.Contains(page, `href="/ui/hosts/`+hostID.String()+`/block"`) {
+	if strings.Contains(page, `href="/ui/memberships/`+membershipID.String()+`/block"`) {
 		t.Error("a read-only session was offered a Block control")
 	}
 
 	// And the route itself refuses, not just the rendering. A UI that only hides
 	// a control has not restricted anything.
-	resp := u.get(t, "/ui/hosts/"+hostID.String()+"/block")
+	resp := u.get(t, "/ui/memberships/"+membershipID.String()+"/block")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("block confirmation: status = %d, want 403", resp.StatusCode)
 	}
-	if page := body(t, resp); !strings.Contains(page, "hosts:block") {
+	if page := body(t, resp); !strings.Contains(page, "memberships:block") {
 		t.Error("the refusal does not name the missing scope")
 	}
 }
@@ -448,13 +444,20 @@ func (h *harness) createHostRow(t *testing.T, name string) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
 
-	var host store.Host
+	var host store.Membership
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		net, err := tx.GetNetwork(ctx, h.netID)
 		if err != nil {
 			return err
 		}
-		host = store.Host{NetworkID: h.netID, Name: name, RoleID: &h.roleID}
+		// A membership cannot exist without a device, so one is recorded here
+		// too. The machine it describes never runs — this fixture exists so a
+		// page has something to render.
+		d := store.Device{PublicKey: testDeviceKey(t)}
+		if err := tx.SeeDevice(ctx, &d); err != nil {
+			return err
+		}
+		host = store.Membership{NetworkID: h.netID, Name: name, RoleID: &h.roleID, DeviceID: &d.ID}
 		return tx.CreateHostAllocating(ctx, net, &host, netip.Prefix{})
 	})
 	if err != nil {

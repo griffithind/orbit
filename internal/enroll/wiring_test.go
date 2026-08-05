@@ -56,7 +56,7 @@ func TestProductionWiringTakesTheDefault(t *testing.T) {
 func TestPolicyDefaultsOnRatherThanOff(t *testing.T) {
 	// The zero Config is what every caller that has not thought about policy
 	// passes, including cmd/orbitd.
-	s := NewService(nil, nil, nil, Config{})
+	s := NewService(nil, nil, Config{})
 	if s.cfg.Policy == nil {
 		t.Fatal("a Config that does not mention Policy got no policy source.\n" +
 			"That is the state where a document is stored, switched on, reported\n" +
@@ -68,7 +68,7 @@ func TestPolicyDefaultsOnRatherThanOff(t *testing.T) {
 // opt out of — a test that wants to prove the per-role path in isolation needs
 // to, and "I forgot" and "I meant to" must not look the same in the source.
 func TestPolicyCanBeDisabledDeliberately(t *testing.T) {
-	s := NewService(nil, nil, nil, Config{DisablePolicy: true})
+	s := NewService(nil, nil, Config{DisablePolicy: true})
 	if s.cfg.Policy != nil {
 		t.Error("DisablePolicy did not disable it")
 	}
@@ -79,11 +79,11 @@ func TestPolicyCanBeDisabledDeliberately(t *testing.T) {
 // compiler without going through firewall_source.
 func TestAnExplicitPolicySourceWins(t *testing.T) {
 	called := false
-	var src PolicySource = func(_ context.Context, _ *store.Tx, _ uuid.UUID) ([]byte, []policy.Host, error) {
+	var src PolicySource = func(_ context.Context, _ *store.Tx, _ uuid.UUID) ([]byte, []policy.Membership, error) {
 		called = true
 		return nil, nil, nil
 	}
-	s := NewService(nil, nil, nil, Config{Policy: src})
+	s := NewService(nil, nil, Config{Policy: src})
 	if s.cfg.Policy == nil {
 		t.Fatal("an explicitly supplied policy source was dropped")
 	}

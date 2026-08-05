@@ -46,6 +46,28 @@ const DefaultRoot = "/var/lib/orbit"
 // StateDirectory=orbit/<slug> creates.
 func DirFor(network string) string { return filepath.Join(DefaultRoot, network) }
 
+// DeviceKeyName is the machine's own identity key, and it deliberately sits at
+// the ROOT rather than inside a per-network directory.
+//
+// That placement is the model: a device is one machine across every network it
+// joins and every control plane it talks to (docs/model.md §1). A copy per
+// network would make a laptop on three meshes three devices, which is exactly
+// the conflation the device noun exists to remove — and posture reported three
+// times with three chances to disagree is what it would cost.
+//
+// It also means removing one network's directory does not destroy the machine's
+// identity, which matters because that identity is what lets a host with no
+// working tunnel still reach a control plane.
+const DeviceKeyName = "device.key"
+
+// DeviceKeyPath is where the machine's identity key lives under root.
+func DeviceKeyPath(root string) string {
+	if root == "" {
+		root = DefaultRoot
+	}
+	return filepath.Join(root, DeviceKeyName)
+}
+
 // ValidateNetwork checks a network slug is safe as a path component and as a
 // systemd instance name.
 //

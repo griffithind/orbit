@@ -21,12 +21,12 @@ func TestRevokedTokenIsRejectedImmediately(t *testing.T) {
 
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "leaked-" + uuid.NewString()[:8], Scopes: []string{"hosts:read"},
+		Name: "leaked-" + uuid.NewString()[:8], Scopes: []string{"memberships:read"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
 
-	if code := h.reqAs(t, tok.Token, http.MethodGet, ts.URL+"/v1/hosts?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
+	if code := h.reqAs(t, tok.Token, http.MethodGet, ts.URL+"/v1/memberships?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
 		t.Fatalf("fresh token = %d, want 200", code)
 	}
 
@@ -34,7 +34,7 @@ func TestRevokedTokenIsRejectedImmediately(t *testing.T) {
 		t.Fatalf("revoke: %d", code)
 	}
 
-	if code := h.reqAs(t, tok.Token, http.MethodGet, ts.URL+"/v1/hosts?network_id="+h.netID.String(), nil, nil); code != http.StatusUnauthorized {
+	if code := h.reqAs(t, tok.Token, http.MethodGet, ts.URL+"/v1/memberships?network_id="+h.netID.String(), nil, nil); code != http.StatusUnauthorized {
 		t.Errorf("revoked token = %d, want 401", code)
 	}
 }
@@ -49,13 +49,13 @@ func TestRevokedTokenStaysListed(t *testing.T) {
 	name := "audited-" + uuid.NewString()[:8]
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: name, Scopes: []string{"hosts:read"},
+		Name: name, Scopes: []string{"memberships:read"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
 
 	// Use it, so last_used_at is set.
-	h.reqAs(t, tok.Token, http.MethodGet, ts.URL+"/v1/hosts?network_id="+h.netID.String(), nil, nil)
+	h.reqAs(t, tok.Token, http.MethodGet, ts.URL+"/v1/memberships?network_id="+h.netID.String(), nil, nil)
 
 	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/tokens/"+tok.ID, nil, nil); code != http.StatusNoContent {
 		t.Fatalf("revoke: %d", code)
@@ -96,7 +96,7 @@ func TestDoubleRevokeIsVisible(t *testing.T) {
 
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "twice-" + uuid.NewString()[:8], Scopes: []string{"hosts:read"},
+		Name: "twice-" + uuid.NewString()[:8], Scopes: []string{"memberships:read"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}

@@ -48,9 +48,19 @@ type State struct {
 	// agent back to the first replica at once.
 	Preferred int `json:"preferred,omitempty"`
 
-	HostID         string `json:"host_id"`
+	MembershipID   string `json:"membership_id"`
 	ConfigEpoch    int64  `json:"config_epoch"`
 	BlocklistEpoch int64  `json:"blocklist_epoch"`
+
+	// KeyRef says where this host's private key lives FOR THIS NETWORK. Empty
+	// means the key file in the layout directory; a "pkcs11:" URI means a
+	// token, and no key file exists.
+	//
+	// Here rather than on a flag because `orbit agent run` drives every joined
+	// network in one process: a host can hold a token-backed key for one
+	// network and a file for another, and a single flag could not say both. It
+	// is a property of the join, decided at enrollment, exactly like BaseURL.
+	KeyRef string `json:"key_ref,omitempty"`
 
 	// UnconfirmedSince is when the currently-installed generation was applied
 	// without the control plane having been reachable since. Zero means the
@@ -233,6 +243,14 @@ type Loop struct {
 	// value of a stolen key file to one certificate lifetime. Turn it on only
 	// for hardware-backed keys, which cannot be regenerated.
 	ReuseKey bool
+
+	// KeyRef is a "pkcs11:" URI when this host's private key lives on a token,
+	// empty when it is a file.
+	//
+	// A token key implies ReuseKey: there is nothing to rotate, because the
+	// agent cannot generate a key inside the token and would not want to — the
+	// key's non-exportability is the reason it is there.
+	KeyRef string
 
 	State State
 	Log   *slog.Logger
@@ -687,10 +705,10 @@ func (l *Loop) maybeRenew(ctx context.Context) error {
 	}
 
 	now := l.clock()
-	urgency := l.Policy.AssessWithHint(now, notBefore, notAfter, l.State.HostID, l.serverRenewAfter)
+	urgency := l.Policy.AssessWithHint(now, notBefore, notAfter, l.State.MembershipID, l.serverRenewAfter)
 	if urgency == NotDue {
 		l.Log.Debug("certificate not due for renewal",
-			"renewAt", l.Policy.RenewAtWithHint(notBefore, notAfter, l.State.HostID, l.serverRenewAfter),
+			"renewAt", l.Policy.RenewAtWithHint(notBefore, notAfter, l.State.MembershipID, l.serverRenewAfter),
 			"notAfter", notAfter)
 		return nil
 	}
@@ -733,17 +751,26 @@ func (l *Loop) doRenew(ctx context.Context) error {
 		kp  *Keypair
 		err error
 	)
-	if !l.ReuseKey {
-		kp, err = GenerateKeypair(l.Curve)
+	switch {
+	case IsTokenRef(l.KeyRef):
+		// A token key is never rotated: the agent cannot generate one inside
+		// the token, and the whole point is that this key stays put. Read the
+		// public half back so the control plane can sign for it again.
+		kp, err = KeypairFromToken(l.KeyRef)
 		if err != nil {
-			return fmt.Errorf("generate keypair: %w", err)
+			return fmt.Errorf("read public key from token: %w", err)
 		}
-	} else {
+	case l.ReuseKey:
 		// Reusing the key still requires sending the public half, which is
 		// derived from the key on disk rather than regenerated.
 		kp, err = l.publicFromDisk()
 		if err != nil {
 			return fmt.Errorf("read existing key: %w", err)
+		}
+	default:
+		kp, err = GenerateKeypair(l.Curve)
+		if err != nil {
+			return fmt.Errorf("generate keypair: %w", err)
 		}
 	}
 
@@ -762,7 +789,12 @@ func (l *Loop) doRenew(ctx context.Context) error {
 		CABundle:    resp.CABundle,
 		Certificate: resp.Certificate,
 	}
-	if !l.ReuseKey {
+	// Empty for a token key by construction — KeypairFromToken has no private
+	// half to return — and Applier stages nothing for empty content, so a token
+	// host never gets a key file. Stated as a condition anyway: relying on the
+	// emptiness alone would make "we never write a private key for this host" an
+	// accident of another function's return value.
+	if !l.ReuseKey && !IsTokenRef(l.KeyRef) {
 		material.PrivateKey = kp.PrivatePEM
 	}
 
@@ -788,7 +820,8 @@ func (l *Loop) doRenew(ctx context.Context) error {
 	l.adoptEndpoints(resp.AgentEndpoints)
 	l.Log.Info("certificate renewed",
 		"notAfter", resp.NotAfter, "renewAfter", resp.RenewAfter,
-		"rotatedKey", !l.ReuseKey)
+		"rotatedKey", !l.ReuseKey && !IsTokenRef(l.KeyRef),
+		"keyBacking", keyBacking(l.KeyRef))
 
 	l.report(ctx)
 	return nil
@@ -914,6 +947,23 @@ func (l *Loop) reportRequest() wire.ReportRequest {
 	// A host whose nebula is not running is converged on paper and off the mesh
 	// in fact. Reporting it is what stops the two from looking the same.
 	reportDataPlaneDown(&req, !l.State.DataPlaneDownSince.IsZero())
+
+	// Facts and posture describe the MACHINE, and are sent on every report
+	// rather than only when they change.
+	//
+	// Sending unconditionally is the point rather than an oversight. Posture is
+	// only worth anything if it is FRESH — CISA's maturity ladder turns on
+	// continuously verified rather than verified once, and the well-documented
+	// failure of Entra's device-compliance signal is that it is stale by
+	// construction. A change-detection scheme would mean a machine whose
+	// encryption was switched off between reports keeps reading as compliant
+	// until something notices, and "something notices" is the part that does
+	// not exist. Four file reads per cycle is not a cost worth optimising.
+	//
+	// A host on three networks sends this three times; the control plane records
+	// it once, against the device. See docs/model.md §3.
+	req.Facts = Facts("")
+	req.Posture = Posture()
 	return req
 }
 

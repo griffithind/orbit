@@ -26,7 +26,7 @@ func TestHostCertificatesAreVisibleOverTheAPI(t *testing.T) {
 	ctx := context.Background()
 
 	host := h.createAndEnroll(t, ts, "cert-history", "10.42.63.1", false, false, nil)
-	hostID := uuid.MustParse(host.id)
+	membershipID := uuid.MustParse(host.id)
 
 	// Four superseded renewals behind the live certificate. They share an
 	// issued_at, which is what a burst of renewals looks like: now() is the
@@ -39,7 +39,7 @@ func TestHostCertificatesAreVisibleOverTheAPI(t *testing.T) {
 		}
 		for i := 0; i < 4; i++ {
 			c := store.Certificate{
-				HostID: hostID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+				MembershipID: membershipID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
 				CertVer: 2, State: store.CertSuperseded,
 				NotBefore: now.Add(-time.Duration(i+2) * time.Hour),
 				NotAfter:  now.Add(-time.Duration(i) * time.Hour),
@@ -56,7 +56,7 @@ func TestHostCertificatesAreVisibleOverTheAPI(t *testing.T) {
 
 	get := func(query string) wire.CertificateListResponse {
 		t.Helper()
-		u := ts.URL + "/v1/hosts/" + host.id + "/certificates"
+		u := ts.URL + "/v1/memberships/" + host.id + "/certificates"
 		if query != "" {
 			u += "?" + query
 		}
@@ -149,14 +149,14 @@ func TestHostCertificatesAreVisibleOverTheAPI(t *testing.T) {
 	// diagnoses, and an empty array says neither.
 	var empty wire.CertificateListResponse
 	if code := h.adminReq(t, http.MethodGet,
-		ts.URL+"/v1/hosts/"+uuid.NewString()+"/certificates", nil, &empty); code != http.StatusNotFound {
+		ts.URL+"/v1/memberships/"+uuid.NewString()+"/certificates", nil, &empty); code != http.StatusNotFound {
 		t.Errorf("certificates for an unknown host = %d, want 404", code)
 	}
 
 	// And the same rejection discipline as the host listing.
 	for _, q := range []string{"state=expired", "limit=0", "cursor=zzzz"} {
 		if code := h.adminReq(t, http.MethodGet,
-			ts.URL+"/v1/hosts/"+host.id+"/certificates?"+q, nil, nil); code != http.StatusBadRequest {
+			ts.URL+"/v1/memberships/"+host.id+"/certificates?"+q, nil, nil); code != http.StatusBadRequest {
 			t.Errorf("certificates?%s = %d, want 400", q, code)
 		}
 	}
@@ -170,8 +170,8 @@ func TestHostDetailCarriesTheCurrentCertificate(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "detail-cert", "10.42.64.1", false, false, nil)
 
-	var got wire.HostResponse
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts/"+host.id, nil, &got); code != http.StatusOK {
+	var got wire.MembershipResponse
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+host.id, nil, &got); code != http.StatusOK {
 		t.Fatalf("get host: %d", code)
 	}
 	if len(got.ActiveCertificates) != 1 {
@@ -187,14 +187,14 @@ func TestHostDetailCarriesTheCurrentCertificate(t *testing.T) {
 
 	// A host that has never enrolled has none, and says so by omission rather
 	// than by a zero-valued certificate.
-	var fresh wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var fresh wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "no-cert-yet", OverlayAddr: "10.42.64.2",
 		RoleID: h.roleID.String(),
 	}, &fresh); code != http.StatusCreated {
 		t.Fatalf("create host: %d", code)
 	}
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts/"+fresh.ID, nil, &fresh); code != http.StatusOK {
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+fresh.ID, nil, &fresh); code != http.StatusOK {
 		t.Fatalf("get host: %d", code)
 	}
 	if len(fresh.ActiveCertificates) != 0 {
@@ -204,10 +204,10 @@ func TestHostDetailCarriesTheCurrentCertificate(t *testing.T) {
 	// The listing must NOT carry them: that would be one query per host, which
 	// is the cost the whole listing design is avoiding.
 	page := h.listHosts(t, ts.URL, "name_contains=detail-cert")
-	if len(page.Hosts) != 1 {
-		t.Fatalf("listing returned %d hosts, want 1", len(page.Hosts))
+	if len(page.Memberships) != 1 {
+		t.Fatalf("listing returned %d hosts, want 1", len(page.Memberships))
 	}
-	if len(page.Hosts[0].ActiveCertificates) != 0 {
+	if len(page.Memberships[0].ActiveCertificates) != 0 {
 		t.Error("the listing carries certificates; that is a query per row")
 	}
 }

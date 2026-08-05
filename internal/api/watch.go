@@ -69,7 +69,7 @@ func (s *Server) handleAgentWatch(w http.ResponseWriter, r *http.Request) {
 	defer s.cfg.Metrics.WatcherClosed()
 
 	// Fast path: already behind, answer now.
-	resp, err := s.enroll.State(r.Context(), id.HostID, knownConfig, knownBlock)
+	resp, err := s.enroll.State(r.Context(), id.MembershipID, knownConfig, knownBlock)
 	if err != nil {
 		s.log.Error("watch state failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -88,7 +88,7 @@ func (s *Server) handleAgentWatch(w http.ResponseWriter, r *http.Request) {
 		// Re-read rather than trusting the event's epoch: another change may
 		// have landed since, and the agent wants the newest generation, not the
 		// one that happened to wake it.
-		resp, err = s.enroll.State(r.Context(), id.HostID, knownConfig, knownBlock)
+		resp, err = s.enroll.State(r.Context(), id.MembershipID, knownConfig, knownBlock)
 		if err != nil {
 			s.log.Error("watch state failed after wake", "error", err)
 			writeErr(w, http.StatusInternalServerError, "internal error")

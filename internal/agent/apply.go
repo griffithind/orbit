@@ -93,6 +93,14 @@ type Applier struct {
 	// it" and "I forgot" cannot look the same in a struct literal.
 	DisableValidation bool
 
+	// KeyRef overrides what pki.key points at.
+	//
+	// Empty — the normal case — means Layout.Paths.Key, a file this agent
+	// wrote. A "pkcs11:" URI means the private key lives on a token and there
+	// is no file: Material.PrivateKey will be empty, nothing is staged, and
+	// nebula performs the handshake's Diffie-Hellman on the token instead.
+	KeyRef string
+
 	// RestartSettle and RestartPoll bound the wait for a restart to show up as a
 	// new process. Zero uses the defaults.
 	RestartSettle time.Duration
@@ -450,12 +458,20 @@ func (a *Applier) localize(cfg string) string {
 			Key  string `yaml:"key"`
 		} `yaml:"pki"`
 	}
+	// The control plane renders a file path for pki.key because it does not
+	// know — and must not know — where this host keeps its private key, or
+	// whether it has one at all. A host whose key lives on a token substitutes
+	// the URI here: the same rewrite, a different destination.
+	key := a.Layout.Paths.Key
+	if a.KeyRef != "" {
+		key = a.KeyRef
+	}
 	replacements := [][2]string{}
 	if err := yaml.Unmarshal([]byte(cfg), &doc); err == nil {
 		replacements = [][2]string{
 			{doc.PKI.CA, a.Layout.Paths.CA},
 			{doc.PKI.Cert, a.Layout.Paths.Cert},
-			{doc.PKI.Key, a.Layout.Paths.Key},
+			{doc.PKI.Key, key},
 		}
 	} else {
 		// Unparseable: validateStaged will reject it in a moment with a far
@@ -465,7 +481,7 @@ func (a *Applier) localize(cfg string) string {
 		replacements = [][2]string{
 			{def.CA, a.Layout.Paths.CA},
 			{def.Cert, a.Layout.Paths.Cert},
-			{def.Key, a.Layout.Paths.Key},
+			{def.Key, key},
 		}
 	}
 	for _, r := range replacements {

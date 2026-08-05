@@ -352,9 +352,12 @@ func TestSweepLeavesAnExpiredActiveCAAlone(t *testing.T) {
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		// A network of its own: ca_one_active_per_network means an expired
 		// active CA cannot be staged alongside the harness's live one.
+		identityPub, identityRef := h.writeNetworkIdentity(t, t.TempDir())
 		net := store.Network{
-			Name:  "expired-signer-" + uuid.NewString()[:8],
-			CIDRs: []netip.Prefix{netip.MustParsePrefix("10.43.0.0/16")},
+			Name:              "expired-signer-" + uuid.NewString()[:8],
+			CIDRs:             []netip.Prefix{netip.MustParsePrefix("10.43.0.0/16")},
+			IdentityPublicKey: identityPub,
+			IdentitySignerRef: identityRef,
 		}
 		if err := tx.CreateNetwork(ctx, &net); err != nil {
 			return err

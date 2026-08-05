@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -72,11 +73,11 @@ func fixtureNetwork() networkView {
 // behind on config, silent for hours, with a restart outstanding. A fixture that
 // only covers the happy path leaves every conditional in the template untested,
 // and the conditionals are the parts that render during an incident.
-func fixtureHost() hostView {
+func fixtureHost() membershipView {
 	seen := time.Now().Add(-3 * time.Hour)
-	return hostView{
-		ID: uuid.NewString(), Name: "web-03", State: store.HostActive,
-		Badge:        hostStateBadge(store.HostActive),
+	return membershipView{
+		ID: uuid.NewString(), Name: "web-03", State: store.MembershipActive,
+		Badge:        membershipStateBadge(store.MembershipActive),
 		OverlayAddrs: []string{"10.42.0.7"},
 		RoleID:       uuid.NewString(), RoleName: "web",
 		Tags:         []string{"prod", "eu-west"},
@@ -89,8 +90,8 @@ func fixtureHost() hostView {
 
 		AppliedConfigEpoch: 40, AppliedBlocklistEpoch: 7,
 		ConfigEpoch: 41, BlocklistEpoch: 7,
-		ConfigBadge: epochBadge(40, 41, store.HostActive),
-		BlockBadge:  epochBadge(7, 7, store.HostActive),
+		ConfigBadge: epochBadge(40, 41, store.MembershipActive),
+		BlockBadge:  epochBadge(7, 7, store.MembershipActive),
 
 		RestartRequiredEpoch: 41, RestartPending: true,
 		ListenPort: 4242, TunDev: "orbit-prod", ConfigMode: "authoritative",
@@ -120,12 +121,12 @@ func fixtureConvergence() convergenceView {
 	seen := time.Now().Add(-90 * time.Minute)
 	return convergenceView{
 		ConfigEpoch: 41, BlocklistEpoch: 7,
-		HostsTotal: 204, ConfigApplied: 198, BlockApplied: 204,
+		MembershipsTotal: 204, ConfigApplied: 198, BlockApplied: 204,
 		ConfigBadge: convergedBadge(198, 204),
 		BlockBadge:  convergedBadge(204, 204),
 		Lagging: []laggingView{
-			{HostID: uuid.NewString(), Name: "db-01", AppliedConfigEpoch: 39, AppliedBlocklistEpoch: 7, LastSeenAt: &seen},
-			{HostID: uuid.NewString(), Name: "never-seen", AppliedConfigEpoch: 0, AppliedBlocklistEpoch: 0},
+			{MembershipID: uuid.NewString(), Name: "db-01", AppliedConfigEpoch: 39, AppliedBlocklistEpoch: 7, LastSeenAt: &seen},
+			{MembershipID: uuid.NewString(), Name: "never-seen", AppliedConfigEpoch: 0, AppliedBlocklistEpoch: 0},
 		},
 		Truncated: true,
 	}
@@ -184,19 +185,19 @@ func fixtures(s *Server) map[string]*pageData {
 			At:     now,
 		}),
 		"login.html": s.testPage("Sign in", loginView{
-			Next: "/ui/hosts/" + host.ID, Note: "Your session has ended.",
+			Next: "/ui/memberships/" + host.ID, Note: "Your session has ended.",
 			Problem: "That token is not valid.",
 		}),
 		"networks.html": s.testPage("Networks", networksView{Networks: []networkView{net}}),
 		"overview.html": s.testPage("prod", overviewView{
 			Network: net, Convergence: conv,
 			Expiring: []expiringView{{
-				HostID: host.ID, HostName: host.Name, Short: "abababababababab",
+				MembershipID: host.ID, MembershipName: host.Name, Short: "abababababababab",
 				RenewAt: now.Add(-6 * time.Hour), NotAfter: now.Add(6 * time.Hour),
 				LastSeenAt: host.LastSeenAt, Badge: badgeOverdue,
 			}},
 			Replicas: []replicaView{{
-				HostID: uuid.NewString(), Addr: "10.42.0.2", AgentPort: 8443, LastSeenAt: now,
+				MembershipID: uuid.NewString(), Addr: "10.42.0.2", AgentPort: 8443, LastSeenAt: now,
 			}},
 			Push:               pushView{Configured: true, Watchers: 3, Badge: badgeOK("push enabled"), Detail: "Agents are woken by a notification."},
 			CAs:                cas,
@@ -206,49 +207,59 @@ func fixtures(s *Server) map[string]*pageData {
 			Network     networkView
 			Convergence convergenceView
 		}{net, conv}),
-		"hosts.html": s.testPage("Hosts", hostListView{
-			Network: net, Hosts: []hostView{host},
+		"memberships.html": s.testPage("Memberships", membershipListView{
+			Network: net, Memberships: []membershipView{host},
 			Total:      intPtr(204),
-			Filter:     hostFilterView{State: store.HostActive, Behind: true, Query: "web", States: listableHostStates},
+			Filter:     membershipFilterView{State: store.MembershipActive, Behind: true, Query: "web", States: listableHostStates},
 			NextCursor: "?cursor=abc", PrevURL: "?",
 		}),
-		"host.html": s.testPage("web-03", hostDetailView{
-			Host: host, Network: net, Certificates: certs, More: true,
+		"membership.html": s.testPage("web-03", membershipDetailView{
+			Membership: host, Network: net, Certificates: certs, More: true,
 			ActiveCAName: "prod-ca-2", ActiveCAID: uuid.NewString(),
 			Findings: diagnose(host, certs, now, uuid.NewString(), true),
 		}),
 		"block.html": s.testPage("Block web-03", blockConfirmView{
-			Host: host, Network: net,
+			Membership: host, Network: net,
 			Consequences: []string{"web-03 RELAYS FOR OTHER HOSTS.", "It is a lighthouse."},
 		}),
-		"host_new.html": s.testPage("Add a host", hostNewView{
+		"membership_new.html": s.testPage("Reserve a place", membershipNewView{
 			Network: net,
 			Roles:   []roleOption{{ID: host.RoleID, Name: "web"}},
-			Form:    newHostForm{Name: "web-04", RoleID: host.RoleID, Tags: "prod", IsLighthouse: true},
-			Problem: "A lighthouse needs at least one public address.",
+			Form:    newMembershipForm{Name: "web-04", RoleID: host.RoleID},
+			Problem: "That name is already taken in this network.",
 		}),
 		"enroll_code.html": s.testPage("Enrollment code", enrollCodeView{
-			Host: host, Network: net,
+			Membership: &host, Name: host.Name, Network: net,
 			Code: "orbit-code-abcd-efgh", ExpiresAt: expires,
 			EnrollURL: "https://orbit.example.com/enroll/v1/enroll",
 			Command:   "orbit agent enroll -url https://orbit.example.com/enroll/v1/enroll -code … -network prod",
 		}),
+		// The reservation variant: no host exists yet, so the page must not
+		// render an address or a link to one. Rendered as its own case because
+		// a nil Membership is exactly the branch a template is most likely to get
+		// wrong and least likely to be exercised by hand.
+		"enroll_code.html#reserved": s.testPage("Reservation", enrollCodeView{
+			Membership: nil, Name: "web-04", Network: net,
+			Code: "orbit-code-ijkl-mnop", ExpiresAt: expires,
+			EnrollURL: "https://orbit.example.com",
+			Command:   "orbit agent join -url https://orbit.example.com -network prod -code …",
+		}),
 		"rotation.html": s.testPage("CA rotation", rv),
 		"audit.html": s.testPage("Audit", auditView{
 			Records: []auditRecordView{{
-				At: now, Action: store.ActionHostBlocked, ActorType: store.ActorToken,
+				At: now, Action: store.ActionMembershipBlocked, ActorType: store.ActorToken,
 				ActorDisplay: "ops-oncall", TargetType: "host", TargetID: host.ID,
-				SourceIP: "10.0.0.5", Meta: `{"via":"ui"}`, HostLink: "/ui/hosts/" + host.ID,
+				SourceIP: "10.0.0.5", Meta: `{"via":"ui"}`, MembershipLink: "/ui/memberships/" + host.ID,
 			}, {
 				At: now.Add(-time.Hour), Action: store.ActionEnrollFailed, ActorType: store.ActorSystem,
 				Meta: `{}`,
 			}},
-			Filter:  auditFilterView{Action: store.ActionHostBlocked, TargetID: host.ID, SinceHours: 24},
+			Filter:  auditFilterView{Action: store.ActionMembershipBlocked, TargetID: host.ID, SinceHours: 24},
 			Actions: auditActions, AtLimit: true, Limit: auditPageSize,
 		}),
 		"tokens.html": s.testPage("API tokens", tokensView{Tokens: []tokenView{
 			{
-				ID: uuid.NewString(), Name: "ci", Scopes: []string{"hosts:read"},
+				ID: uuid.NewString(), Name: "ci", Scopes: []string{"memberships:read"},
 				CreatedAt: now.Add(-90 * 24 * time.Hour), LastUsedAt: &used,
 				Badge: badgeOK("in use"), ExpiresAt: &expires,
 			},
@@ -279,17 +290,35 @@ func fixtures(s *Server) map[string]*pageData {
 
 func intPtr(n int) *int { return &n }
 
+// baseTemplate strips a fixture's "#variant" suffix.
+//
+// A page with a branch that changes what it renders — enroll_code.html, whose
+// Membership is nil for a reservation — needs more than one fixture, and the untaken
+// branch is exactly the one nobody looks at by hand. Variants let a template
+// carry several while keeping the one-fixture-per-page guard below meaningful.
+func baseTemplate(fixture string) string {
+	if i := strings.IndexByte(fixture, '#'); i >= 0 {
+		return fixture[:i]
+	}
+	return fixture
+}
+
 func TestEveryTemplateRenders(t *testing.T) {
 	s := testServer(t)
 	fx := fixtures(s)
 
-	for _, name := range s.tpl.names {
-		t.Run(name, func(t *testing.T) {
-			data, ok := fx[name]
-			if !ok {
-				t.Fatalf("no fixture for %s; add one so this template is executed, "+
-					"not merely parsed", name)
-			}
+	// Driven by the FIXTURES rather than the template list, so variants are
+	// rendered too. The guard that every template has one is separate.
+	names := make([]string, 0, len(fx))
+	for name := range fx {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, fixture := range names {
+		t.Run(fixture, func(t *testing.T) {
+			data := fx[fixture]
+			name := baseTemplate(fixture)
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
 			if err := s.render(rec, req, name, http.StatusOK, data); err != nil {
@@ -311,14 +340,18 @@ func TestEveryTemplateRenders(t *testing.T) {
 func TestEveryPageHasAFixture(t *testing.T) {
 	s := testServer(t)
 	fx := fixtures(s)
-	for _, name := range s.tpl.names {
-		if _, ok := fx[name]; !ok {
-			t.Errorf("page %s has no fixture", name)
-		}
-	}
-	for name := range fx {
+	covered := map[string]bool{}
+	for fixture := range fx {
+		name := baseTemplate(fixture)
 		if _, ok := s.tpl.pages[name]; !ok {
-			t.Errorf("fixture %s has no page template", name)
+			t.Errorf("fixture %s has no page template", fixture)
+			continue
+		}
+		covered[name] = true
+	}
+	for _, name := range s.tpl.names {
+		if !covered[name] {
+			t.Errorf("page %s has no fixture; add one so it is executed, not merely parsed", name)
 		}
 	}
 }
@@ -426,7 +459,7 @@ func TestLiveScreensDegradeWithoutJS(t *testing.T) {
 	s := testServer(t)
 	fx := fixtures(s)
 
-	for _, name := range []string{"overview.html", "convergence.html", "host.html", "rotation.html"} {
+	for _, name := range []string{"overview.html", "convergence.html", "membership.html", "rotation.html"} {
 		data := fx[name]
 		data.LiveNetwork = uuid.NewString()
 
@@ -461,15 +494,15 @@ func TestStoredValuesAreEscaped(t *testing.T) {
 	host.Tags = []string{payload}
 	host.RoleName = payload
 
-	data := s.testPage("x", hostDetailView{
-		Host: host, Network: fixtureNetwork(),
+	data := s.testPage("x", membershipDetailView{
+		Membership: host, Network: fixtureNetwork(),
 		Certificates: fixtureCerts(),
 		Findings:     diagnose(host, nil, time.Now(), "", true),
 	})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
-	if err := s.render(rec, req, "host.html", http.StatusOK, data); err != nil {
+	if err := s.render(rec, req, "membership.html", http.StatusOK, data); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	body := rec.Body.String()
@@ -482,7 +515,7 @@ func TestStoredValuesAreEscaped(t *testing.T) {
 
 	// Audit metadata is jsonb and some of it originated in a request.
 	auditData := s.testPage("x", auditView{Records: []auditRecordView{{
-		At: time.Now(), Action: "host.deleted", Meta: `{"name":"` + payload + `"}`,
+		At: time.Now(), Action: "membership.deleted", Meta: `{"name":"` + payload + `"}`,
 	}}})
 	rec = httptest.NewRecorder()
 	if err := s.render(rec, req, "audit.html", http.StatusOK, auditData); err != nil {
@@ -500,7 +533,7 @@ func TestStoredValuesAreEscaped(t *testing.T) {
 func TestDiagnoseNamesTheOverdueRenewal(t *testing.T) {
 	now := time.Now()
 	seen := now.Add(-2 * time.Minute)
-	host := hostView{State: store.HostActive, LastSeenAt: &seen}
+	host := membershipView{State: store.MembershipActive, LastSeenAt: &seen}
 
 	certs := []certView{newCertView(store.CertificateRow{
 		ID: uuid.New(), CAID: uuid.New(), CAName: "ca-1", State: store.CertActive,
@@ -520,7 +553,7 @@ func TestDiagnoseNamesTheOverdueRenewal(t *testing.T) {
 func TestDiagnoseHealthyHostSaysSo(t *testing.T) {
 	now := time.Now()
 	seen := now.Add(-time.Minute)
-	host := hostView{State: store.HostActive, LastSeenAt: &seen}
+	host := membershipView{State: store.MembershipActive, LastSeenAt: &seen}
 	caID := uuid.NewString()
 	certs := []certView{newCertView(store.CertificateRow{
 		ID: uuid.New(), CAID: uuid.MustParse(caID), CAName: "ca-1", State: store.CertActive,
@@ -536,14 +569,14 @@ func TestDiagnoseHealthyHostSaysSo(t *testing.T) {
 // TestEpochBadgeDoesNotCallANewHostBehind guards the one comparison that would
 // otherwise make the badge permanently red on a host that is not broken.
 func TestEpochBadgeDoesNotCallANewHostBehind(t *testing.T) {
-	b := epochBadge(0, 41, store.HostCreated)
+	b := epochBadge(0, 41, store.MembershipCreated)
 	if b.Tone != "muted" {
 		t.Fatalf("a never-enrolled host reads as %q, want muted", b.Tone)
 	}
-	if b := epochBadge(40, 41, store.HostActive); b.Tone != "warn" {
+	if b := epochBadge(40, 41, store.MembershipActive); b.Tone != "warn" {
 		t.Fatalf("a behind host reads as %q, want warn", b.Tone)
 	}
-	if b := epochBadge(41, 41, store.HostActive); b.Tone != "ok" {
+	if b := epochBadge(41, 41, store.MembershipActive); b.Tone != "ok" {
 		t.Fatalf("a converged host reads as %q, want ok", b.Tone)
 	}
 }
@@ -555,11 +588,11 @@ func TestEpochBadgeDoesNotCallANewHostBehind(t *testing.T) {
 func TestEveryBadgeHasAGlyphAndAWord(t *testing.T) {
 	all := []badge{
 		badgeOverdue,
-		hostStateBadge(store.HostActive), hostStateBadge(store.HostSuspended),
-		hostStateBadge(store.HostCreated), hostStateBadge("weird"),
+		membershipStateBadge(store.MembershipActive), membershipStateBadge(store.MembershipSuspended),
+		membershipStateBadge(store.MembershipCreated), membershipStateBadge("weird"),
 		caStateBadge(store.CAActive), caStateBadge(store.CAPending),
 		caStateBadge(store.CARetiring), caStateBadge(store.CARetired),
-		epochBadge(1, 2, store.HostActive), convergedBadge(0, 0), convergedBadge(1, 2),
+		epochBadge(1, 2, store.MembershipActive), convergedBadge(0, 0), convergedBadge(1, 2),
 	}
 	for _, b := range all {
 		if b.Glyph == "" || b.Word == "" || b.Tone == "" {
@@ -691,7 +724,7 @@ func TestSafeNextRefusesOffOriginRedirects(t *testing.T) {
 		"https://evil.example/ui/",
 		"//evil.example",
 		`/\evil.example`,
-		"/v1/hosts",
+		"/v1/memberships",
 		"javascript:alert(1)",
 		"",
 	}
@@ -700,7 +733,7 @@ func TestSafeNextRefusesOffOriginRedirects(t *testing.T) {
 			t.Errorf("safeNext(%q) = %q, want the fallback", in, got)
 		}
 	}
-	if got := safeNext("/ui/hosts/abc?x=1"); got != "/ui/hosts/abc?x=1" {
+	if got := safeNext("/ui/memberships/abc?x=1"); got != "/ui/memberships/abc?x=1" {
 		t.Errorf("safeNext dropped a legitimate destination: %q", got)
 	}
 }

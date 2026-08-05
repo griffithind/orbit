@@ -10,7 +10,7 @@ import (
 
 // Rule is one compiled nebula firewall rule.
 //
-// Deliberately only the four fields the compiler can emit. There is no Host,
+// Deliberately only the four fields the compiler can emit. There is no Membership,
 // no Groups and no CAName, because compiling to addresses is the whole design
 // (see the package comment) and a field that is always empty is a field a
 // reader has to check. There is no Code either: nebula's own error says support
@@ -61,12 +61,12 @@ type Compiler struct {
 	Management []Endpoint
 }
 
-// Host compiles one host's rules.
-func (c Compiler) Host(doc Document, hostID string) (Ruleset, error) {
-	hosts := c.Fleet.Hosts()
-	idx := slices.IndexFunc(hosts, func(h Host) bool { return h.ID == hostID })
+// Membership compiles one host's rules.
+func (c Compiler) Membership(doc Document, membershipID string) (Ruleset, error) {
+	hosts := c.Fleet.Memberships()
+	idx := slices.IndexFunc(hosts, func(h Membership) bool { return h.ID == membershipID })
 	if idx < 0 {
-		return Ruleset{}, fmt.Errorf("%w: host %s is not in this network", ErrInvalid, hostID)
+		return Ruleset{}, fmt.Errorf("%w: host %s is not in this network", ErrInvalid, membershipID)
 	}
 	entries, err := c.resolveAll(doc)
 	if err != nil {
@@ -78,7 +78,7 @@ func (c Compiler) Host(doc Document, hostID string) (Ruleset, error) {
 // All compiles every host's rules, keyed by host id.
 //
 // The bulk form exists because resolving the document is the expensive half and
-// it is identical for every host: rendering a whole network through Host would
+// it is identical for every host: rendering a whole network through Membership would
 // redo it N times. Callers that render one host per agent poll pay that cost by
 // construction; see the measurements in scale_test.go.
 func (c Compiler) All(doc Document) (map[string]Ruleset, error) {
@@ -86,8 +86,8 @@ func (c Compiler) All(doc Document) (map[string]Ruleset, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]Ruleset, len(c.Fleet.Hosts()))
-	for _, h := range c.Fleet.Hosts() {
+	out := make(map[string]Ruleset, len(c.Fleet.Memberships()))
+	for _, h := range c.Fleet.Memberships() {
 		out[h.ID] = c.emit(entries, h)
 	}
 	return out, nil
@@ -114,11 +114,11 @@ type resolvedEntry struct {
 	ports    []string
 }
 
-func (s side) names(h Host) bool { return s.own[h.ID] || len(s.routed[h.ID]) > 0 }
+func (s side) names(h Membership) bool { return s.own[h.ID] || len(s.routed[h.ID]) > 0 }
 
 // localCIDRs is the set of local_cidr values this side implies for h. Empty
 // string means "leave the key off", which is a distinct and useful value.
-func (s side) localCIDRs(h Host) []string {
+func (s side) localCIDRs(h Membership) []string {
 	var out []string
 	if s.own[h.ID] {
 		out = append(out, "")
@@ -152,7 +152,7 @@ func (c Compiler) resolveAll(doc Document) ([]resolvedEntry, error) {
 
 func (c Compiler) resolve(sels []Selector) (side, error) {
 	s := side{own: map[string]bool{}, routed: map[string][]netip.Prefix{}}
-	hosts := c.Fleet.Hosts()
+	hosts := c.Fleet.Memberships()
 
 	for _, raw := range sels {
 		sel, err := parseSelector(raw)
@@ -195,7 +195,7 @@ func (c Compiler) resolve(sels []Selector) (side, error) {
 				}
 				s.own[h.ID] = true
 				for _, a := range h.Addrs {
-					s.peers = append(s.peers, hostPrefix(a))
+					s.peers = append(s.peers, membershipPrefix(a))
 				}
 			}
 			// host: and id: name ONE specific entity, so naming nothing is a
@@ -237,7 +237,7 @@ func (c Compiler) resolve(sels []Selector) (side, error) {
 	return s, nil
 }
 
-func selectorMatches(sel selector, h Host) bool {
+func selectorMatches(sel selector, h Membership) bool {
 	switch sel.kind {
 	case selHost:
 		return h.Name == sel.value
@@ -260,7 +260,7 @@ func (c Compiler) withinFleet(p netip.Prefix) bool {
 			return true
 		}
 	}
-	for _, h := range c.Fleet.Hosts() {
+	for _, h := range c.Fleet.Memberships() {
 		for _, u := range h.UnsafeNetworks {
 			if u.Bits() <= p.Bits() && u.Contains(p.Addr()) {
 				return true
@@ -309,7 +309,7 @@ func compilePorts(e Entry) ([]string, error) {
 }
 
 // emit produces one host's rules from the resolved document.
-func (c Compiler) emit(entries []resolvedEntry, self Host) Ruleset {
+func (c Compiler) emit(entries []resolvedEntry, self Membership) Ruleset {
 	in := map[Rule]struct{}{}
 	out := map[Rule]struct{}{}
 
@@ -331,7 +331,7 @@ func (c Compiler) emit(entries []resolvedEntry, self Host) Ruleset {
 	return Ruleset{Inbound: sortRules(in), Outbound: sortRules(out)}
 }
 
-func emitRules(dst map[Rule]struct{}, self Host, peers []netip.Prefix, localCIDRs []string, proto string, ports []string) {
+func emitRules(dst map[Rule]struct{}, self Membership, peers []netip.Prefix, localCIDRs []string, proto string, ports []string) {
 	for _, p := range peers {
 		// A host is never its own peer over the tunnel: a packet to itself does
 		// not traverse nebula, so a rule naming its own address is dead weight
@@ -349,7 +349,7 @@ func emitRules(dst map[Rule]struct{}, self Host, peers []netip.Prefix, localCIDR
 	}
 }
 
-func (c Compiler) managementFloor(self Host, in, out map[Rule]struct{}) {
+func (c Compiler) managementFloor(self Membership, in, out map[Rule]struct{}) {
 	for _, ep := range c.Management {
 		if !ep.Addr.IsValid() || ep.Port <= 0 {
 			continue
@@ -363,7 +363,7 @@ func (c Compiler) managementFloor(self Host, in, out map[Rule]struct{}) {
 			}
 			continue
 		}
-		out[Rule{Proto: "tcp", Port: port, CIDR: hostPrefix(ep.Addr).String()}] = struct{}{}
+		out[Rule{Proto: "tcp", Port: port, CIDR: membershipPrefix(ep.Addr).String()}] = struct{}{}
 	}
 }
 

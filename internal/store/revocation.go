@@ -20,8 +20,8 @@ import (
 // still trusted.
 //
 // Returns the new blocklist epoch.
-func (t *Tx) BlockHost(ctx context.Context, hostID uuid.UUID, reason string) (int64, error) {
-	host, err := t.GetHost(ctx, hostID)
+func (t *Tx) BlockHost(ctx context.Context, membershipID uuid.UUID, reason string) (int64, error) {
+	host, err := t.GetHost(ctx, membershipID)
 	if err != nil {
 		return 0, err
 	}
@@ -36,8 +36,8 @@ func (t *Tx) BlockHost(ctx context.Context, hostID uuid.UUID, reason string) (in
 	rows, err := t.tx.Query(ctx, `
 		UPDATE orbit.certificate
 		   SET state = 'revoked'
-		 WHERE host_id = $1 AND state IN ('active', 'pending')
-		RETURNING fingerprint, not_after`, hostID)
+		 WHERE membership_id = $1 AND state IN ('active', 'pending')
+		RETURNING fingerprint, not_after`, membershipID)
 	if err != nil {
 		return 0, mapErr(err, "revoke certificates")
 	}
@@ -73,7 +73,7 @@ func (t *Tx) BlockHost(ctx context.Context, hostID uuid.UUID, reason string) (in
 		}
 	}
 
-	if err := t.SetHostState(ctx, hostID, HostSuspended); err != nil {
+	if err := t.SetHostState(ctx, membershipID, MembershipSuspended); err != nil {
 		return 0, err
 	}
 	return epoch, nil
@@ -88,7 +88,7 @@ func (t *Tx) BlockHost(ctx context.Context, hostID uuid.UUID, reason string) (in
 // the word leads anyone to expect. So this blocks first, then deletes.
 //
 // The blocklist entries survive the host: blocklist_entry references
-// network_id, not host_id, so nothing cascades them away. They are pruned
+// network_id, not membership_id, so nothing cascades them away. They are pruned
 // normally once the revoked certificates pass their expiry, at which point
 // nebula rejects those certificates on age alone and the fingerprints stop
 // being worth distributing.
@@ -99,19 +99,19 @@ func (t *Tx) BlockHost(ctx context.Context, hostID uuid.UUID, reason string) (in
 // new host with a new identity.
 //
 // Returns the new blocklist epoch.
-func (t *Tx) DeleteHost(ctx context.Context, hostID uuid.UUID, reason string) (int64, error) {
-	host, err := t.GetHost(ctx, hostID)
+func (t *Tx) DeleteHost(ctx context.Context, membershipID uuid.UUID, reason string) (int64, error) {
+	host, err := t.GetHost(ctx, membershipID)
 	if err != nil {
 		return 0, err
 	}
 
-	epoch, err := t.BlockHost(ctx, hostID, reason)
+	epoch, err := t.BlockHost(ctx, membershipID, reason)
 	if err != nil {
 		return 0, err
 	}
 
-	// Cascades to host_address, certificate, and enrollment_credential.
-	tag, err := t.tx.Exec(ctx, `DELETE FROM orbit.host WHERE id = $1`, hostID)
+	// Cascades to membership_address, certificate, and enrollment_credential.
+	tag, err := t.tx.Exec(ctx, `DELETE FROM orbit.membership WHERE id = $1`, membershipID)
 	if err != nil {
 		return 0, mapErr(err, "delete host")
 	}
@@ -139,8 +139,8 @@ func (t *Tx) nextBlocklistEpoch(ctx context.Context, networkID uuid.UUID) (int64
 // Note this does not un-revoke the certificates: those are gone for good and
 // the host must enroll or renew to get a new one. Removing the entries only
 // stops distributing fingerprints that are no longer meaningful.
-func (t *Tx) UnblockHost(ctx context.Context, hostID uuid.UUID) (int64, error) {
-	host, err := t.GetHost(ctx, hostID)
+func (t *Tx) UnblockHost(ctx context.Context, membershipID uuid.UUID) (int64, error) {
+	host, err := t.GetHost(ctx, membershipID)
 	if err != nil {
 		return 0, err
 	}
@@ -149,12 +149,12 @@ func (t *Tx) UnblockHost(ctx context.Context, hostID uuid.UUID) (int64, error) {
 		DELETE FROM orbit.blocklist_entry
 		 WHERE network_id = $1
 		   AND fingerprint IN (
-		       SELECT fingerprint FROM orbit.certificate WHERE host_id = $2)`,
-		host.NetworkID, hostID); err != nil {
+		       SELECT fingerprint FROM orbit.certificate WHERE membership_id = $2)`,
+		host.NetworkID, membershipID); err != nil {
 		return 0, mapErr(err, "remove blocklist entries")
 	}
 
-	if err := t.SetHostState(ctx, hostID, HostActive); err != nil {
+	if err := t.SetHostState(ctx, membershipID, MembershipActive); err != nil {
 		return 0, err
 	}
 	return t.nextBlocklistEpoch(ctx, host.NetworkID)
@@ -219,24 +219,25 @@ func (t *Tx) Convergence(ctx context.Context, networkID uuid.UUID, laggingLimit 
 		       count(h.id) FILTER (WHERE h.applied_config_epoch    >= n.config_epoch),
 		       count(h.id) FILTER (WHERE h.applied_blocklist_epoch >= n.blocklist_epoch)
 		  FROM orbit.network n
-		  LEFT JOIN orbit.host h
+		  LEFT JOIN orbit.membership h
 		         ON h.network_id = n.id AND h.state IN ('enrolled', 'active')
 		 WHERE n.id = $1
 		 GROUP BY n.config_epoch, n.blocklist_epoch`, networkID,
-	).Scan(&c.ConfigEpoch, &c.BlocklistEpoch, &c.HostsTotal, &c.ConfigApplied, &c.BlockApplied)
+	).Scan(&c.ConfigEpoch, &c.BlocklistEpoch, &c.MembershipsTotal, &c.ConfigApplied, &c.BlockApplied)
 	if err != nil {
 		return nil, mapErr(err, "convergence")
 	}
 
 	rows, err := t.tx.Query(ctx, `
-		SELECT h.id, h.name, h.applied_config_epoch, h.applied_blocklist_epoch, h.last_seen_at
-		  FROM orbit.host h
+		SELECT h.id, h.name, h.applied_config_epoch, h.applied_blocklist_epoch, d.last_seen_at
+		  FROM orbit.membership h
 		  JOIN orbit.network n ON n.id = h.network_id
+		  JOIN orbit.device d ON d.id = h.device_id
 		 WHERE h.network_id = $1
 		   AND h.state IN ('enrolled', 'active')
 		   AND (h.applied_config_epoch < n.config_epoch
 		     OR h.applied_blocklist_epoch < n.blocklist_epoch)
-		 ORDER BY h.last_seen_at NULLS FIRST
+		 ORDER BY d.last_seen_at NULLS FIRST
 		 LIMIT $2`, networkID, laggingLimit)
 	if err != nil {
 		return nil, mapErr(err, "lagging hosts")
@@ -245,7 +246,7 @@ func (t *Tx) Convergence(ctx context.Context, networkID uuid.UUID, laggingLimit 
 
 	for rows.Next() {
 		var l LaggingHost
-		if err := rows.Scan(&l.HostID, &l.Name, &l.AppliedConfigEpoch,
+		if err := rows.Scan(&l.MembershipID, &l.Name, &l.AppliedConfigEpoch,
 			&l.AppliedBlocklistEpoch, &l.LastSeenAt); err != nil {
 			return nil, mapErr(err, "scan lagging host")
 		}

@@ -188,7 +188,7 @@ func (s *Server) checkBearer(w http.ResponseWriter, r *http.Request) bool {
 			"served under whatever session your browser attached instead — possibly "+
 			"someone else's — and audited as them.\n\n"+
 			"For scripting, use /v1 with the same token:\n\n"+
-			"  curl -H \"Authorization: Bearer $ORBIT_TOKEN\" "+s.origin(r)+"/v1/hosts?network_id=…\n\n"+
+			"  curl -H \"Authorization: Bearer $ORBIT_TOKEN\" "+s.origin(r)+"/v1/memberships?network_id=…\n\n"+
 			"(the JSON API is on the -addr listener, not this one)")
 	return false
 }
@@ -208,7 +208,7 @@ func (s *Server) checkBearer(w http.ResponseWriter, r *http.Request) bool {
 //     Strict for a reason given at the cookie.
 //
 //  2. http.NewCrossOriginProtection, from the standard library as of Go 1.25.
-//     Checks Sec-Fetch-Site, falling back to comparing Origin against Host. Used
+//     Checks Sec-Fetch-Site, falling back to comparing Origin against Membership. Used
 //     rather than reimplemented because the fallback rules are fiddly and being
 //     subtly wrong here is invisible until it matters.
 //
@@ -228,14 +228,14 @@ func (s *Server) crossOrigin(next http.Handler) http.Handler {
 	// One instance, built once: it holds the trusted-origin set.
 	prot := http.NewCrossOriginProtection()
 	if s.cfg.BaseURL != "" {
-		// Behind a TLS terminator the Host the handler sees may not be the host
+		// Behind a TLS terminator the Membership the handler sees may not be the host
 		// the browser used. Naming the external origin makes the Origin
 		// comparison compare against the truth rather than against whatever the
 		// proxy forwarded.
 		if u, err := url.Parse(s.cfg.BaseURL); err == nil && u.Scheme != "" && u.Host != "" {
 			// An error here is a malformed -ui-url, which CheckExposure has
 			// already had a chance to reject; ignoring it leaves the strict
-			// same-Host comparison in force, which is the safe direction.
+			// same-Membership comparison in force, which is the safe direction.
 			_ = prot.AddTrustedOrigin(u.Scheme + "://" + u.Host)
 		}
 	}
@@ -263,7 +263,7 @@ func (s *Server) crossOrigin(next http.Handler) http.Handler {
 
 // safeMethod reports whether a method is one this surface guarantees changes
 // nothing. Every handler behind a GET here is a read; that is the contract the
-// CSRF check depends on, and it is why there is no /ui/hosts/{id}/block?do=1.
+// CSRF check depends on, and it is why there is no /ui/memberships/{id}/block?do=1.
 func safeMethod(m string) bool {
 	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
 }

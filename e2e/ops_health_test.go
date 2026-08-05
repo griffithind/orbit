@@ -35,14 +35,10 @@ import (
 func (h *harness) servePublicWithHealth(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
 	})
@@ -64,14 +60,10 @@ func (h *harness) servePublicWithHealth(t *testing.T, nebulaPort int) *httptest.
 func (h *harness) servePublicWithNotifier(t *testing.T, nebulaPort int, notifier *notify.Notifier) *httptest.Server {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
 	})
@@ -131,13 +123,13 @@ func TestHealthNeedsNoCredential(t *testing.T) {
 	}
 
 	// The contrast that gives the above its meaning.
-	resp, err := http.Get(ts.URL + "/v1/hosts")
+	resp, err := http.Get(ts.URL + "/v1/memberships")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("unauthenticated GET /v1/hosts = %d, want 401 — health must be the exception, "+
+		t.Errorf("unauthenticated GET /v1/memberships = %d, want 401 — health must be the exception, "+
 			"not the rule on this listener", resp.StatusCode)
 	}
 }

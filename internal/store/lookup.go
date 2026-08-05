@@ -68,6 +68,9 @@ func (s *Store) RedeemEnrollmentCredential(ctx context.Context, secretHash []byt
 	var (
 		r       RedeemedCredential
 		fromArg any = nil
+		name    *string
+		addr    *netip.Addr
+		roleID  *uuid.UUID
 	)
 	if from.IsValid() {
 		fromArg = from
@@ -79,14 +82,75 @@ func (s *Store) RedeemEnrollmentCredential(ctx context.Context, secretHash []byt
 		 WHERE secret_hash = $1
 		   AND used_at IS NULL
 		   AND expires_at > now()
-		RETURNING id, network_id, host_id, method`,
+		RETURNING id, network_id, membership_id, method,
+		          reserved_name, reserved_addr, reserved_role_id`,
 		secretHash, fromArg,
-	).Scan(&r.CredentialID, &r.NetworkID, &r.HostID, &r.Method)
+	).Scan(&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method,
+		&name, &addr, &roleID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, mapErr(err, "redeem enrollment credential")
+	}
+	if name != nil {
+		r.Reserved = &Reservation{Name: *name, RoleID: roleID}
+		if addr != nil {
+			r.Reserved.Addr = *addr
+		}
+	}
+	return &r, nil
+}
+
+// RedeemCredential consumes a credential inside the caller's transaction.
+//
+// The transactional twin of RedeemEnrollmentCredential, and the difference in
+// scope is the whole reason both exist rather than one.
+//
+// The pool-level version redeems BEFORE and OUTSIDE the work it authorizes,
+// because that work is a certificate issuance: an attacker replaying a spent
+// code must not be able to cost one, so the spend has to survive whatever
+// happens next. This one is for the join path, where redemption authorizes the
+// creation of two rows and nothing expensive. There the realistic failure is a
+// name collision, and burning the operator's code on an attempt that created
+// nothing would be the wrong outcome.
+//
+// Neither is a safe substitute for the other. Using this one for enrollment
+// would make a rejected enrollment refund the code.
+func (t *Tx) RedeemCredential(ctx context.Context, secretHash []byte, from netip.Addr) (*RedeemedCredential, error) {
+	var (
+		r       RedeemedCredential
+		fromArg any = nil
+		name    *string
+		addr    *netip.Addr
+		roleID  *uuid.UUID
+	)
+	if from.IsValid() {
+		fromArg = from
+	}
+
+	err := t.tx.QueryRow(ctx, `
+		UPDATE orbit.enrollment_credential
+		   SET used_at = now(), used_from = $2
+		 WHERE secret_hash = $1
+		   AND used_at IS NULL
+		   AND expires_at > now()
+		RETURNING id, network_id, membership_id, method,
+		          reserved_name, reserved_addr, reserved_role_id`,
+		secretHash, fromArg,
+	).Scan(&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method,
+		&name, &addr, &roleID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, mapErr(err, "redeem credential")
+	}
+	if name != nil {
+		r.Reserved = &Reservation{Name: *name, RoleID: roleID}
+		if addr != nil {
+			r.Reserved.Addr = *addr
+		}
 	}
 	return &r, nil
 }
@@ -102,11 +166,11 @@ func (s *Store) ResolveAgentHost(ctx context.Context, networkID uuid.UUID, addr 
 	var id AgentIdentity
 	err := s.pool.QueryRow(ctx, `
 		SELECT h.id, h.state
-		  FROM orbit.host_address a
-		  JOIN orbit.host h ON h.id = a.host_id
+		  FROM orbit.membership_address a
+		  JOIN orbit.membership h ON h.id = a.membership_id
 		 WHERE a.network_id = $1 AND a.addr = $2`,
 		networkID, addr,
-	).Scan(&id.HostID, &id.State)
+	).Scan(&id.MembershipID, &id.State)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -139,9 +203,9 @@ func (s *Store) ListNetworkIDs(ctx context.Context) ([]uuid.UUID, error) {
 //
 // A method on Store rather than Tx because the heartbeat runs on its own timer
 // with no surrounding request to borrow a transaction from.
-func (s *Store) Register(ctx context.Context, networkID, hostID uuid.UUID, addr netip.Addr, agentPort int) error {
+func (s *Store) Register(ctx context.Context, networkID, membershipID uuid.UUID, addr netip.Addr, agentPort int) error {
 	return s.Tx(ctx, func(ctx context.Context, tx *Tx) error {
-		return tx.RegisterControlPlane(ctx, networkID, hostID, addr, agentPort)
+		return tx.RegisterControlPlane(ctx, networkID, membershipID, addr, agentPort)
 	})
 }
 

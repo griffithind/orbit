@@ -140,8 +140,8 @@ func TestCLIExitCodeByErrorClass(t *testing.T) {
 
 	// A host carrying the default role, so `role rm` has something to conflict
 	// with.
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "exit-codes", OverlayAddr: "10.42.71.1",
 		RoleID: h.roleID.String(),
 	}, &host); code != http.StatusCreated {
@@ -151,7 +151,7 @@ func TestCLIExitCodeByErrorClass(t *testing.T) {
 	// A token that authenticates but cannot block, for the 403.
 	var narrow wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "cli-narrow-" + uuid.NewString()[:8], Scopes: []string{"hosts:read", "networks:read"},
+		Name: "cli-narrow-" + uuid.NewString()[:8], Scopes: []string{"memberships:read", "networks:read"},
 	}, &narrow); code != http.StatusCreated {
 		t.Fatalf("create narrow token: %d", code)
 	}
@@ -174,11 +174,11 @@ func TestCLIExitCodeByErrorClass(t *testing.T) {
 		},
 		{
 			name: "usage: unknown subcommand", token: h.token,
-			args: []string{"host", "nosuchverb"}, want: 2,
+			args: []string{"membership", "nosuchverb"}, want: 2,
 		},
 		{
 			name: "usage: unresolvable host name", token: h.token,
-			args: []string{"host", "show", "no-such-host"}, want: 2,
+			args: []string{"membership", "show", "no-such-host"}, want: 2,
 			contains: `no host named "no-such-host"`,
 		},
 		{
@@ -190,12 +190,12 @@ func TestCLIExitCodeByErrorClass(t *testing.T) {
 		},
 		{
 			name: "403: missing scope", token: narrow.Token,
-			args: []string{"host", "block", "exit-codes"}, want: 4,
-			contains: `hosts:block`,
+			args: []string{"membership", "block", "exit-codes"}, want: 4,
+			contains: `memberships:block`,
 		},
 		{
 			name: "404: absent host", token: h.token,
-			args: []string{"host", "show", uuid.NewString()}, want: 5,
+			args: []string{"membership", "show", uuid.NewString()}, want: 5,
 			// The API conflates absent and forbidden deliberately. The CLI must
 			// not un-conflate it, however helpful that would feel.
 			absent: []string{"permission", "may not see", "not allowed", "forbidden"},
@@ -244,8 +244,8 @@ func TestCLIJSONIsTheAPIResponseVerbatim(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "verbatim", OverlayAddr: "10.42.72.1",
 		RoleID: h.roleID.String(), Tags: []string{"a", "b"},
 	}, &host); code != http.StatusCreated {
@@ -257,8 +257,8 @@ func TestCLIJSONIsTheAPIResponseVerbatim(t *testing.T) {
 		args []string
 		path string
 	}{
-		{"host ls", []string{"host", "ls", "-json"}, "/v1/hosts?network_id=" + h.netID.String()},
-		{"host show", []string{"host", "show", "verbatim", "-json"}, "/v1/hosts/" + host.ID},
+		{"membership ls", []string{"membership", "ls", "-json"}, "/v1/memberships?network_id=" + h.netID.String()},
+		{"membership show", []string{"membership", "show", "verbatim", "-json"}, "/v1/memberships/" + host.ID},
 		{"whoami", []string{"whoami", "-json"}, "/v1/whoami"},
 		{"network ls", []string{"network", "ls", "-json"}, "/v1/networks"},
 		{"role ls", []string{"role", "ls", "-json"}, "/v1/roles?network_id=" + h.netID.String()},
@@ -312,8 +312,8 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "secret-pipe", OverlayAddr: "10.42.73.1",
 		RoleID: h.roleID.String(),
 	}, &host); code != http.StatusCreated {
@@ -321,7 +321,7 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 	}
 
 	t.Run("host code", func(t *testing.T) {
-		got := h.cli(t, ts, "host", "code", "secret-pipe")
+		got := h.cli(t, ts, "membership", "code", "secret-pipe")
 		if got.code != 0 {
 			t.Fatalf("exit %d: %s", got.code, got.stderr)
 		}
@@ -351,7 +351,7 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 
 	t.Run("token create", func(t *testing.T) {
 		got := h.cli(t, ts, "token", "create",
-			"-name", "cli-pipe-"+uuid.NewString()[:8], "-scopes", "hosts:read")
+			"-name", "cli-pipe-"+uuid.NewString()[:8], "-scopes", "memberships:read")
 		if got.code != 0 {
 			t.Fatalf("exit %d: %s", got.code, got.stderr)
 		}
@@ -364,7 +364,7 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 		}
 		// It has to be the real credential, not a formatted echo of one.
 		if code := h.reqAs(t, tok, http.MethodGet,
-			ts.URL+"/v1/hosts?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
+			ts.URL+"/v1/memberships?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
 			t.Errorf("token from stdout = %d, want 200", code)
 		}
 	})
@@ -475,7 +475,7 @@ func TestCLISessionListAndRevoke(t *testing.T) {
 
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "cli-sessions-" + uuid.NewString()[:8], Scopes: []string{"hosts:read"},
+		Name: "cli-sessions-" + uuid.NewString()[:8], Scopes: []string{"memberships:read"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
@@ -569,7 +569,7 @@ func TestCLISessionRevokeNeedsTokensWrite(t *testing.T) {
 
 	var owner wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "cli-session-owner-" + uuid.NewString()[:8], Scopes: []string{"hosts:read"},
+		Name: "cli-session-owner-" + uuid.NewString()[:8], Scopes: []string{"memberships:read"},
 	}, &owner); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}

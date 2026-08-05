@@ -36,12 +36,12 @@ func TestDeleteHostRevokesBeforeRemoving(t *testing.T) {
 
 	var resp wire.BlockResponse
 	if code := h.adminReq(t, http.MethodDelete,
-		ts.URL+"/v1/hosts/"+host.id+"?reason=decommissioned", nil, &resp); code != http.StatusOK {
+		ts.URL+"/v1/memberships/"+host.id+"?reason=decommissioned", nil, &resp); code != http.StatusOK {
 		t.Fatalf("delete host: %d", code)
 	}
 
 	// The row is gone.
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts/"+host.id, nil, nil); code != http.StatusNotFound {
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+host.id, nil, nil); code != http.StatusNotFound {
 		t.Errorf("GET deleted host = %d, want 404", code)
 	}
 
@@ -83,7 +83,7 @@ func TestDeleteHostFreesTheName(t *testing.T) {
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
 	first := h.createAndEnroll(t, ts, "recycled", "10.42.9.10", false, false, nil)
-	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/hosts/"+first.id, nil, nil); code != http.StatusOK {
+	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/memberships/"+first.id, nil, nil); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
 
@@ -105,13 +105,13 @@ func TestDeleteHostAuditRecordsTheName(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "audited-away", "10.42.9.11", false, false, nil)
 	if code := h.adminReq(t, http.MethodDelete,
-		ts.URL+"/v1/hosts/"+host.id+"?reason=hardware+returned", nil, nil); code != http.StatusOK {
+		ts.URL+"/v1/memberships/"+host.id+"?reason=hardware+returned", nil, nil); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
 
 	var entries []wire.AuditRecordResponse
 	if code := h.adminReq(t, http.MethodGet,
-		ts.URL+"/v1/audit-logs?action="+store.ActionHostDeleted+"&target_id="+host.id,
+		ts.URL+"/v1/audit-logs?action="+store.ActionMembershipDeleted+"&target_id="+host.id,
 		nil, &entries); code != http.StatusOK {
 		t.Fatalf("read audit: %d", code)
 	}
@@ -137,13 +137,13 @@ func TestDeleteHostRequiresBlockScope(t *testing.T) {
 
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "editor-" + uuid.NewString()[:8], Scopes: []string{"hosts:write", "hosts:read"},
+		Name: "editor-" + uuid.NewString()[:8], Scopes: []string{"memberships:write", "memberships:read"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
 
-	if code := h.reqAs(t, tok.Token, http.MethodDelete, ts.URL+"/v1/hosts/"+host.id, nil, nil); code != http.StatusForbidden {
-		t.Errorf("delete with hosts:write only = %d, want 403", code)
+	if code := h.reqAs(t, tok.Token, http.MethodDelete, ts.URL+"/v1/memberships/"+host.id, nil, nil); code != http.StatusForbidden {
+		t.Errorf("delete with memberships:write only = %d, want 403", code)
 	}
 }
 
@@ -156,9 +156,9 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-func certFingerprint(t *testing.T, h *harness, hostID string) string {
+func certFingerprint(t *testing.T, h *harness, membershipID string) string {
 	t.Helper()
-	id, err := uuid.Parse(hostID)
+	id, err := uuid.Parse(membershipID)
 	if err != nil {
 		t.Fatal(err)
 	}

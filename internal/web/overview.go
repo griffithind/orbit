@@ -151,20 +151,20 @@ type overviewView struct {
 }
 
 type expiringView struct {
-	HostID     string
-	HostName   string
-	Short      string
-	RenewAt    time.Time
-	NotAfter   time.Time
-	LastSeenAt *time.Time
-	Badge      badge
+	MembershipID   string
+	MembershipName string
+	Short          string
+	RenewAt        time.Time
+	NotAfter       time.Time
+	LastSeenAt     *time.Time
+	Badge          badge
 }
 
 type replicaView struct {
-	HostID     string
-	Addr       string
-	AgentPort  int
-	LastSeenAt time.Time
+	MembershipID string
+	Addr         string
+	AgentPort    int
+	LastSeenAt   time.Time
 }
 
 // pushView describes the epoch push path.
@@ -200,7 +200,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 		net   *store.Network
 		conv  *store.Convergence
 		due   []store.Certificate
-		names map[uuid.UUID]*store.Host
+		names map[uuid.UUID]*store.Membership
 		live  []store.ControlPlane
 		cas   []store.CA
 		certs map[uuid.UUID]int
@@ -220,16 +220,16 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 		// The same tradeoff internal/api makes on the expiring endpoint, and for
 		// the same reason: a fingerprint with no host name sends the reader
 		// somewhere else for every row.
-		names = map[uuid.UUID]*store.Host{}
+		names = map[uuid.UUID]*store.Membership{}
 		for _, c := range due {
-			if _, seen := names[c.HostID]; seen {
+			if _, seen := names[c.MembershipID]; seen {
 				continue
 			}
-			h, err := tx.GetHost(ctx, c.HostID)
+			h, err := tx.GetHost(ctx, c.MembershipID)
 			if err != nil {
 				return err
 			}
-			names[c.HostID] = h
+			names[c.MembershipID] = h
 		}
 
 		// The same staleness bound agents are handed in EnrollResponse, not a
@@ -264,15 +264,15 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	for _, c := range due {
-		h := names[c.HostID]
+		h := names[c.MembershipID]
 		e := expiringView{
-			HostID:   c.HostID.String(),
-			Short:    shortFingerprint(c.Fingerprint),
-			RenewAt:  c.RenewAt(),
-			NotAfter: c.NotAfter,
+			MembershipID: c.MembershipID.String(),
+			Short:        shortFingerprint(c.Fingerprint),
+			RenewAt:      c.RenewAt(),
+			NotAfter:     c.NotAfter,
 		}
 		if h != nil {
-			e.HostName = h.Name
+			e.MembershipName = h.Name
 			e.LastSeenAt = h.LastSeenAt
 		}
 		if now.After(c.NotAfter) {
@@ -285,10 +285,10 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 
 	for _, cp := range live {
 		v.Replicas = append(v.Replicas, replicaView{
-			HostID:     cp.HostID.String(),
-			Addr:       cp.Addr.String(),
-			AgentPort:  cp.AgentPort,
-			LastSeenAt: cp.LastSeenAt,
+			MembershipID: cp.MembershipID.String(),
+			Addr:         cp.Addr.String(),
+			AgentPort:    cp.AgentPort,
+			LastSeenAt:   cp.LastSeenAt,
 		})
 	}
 

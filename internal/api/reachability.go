@@ -165,8 +165,8 @@ type tables struct{ inbound, outbound []fwmatch.Rule }
 
 // compiledRules compiles one host and hands the result back through nebula's
 // parser, so the server matches with exactly the code the agent matches with.
-func compiledRules(c policy.Compiler, doc policy.Document, hostID, mode string) (tables, error) {
-	rs, err := c.Host(doc, hostID)
+func compiledRules(c policy.Compiler, doc policy.Document, membershipID, mode string) (tables, error) {
+	rs, err := c.Membership(doc, membershipID)
 	if err != nil {
 		return tables{}, fmt.Errorf("%w: %s", errPolicyWouldNotCompile, err.Error())
 	}

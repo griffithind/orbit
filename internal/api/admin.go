@@ -166,7 +166,7 @@ func (s *Server) bearerCredential() credential {
 // /v1 is built from bearerCredential, which reads the Authorization header and
 // has no path to a cookie, so no /v1 route can be reached by a cross-site
 // request no matter what a browser attaches to it. Every route here was written
-// on that assumption — DELETE /v1/hosts/{id} takes its reason from a query
+// on that assumption — DELETE /v1/memberships/{id} takes its reason from a query
 // parameter — so honouring a cookie on this surface would make all of them
 // CSRF-able at once. e2e/session_isolation_test.go asserts both directions.
 func (s *Server) admin(scope string, h http.HandlerFunc) http.Handler {
@@ -279,126 +279,6 @@ func (s *Server) notFoundOr(w http.ResponseWriter, err error, what string) {
 	}
 }
 
-// handleCreateHost creates a host, allocating its overlay address unless one is
-// named.
-//
-// The address is optional now, and that is the important half. Requiring one
-// made every caller keep a record of which addresses are in use — a spreadsheet,
-// a runbook, a colleague's memory — and be wrong about it occasionally, at which
-// point the database's primary key refused the request and the operator picked
-// another number by hand. The control plane already holds the only authoritative
-// answer to "what is free"; asking it is strictly better than asking a human to
-// remember.
-//
-// Allocation runs inside this transaction, so a host and its address commit
-// together. A host that exists with no address is not partially configured, it
-// is one that can never be issued a certificate.
-func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
-	id := identityFrom(r.Context())
-
-	var req wire.CreateHostRequest
-	if !decode(w, r, &req) {
-		return
-	}
-
-	networkID, err := uuid.Parse(req.NetworkID)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid network_id")
-		return
-	}
-	if req.Name == "" {
-		writeErr(w, http.StatusBadRequest, "name is required")
-		return
-	}
-
-	var addr netip.Addr
-	if req.OverlayAddr != "" {
-		if addr, err = netip.ParseAddr(req.OverlayAddr); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid overlay_addr")
-			return
-		}
-	}
-	var prefix netip.Prefix
-	if req.OverlayPrefix != "" {
-		if prefix, err = netip.ParsePrefix(req.OverlayPrefix); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid overlay_prefix")
-			return
-		}
-	}
-
-	var roleID *uuid.UUID
-	if req.RoleID != "" {
-		rid, err := uuid.Parse(req.RoleID)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid role_id")
-			return
-		}
-		roleID = &rid
-	}
-
-	var (
-		host store.Host
-		net  *store.Network
-	)
-	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		var err error
-		net, err = tx.GetNetwork(ctx, networkID)
-		if err != nil {
-			return err
-		}
-
-		host = store.Host{
-			NetworkID:    networkID,
-			Name:         req.Name,
-			RoleID:       roleID,
-			Tags:         req.Tags,
-			IsLighthouse: req.IsLighthouse,
-			IsRelay:      req.IsRelay,
-			StaticAddrs:  req.StaticAddrs,
-		}
-
-		if addr.IsValid() {
-			// Catch an out-of-range address here rather than at issuance. The
-			// database would accept it, and the failure would then surface much
-			// later as a certificate the CA refuses to sign.
-			if !net.ContainsAddr(addr) {
-				return errOutOfRange
-			}
-			host.Addrs = []netip.Addr{addr}
-			if err := tx.CreateHost(ctx, &host); err != nil {
-				return err
-			}
-		} else if err := tx.CreateHostAllocating(ctx, net, &host, prefix); err != nil {
-			return err
-		}
-
-		return tx.AppendAudit(ctx, id.Audit(store.ActionHostCreated, "host", host.ID.String()))
-	})
-	if err != nil {
-		if errors.Is(err, errOutOfRange) {
-			writeErr(w, http.StatusBadRequest, "overlay_addr is not within the network")
-			return
-		}
-		if s.writeAllocationError(w, err) {
-			return
-		}
-		s.notFoundOr(w, err, "network")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, hostResponse(&host, net))
-}
-
-var errOutOfRange = errors.New("overlay address is not within the network")
-
-// writeAllocationError renders the failures specific to claiming an address,
-// and reports whether it handled err.
-//
-// Exhaustion is a 409 that NAMES THE PREFIX. It is not a 500, because nothing
-// broke; it is not a 400, because the request was well-formed; and it must never
-// be a timeout, which is what an allocator that retried until the context died
-// would produce — an operator watching a request hang has no way to tell a full
-// /24 from a database that has stopped answering.
 func (s *Server) writeAllocationError(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, store.ErrAddressExhausted):
@@ -431,7 +311,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f := store.HostFilter{
+	f := store.MembershipFilter{
 		NetworkID:    networkID,
 		Tag:          q.Get("tag"),
 		NameContains: q.Get("name_contains"),
@@ -464,7 +344,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	if f.WithCount, ok = boolParam(w, q, "count"); !ok {
 		return
 	}
-	if f.Limit, ok = pageLimitParam(w, q, store.HostPageMax); !ok {
+	if f.Limit, ok = pageLimitParam(w, q, store.MembershipPageMax); !ok {
 		return
 	}
 	if v := q.Get("cursor"); v != "" {
@@ -479,7 +359,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		page store.HostPage
+		page store.MembershipPage
 		net  *store.Network
 	)
 	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
@@ -489,7 +369,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		}
 		// Read once for the whole page, so resolving each host's inherited
 		// listen port and config mode costs one query rather than one per row —
-		// the same cost the role name is denormalized into hostCols to avoid.
+		// the same cost the role name is denormalized into membershipCols to avoid.
 		// A missing network is not an error here; see the note below on why an
 		// unknown id yields an empty page.
 		if net, err = tx.GetNetwork(ctx, f.NetworkID); errors.Is(err, store.ErrNotFound) {
@@ -507,18 +387,18 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	// before pagination: the filter is a network id, and a listing endpoint
 	// that distinguishes "no such network" from "no hosts yet" is one more way
 	// to probe for which ids exist.
-	resp := wire.HostListResponse{
-		Hosts:      make([]wire.HostResponse, 0, len(page.Hosts)),
-		TotalCount: page.Total,
+	resp := wire.MembershipListResponse{
+		Memberships: make([]wire.MembershipResponse, 0, len(page.Memberships)),
+		TotalCount:  page.Total,
 	}
-	for i := range page.Hosts {
-		resp.Hosts = append(resp.Hosts, hostResponse(&page.Hosts[i], net))
+	for i := range page.Memberships {
+		resp.Memberships = append(resp.Memberships, membershipResponse(&page.Memberships[i], net))
 	}
 	// The cursor comes from the last row actually returned, and only when the
 	// store saw one more beyond it. A cursor emitted on a full final page would
 	// send every client one request further to learn nothing.
-	if page.More && len(page.Hosts) > 0 {
-		resp.NextCursor = encodeHostCursor(&page.Hosts[len(page.Hosts)-1])
+	if page.More && len(page.Memberships) > 0 {
+		resp.NextCursor = encodeHostCursor(&page.Memberships[len(page.Memberships)-1])
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -528,7 +408,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 // way out, and offering it as a filter would promise a listing of decommissioned
 // machines that is always empty.
 var listableHostStates = []string{
-	store.HostCreated, store.HostEnrolled, store.HostActive, store.HostSuspended,
+	store.MembershipCreated, store.MembershipEnrolled, store.MembershipActive, store.MembershipSuspended,
 }
 
 // handleHostCertificates serves a host's certificate history.
@@ -537,7 +417,7 @@ var listableHostStates = []string{
 // when does this expire, which CA signed it, has it been renewing — was
 // answerable only from psql before this route existed.
 func (s *Server) handleHostCertificates(w http.ResponseWriter, r *http.Request) {
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
@@ -573,11 +453,11 @@ func (s *Server) handleHostCertificates(w http.ResponseWriter, r *http.Request) 
 		// Resolve the host first so an unknown id is a 404. Without it, a typo'd
 		// host id and a host that has never enrolled both return an empty list,
 		// and during a failed enrollment those are opposite diagnoses.
-		if _, err := tx.GetHost(ctx, hostID); err != nil {
+		if _, err := tx.GetHost(ctx, membershipID); err != nil {
 			return err
 		}
 		var err error
-		page, err = tx.HostCertificates(ctx, hostID, f)
+		page, err = tx.MembershipCertificates(ctx, membershipID, f)
 		return err
 	})
 	if err != nil {
@@ -611,24 +491,24 @@ var certStates = []string{
 // NUL is the field separator because Postgres text cannot contain one, so no
 // host name can ever collide with it.
 
-func encodeHostCursor(h *store.Host) string {
+func encodeHostCursor(h *store.Membership) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(h.Name + "\x00" + h.ID.String()))
 }
 
-func decodeHostCursor(s string) (store.HostCursor, error) {
+func decodeHostCursor(s string) (store.MembershipCursor, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return store.HostCursor{}, err
+		return store.MembershipCursor{}, err
 	}
 	name, rest, found := strings.Cut(string(raw), "\x00")
 	if !found {
-		return store.HostCursor{}, errBadCursor
+		return store.MembershipCursor{}, errBadCursor
 	}
 	id, err := uuid.Parse(rest)
 	if err != nil {
-		return store.HostCursor{}, err
+		return store.MembershipCursor{}, err
 	}
-	return store.HostCursor{Name: name, ID: id}, nil
+	return store.MembershipCursor{Name: name, ID: id}, nil
 }
 
 func encodeCertCursor(c store.CertificateRow) string {
@@ -708,7 +588,7 @@ func pageLimitParam(w http.ResponseWriter, q url.Values, max int) (int, bool) {
 // lighthouse role a normal operation rather than a restart.
 func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
@@ -719,12 +599,12 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		host *store.Host
+		host *store.Membership
 		net  *store.Network
 	)
 	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		host, err = tx.GetHost(ctx, hostID)
+		host, err = tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
@@ -751,20 +631,20 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 			return errLighthouseNeedsAddr
 		}
 
-		if err := tx.SetHostRoles(ctx, hostID, lighthouse, relay, static); err != nil {
+		if err := tx.SetHostRoles(ctx, membershipID, lighthouse, relay, static); err != nil {
 			return err
 		}
 		if req.RoleID != nil || req.Tags != nil {
-			if err := tx.UpdateHostMeta(ctx, hostID, req.RoleID, req.Tags); err != nil {
+			if err := tx.UpdateHostMeta(ctx, membershipID, req.RoleID, req.Tags); err != nil {
 				return err
 			}
 		}
 
-		host, err = tx.GetHost(ctx, hostID)
+		host, err = tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, id.Audit(store.ActionHostUpdated, "host", hostID.String()))
+		return tx.AppendAudit(ctx, id.Audit(store.ActionMembershipUpdated, "host", membershipID.String()))
 	})
 	if err != nil {
 		if errors.Is(err, errLighthouseNeedsAddr) {
@@ -775,24 +655,24 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		s.notFoundOr(w, err, "host")
 		return
 	}
-	writeJSON(w, http.StatusOK, hostResponse(host, net))
+	writeJSON(w, http.StatusOK, membershipResponse(host, net))
 }
 
 var errLighthouseNeedsAddr = errors.New("lighthouse requires static_addrs")
 
 func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
 	var (
-		host  *store.Host
+		host  *store.Membership
 		net   *store.Network
 		certs store.CertPage
 	)
 	err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		host, err = tx.GetHost(ctx, hostID)
+		host, err = tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
@@ -807,7 +687,7 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 		// The limit is a bound, not a page: certificate_one_active_per_host_version
 		// permits one active certificate per cert_version, so this is one row,
 		// or two during a v1-to-v2 migration.
-		certs, err = tx.HostCertificates(ctx, hostID,
+		certs, err = tx.MembershipCertificates(ctx, membershipID,
 			store.CertFilter{State: store.CertActive, Limit: 8})
 		return err
 	})
@@ -816,7 +696,7 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := hostResponse(host, net)
+	resp := membershipResponse(host, net)
 	for _, c := range certs.Certificates {
 		resp.ActiveCertificates = append(resp.ActiveCertificates, certificateResponse(c))
 	}
@@ -824,13 +704,16 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateEnrollCode(w http.ResponseWriter, r *http.Request) {
+	if !s.requireEnroll(w) {
+		return
+	}
 	id := identityFrom(r.Context())
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
 
-	resp, err := s.enroll.CreateCode(r.Context(), hostID, 0, *id)
+	resp, err := s.enroll.CreateCode(r.Context(), membershipID, 0, *id)
 	if err != nil {
 		s.notFoundOr(w, err, "host")
 		return
@@ -840,7 +723,7 @@ func (s *Server) handleCreateEnrollCode(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleBlockHost(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
@@ -848,11 +731,11 @@ func (s *Server) handleBlockHost(w http.ResponseWriter, r *http.Request) {
 	var epoch int64
 	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		epoch, err = tx.BlockHost(ctx, hostID, "blocked via admin API")
+		epoch, err = tx.BlockHost(ctx, membershipID, "blocked via admin API")
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, id.Audit(store.ActionHostBlocked, "host", hostID.String()))
+		return tx.AppendAudit(ctx, id.Audit(store.ActionMembershipBlocked, "host", membershipID.String()))
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "host")
@@ -863,7 +746,7 @@ func (s *Server) handleBlockHost(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUnblockHost(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
@@ -871,11 +754,11 @@ func (s *Server) handleUnblockHost(w http.ResponseWriter, r *http.Request) {
 	var epoch int64
 	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		epoch, err = tx.UnblockHost(ctx, hostID)
+		epoch, err = tx.UnblockHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, id.Audit(store.ActionHostUnblocked, "host", hostID.String()))
+		return tx.AppendAudit(ctx, id.Audit(store.ActionMembershipUnblocked, "host", membershipID.String()))
 	})
 	if err != nil {
 		s.notFoundOr(w, err, "host")
@@ -895,7 +778,7 @@ func (s *Server) handleUnblockHost(w http.ResponseWriter, r *http.Request) {
 // question is the same one: has the fleet seen this yet.
 func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
@@ -912,17 +795,17 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		// Read the name before the row goes, so the audit entry says which host
 		// this was. A uuid alone is useless to whoever reads the log later.
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
 		name = host.Name
 
-		epoch, err = tx.DeleteHost(ctx, hostID, reason)
+		epoch, err = tx.DeleteHost(ctx, membershipID, reason)
 		if err != nil {
 			return err
 		}
-		e := id.Audit(store.ActionHostDeleted, "host", hostID.String())
+		e := id.Audit(store.ActionMembershipDeleted, "host", membershipID.String())
 		e.Meta = []byte(fmt.Sprintf(`{"name":%q,"reason":%q}`, name, reason))
 		return tx.AppendAudit(ctx, e)
 	})
@@ -932,7 +815,7 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.log.Info("host deleted and its certificates revoked",
-		"host", hostID, "name", name, "by", id.TokenID)
+		"host", membershipID, "name", name, "by", id.TokenID)
 	writeJSON(w, http.StatusOK, wire.BlockResponse{BlocklistEpoch: epoch})
 }
 
@@ -983,8 +866,8 @@ func addressGate(impact *store.AddressImpact, acknowledged bool) (*wire.AddressI
 
 func addressImpactResponse(i *store.AddressImpact) *wire.AddressImpact {
 	out := &wire.AddressImpact{
-		HostID:         i.HostID.String(),
-		HostName:       i.HostName,
+		MembershipID:   i.MembershipID.String(),
+		MembershipName: i.MembershipName,
 		IsLighthouse:   i.IsLighthouse,
 		IsRelay:        i.IsRelay,
 		IsControlPlane: i.IsControlPlane,
@@ -993,7 +876,7 @@ func addressImpactResponse(i *store.AddressImpact) *wire.AddressImpact {
 		OnlyRelay:        i.OnlyRelay(),
 		OnlyControlPlane: i.OnlyControlPlane(),
 
-		HostsInNetwork:    i.Hosts,
+		HostsInNetwork:    i.Memberships,
 		Lighthouses:       i.Lighthouses,
 		Relays:            i.Relays,
 		LiveControlPlanes: i.LiveControlPlanes,
@@ -1002,11 +885,11 @@ func addressImpactResponse(i *store.AddressImpact) *wire.AddressImpact {
 	// Worst first, and the relay line is first on purpose: it is the only one
 	// whose damage lands on machines that have nothing to do with this request.
 	if i.IsRelay {
-		out.HostsUsingRelays = i.RelayClients
+		out.MembershipsUsingRelays = i.RelayClients
 		line := fmt.Sprintf(
 			"%s RELAYS FOR OTHER HOSTS. Restarting it drops the traffic it is forwarding, "+
 				"not just its own: %d host(s) in this network are configured to use relays",
-			i.HostName, i.RelayClients)
+			i.MembershipName, i.RelayClients)
 		if i.OnlyRelay() {
 			line += ", and it is the ONLY relay in this network, so every pair that " +
 				"cannot reach each other directly loses its path until it is back"
@@ -1017,7 +900,7 @@ func addressImpactResponse(i *store.AddressImpact) *wire.AddressImpact {
 	}
 
 	if i.IsControlPlane {
-		line := fmt.Sprintf("%s serves the agent API for this network", i.HostName)
+		line := fmt.Sprintf("%s serves the agent API for this network", i.MembershipName)
 		if i.OnlyControlPlane() {
 			line += ", and it is the ONLY live replica: for the duration of the restart " +
 				"every agent on this network loses renewal and revocation"
@@ -1030,7 +913,7 @@ func addressImpactResponse(i *store.AddressImpact) *wire.AddressImpact {
 	if i.IsLighthouse {
 		line := fmt.Sprintf("%s is a lighthouse, so discovery through it stops for the duration; "+
 			"hosts that already hold a tunnel are unaffected, hosts still looking for a peer are not",
-			i.HostName)
+			i.MembershipName)
 		if i.OnlyLighthouse() {
 			line += ". It is the ONLY lighthouse in this network"
 		} else {
@@ -1040,7 +923,7 @@ func addressImpactResponse(i *store.AddressImpact) *wire.AddressImpact {
 	}
 
 	out.Consequences = append(out.Consequences, fmt.Sprintf(
-		"nebula restarts on %s: its own tunnels drop and re-handshake", i.HostName))
+		"nebula restarts on %s: its own tunnels drop and re-handshake", i.MembershipName))
 	return out
 }
 
@@ -1073,7 +956,7 @@ func restartRequiredBody(impact *wire.AddressImpact) wire.RestartRequiredError {
 // and a certificate whose networks changed is one nebula will not hot-reload.
 func (s *Server) handleAddHostAddress(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
@@ -1104,12 +987,12 @@ func (s *Server) handleAddHostAddress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		resp    wire.HostAddressesResponse
+		resp    wire.MembershipAddressesResponse
 		impact  *wire.AddressImpact
 		refused bool
 	)
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
@@ -1118,7 +1001,7 @@ func (s *Server) handleAddHostAddress(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
-		raw, err := tx.AddressChangeImpact(ctx, hostID, time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
+		raw, err := tx.AddressChangeImpact(ctx, membershipID, time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
 		if err != nil {
 			return err
 		}
@@ -1128,25 +1011,25 @@ func (s *Server) handleAddHostAddress(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if addr.IsValid() {
-			if err := tx.ClaimHostAddress(ctx, net, hostID, addr); err != nil {
+			if err := tx.ClaimHostAddress(ctx, net, membershipID, addr); err != nil {
 				return err
 			}
-		} else if addr, err = tx.AllocateHostAddress(ctx, net, hostID, prefix); err != nil {
+		} else if addr, err = tx.AllocateHostAddress(ctx, net, membershipID, prefix); err != nil {
 			return err
 		}
 
-		epoch, err := tx.MarkAddressChanged(ctx, host.NetworkID, hostID)
+		epoch, err := tx.MarkAddressChanged(ctx, host.NetworkID, membershipID)
 		if err != nil {
 			return err
 		}
 
-		after, err := tx.GetHost(ctx, hostID)
+		after, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
 		resp = addressesResponse(after, epoch, impact != nil)
 
-		return tx.AppendAudit(ctx, addressAudit(*id, hostID, store.ActionHostAddressAdded,
+		return tx.AppendAudit(ctx, addressAudit(*id, membershipID, store.ActionHostAddressAdded,
 			store.ActionHostAddressAddedWithRestart, addr, impact))
 	})
 	if err != nil {
@@ -1173,7 +1056,7 @@ func (s *Server) handleAddHostAddress(w http.ResponseWriter, r *http.Request) {
 // address by hand.
 func (s *Server) handleRemoveHostAddress(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	hostID, ok := pathUUID(w, r, "id")
+	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
@@ -1191,17 +1074,17 @@ func (s *Server) handleRemoveHostAddress(w http.ResponseWriter, r *http.Request)
 	}
 
 	var (
-		resp    wire.HostAddressesResponse
+		resp    wire.MembershipAddressesResponse
 		impact  *wire.AddressImpact
 		refused bool
 	)
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
 
-		raw, err := tx.AddressChangeImpact(ctx, hostID, time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
+		raw, err := tx.AddressChangeImpact(ctx, membershipID, time.Now().Add(-enroll.DefaultControlPlaneStaleAfter))
 		if err != nil {
 			return err
 		}
@@ -1210,21 +1093,21 @@ func (s *Server) handleRemoveHostAddress(w http.ResponseWriter, r *http.Request)
 			return errRestartRequired
 		}
 
-		if err := tx.RemoveHostAddress(ctx, host.NetworkID, hostID, addr); err != nil {
+		if err := tx.RemoveHostAddress(ctx, host.NetworkID, membershipID, addr); err != nil {
 			return err
 		}
-		epoch, err := tx.MarkAddressChanged(ctx, host.NetworkID, hostID)
+		epoch, err := tx.MarkAddressChanged(ctx, host.NetworkID, membershipID)
 		if err != nil {
 			return err
 		}
 
-		after, err := tx.GetHost(ctx, hostID)
+		after, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
 		resp = addressesResponse(after, epoch, impact != nil)
 
-		return tx.AppendAudit(ctx, addressAudit(*id, hostID, store.ActionHostAddressRemoved,
+		return tx.AppendAudit(ctx, addressAudit(*id, membershipID, store.ActionHostAddressRemoved,
 			store.ActionHostAddressRemovedWithRestart, addr, impact))
 	})
 	if err != nil {
@@ -1248,9 +1131,9 @@ func (s *Server) handleRemoveHostAddress(w http.ResponseWriter, r *http.Request)
 
 var errRestartRequired = errors.New("address change requires a nebula restart")
 
-func addressesResponse(h *store.Host, epoch int64, disruptive bool) wire.HostAddressesResponse {
-	out := wire.HostAddressesResponse{
-		HostID:               h.ID.String(),
+func addressesResponse(h *store.Membership, epoch int64, disruptive bool) wire.MembershipAddressesResponse {
+	out := wire.MembershipAddressesResponse{
+		MembershipID:         h.ID.String(),
 		OverlayAddrs:         addrStrings(h.Addrs),
 		RestartRequiredEpoch: h.RestartRequiredEpoch,
 		ConfigEpoch:          epoch,
@@ -1275,7 +1158,7 @@ func addressesResponse(h *store.Host, epoch int64, disruptive bool) wire.HostAdd
 // knowingly restarted — and whether that host was a relay — is what an incident
 // review looks for, and it should be a WHERE clause rather than a scan through
 // jsonb.
-func addressAudit(id store.Identity, hostID uuid.UUID, plain, withRestart string, addr netip.Addr, impact *wire.AddressImpact) store.AuditEntry {
+func addressAudit(id store.Identity, membershipID uuid.UUID, plain, withRestart string, addr netip.Addr, impact *wire.AddressImpact) store.AuditEntry {
 	action := plain
 	meta := fmt.Sprintf(`{"addr":%q}`, addr.String())
 	if impact != nil {
@@ -1286,9 +1169,9 @@ func addressAudit(id store.Identity, hostID uuid.UUID, plain, withRestart string
 				`"hosts_using_relays":%d}`,
 			addr.String(), impact.IsRelay, impact.IsLighthouse, impact.IsControlPlane,
 			impact.OnlyRelay, impact.OnlyLighthouse, impact.OnlyControlPlane,
-			impact.HostsUsingRelays)
+			impact.MembershipsUsingRelays)
 	}
-	e := id.Audit(action, "host", hostID.String())
+	e := id.Audit(action, "host", membershipID.String())
 	e.Meta = []byte(meta)
 	return e
 }
@@ -1402,7 +1285,7 @@ func (s *Server) handleRemoveNetworkCIDR(w http.ResponseWriter, r *http.Request)
 			hosts := make([]wire.AddressHolder, 0, len(holders))
 			for _, h := range holders {
 				hosts = append(hosts, wire.AddressHolder{
-					HostID: h.HostID.String(), Name: h.Name, Addr: h.Addr.String(),
+					MembershipID: h.MembershipID.String(), Name: h.Name, Addr: h.Addr.String(),
 				})
 			}
 			writeJSON(w, http.StatusConflict, wire.CIDRInUseError{
@@ -1410,7 +1293,7 @@ func (s *Server) handleRemoveNetworkCIDR(w http.ResponseWriter, r *http.Request)
 					"the hosts keep answering on them — it would break their NEXT renewal, " +
 					"hours later, when the address no longer falls inside any prefix. " +
 					"Move these hosts first",
-				Hosts: hosts,
+				Memberships: hosts,
 			})
 		case errors.Is(err, store.ErrLastCIDR):
 			writeErr(w, http.StatusConflict, err.Error()+
@@ -1577,7 +1460,7 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		FirewallSourceChanged: sourceChanged,
 	}
 	if sourceChanged {
-		resp.HostsAffected = affected
+		resp.MembershipsAffected = affected
 		resp.Detail = firewallSourceDetail(out.FirewallSource, affected, out.ConfigEpoch)
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1625,10 +1508,10 @@ func (s *Server) gateFirewallSource(ctx context.Context, tx *store.Tx, net *stor
 	return &firewallSourceGate{body: wire.FirewallSourceChangeError{
 		Error: "changing firewall_source replaces the firewall on every host in this network. " +
 			"Resend with acknowledge_firewall_change to proceed",
-		From:          net.FirewallSource,
-		To:            to,
-		HostsAffected: live,
-		Detail:        firewallSourceGateDetail(net.FirewallSource, to, live),
+		From:                net.FirewallSource,
+		To:                  to,
+		MembershipsAffected: live,
+		Detail:              firewallSourceGateDetail(net.FirewallSource, to, live),
 	}}
 }
 
@@ -1704,15 +1587,15 @@ func (s *Server) handleConvergence(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		resp = wire.ConvergenceResponse{
-			ConfigEpoch:    c.ConfigEpoch,
-			BlocklistEpoch: c.BlocklistEpoch,
-			HostsTotal:     c.HostsTotal,
-			ConfigApplied:  c.ConfigApplied,
-			BlockApplied:   c.BlockApplied,
+			ConfigEpoch:      c.ConfigEpoch,
+			BlocklistEpoch:   c.BlocklistEpoch,
+			MembershipsTotal: c.MembershipsTotal,
+			ConfigApplied:    c.ConfigApplied,
+			BlockApplied:     c.BlockApplied,
 		}
 		for _, l := range c.Lagging {
 			resp.Lagging = append(resp.Lagging, wire.LaggingHost{
-				HostID:                l.HostID.String(),
+				MembershipID:          l.MembershipID.String(),
 				Name:                  l.Name,
 				AppliedConfigEpoch:    l.AppliedConfigEpoch,
 				AppliedBlocklistEpoch: l.AppliedBlocklistEpoch,
@@ -1762,7 +1645,7 @@ func addrStrings(addrs []netip.Addr) []string {
 	return out
 }
 
-// hostResponse renders a host, resolving its instance resources against the
+// membershipResponse renders a host, resolving its instance resources against the
 // network.
 //
 // net may be nil, in which case only values set on the host itself are reported.
@@ -1770,9 +1653,9 @@ func addrStrings(addrs []netip.Addr) []string {
 // answer, not "nothing is set here, go read the network" — the inheritance is an
 // implementation detail of where the value is stored, not something every client
 // should have to reimplement.
-func hostResponse(h *store.Host, net *store.Network) wire.HostResponse {
+func membershipResponse(h *store.Membership, net *store.Network) wire.MembershipResponse {
 	addrs := addrStrings(h.Addrs)
-	out := wire.HostResponse{
+	out := wire.MembershipResponse{
 		ID:                    h.ID.String(),
 		Name:                  h.Name,
 		NetworkID:             h.NetworkID.String(),

@@ -193,7 +193,7 @@ func preview(names []string) string {
 
 // ResolveHost accepts a host name or uuid and returns the id.
 //
-// Host names are UNIQUE (network_id, name), so an exact name match is unique by
+// Membership names are UNIQUE (network_id, name), so an exact name match is unique by
 // construction — but name_contains is a substring filter, so the page it returns
 // has to be narrowed to the exact match here rather than assumed to hold one row.
 func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref string) (uuid.UUID, error) {
@@ -201,7 +201,7 @@ func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref strin
 		return id, nil
 	}
 
-	res, err := c.ListHosts(ctx, HostFilter{
+	res, err := c.ListHosts(ctx, MembershipFilter{
 		NetworkID:    networkID,
 		NameContains: ref,
 		Limit:        50,
@@ -211,7 +211,7 @@ func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref strin
 	}
 
 	var near []string
-	for _, h := range res.Value.Hosts {
+	for _, h := range res.Value.Memberships {
 		if h.Name == ref {
 			id, perr := uuid.Parse(h.ID)
 			if perr != nil {
@@ -228,8 +228,8 @@ func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref strin
 	// exist. One unfiltered fetch, on the error path only, so the cost is paid
 	// when someone is already confused rather than on every lookup.
 	if len(near) == 0 {
-		if all, aerr := c.ListHosts(ctx, HostFilter{NetworkID: networkID, Limit: 50}); aerr == nil {
-			for _, h := range all.Value.Hosts {
+		if all, aerr := c.ListHosts(ctx, MembershipFilter{NetworkID: networkID, Limit: 50}); aerr == nil {
+			for _, h := range all.Value.Memberships {
 				near = append(near, h.Name)
 			}
 		}

@@ -34,8 +34,8 @@ func TestBreakGlassTokenWorksWithNoOtherToken(t *testing.T) {
 
 	// It authenticates, and "*" really does pass every scope check.
 	if code := h.reqAs(t, token, http.MethodGet,
-		ts.URL+"/v1/hosts?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
-		t.Errorf("break-glass token on hosts:read = %d, want 200", code)
+		ts.URL+"/v1/memberships?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
+		t.Errorf("break-glass token on memberships:read = %d, want 200", code)
 	}
 	var netsOut []wire.NetworkResponse
 	if code := h.reqAs(t, token, http.MethodGet, ts.URL+"/v1/networks", nil, &netsOut); code != http.StatusOK {
@@ -144,7 +144,7 @@ func TestCheckBreakGlassScript(t *testing.T) {
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
 	good := runTokenCreate(t, "script-ok-"+uuid.NewString()[:8], "*")
-	narrow := runTokenCreate(t, "script-narrow-"+uuid.NewString()[:8], "hosts:read")
+	narrow := runTokenCreate(t, "script-narrow-"+uuid.NewString()[:8], "memberships:read")
 
 	cases := []struct {
 		name     string

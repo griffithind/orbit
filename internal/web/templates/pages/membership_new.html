@@ -1,7 +1,7 @@
 {{- define "content" -}}
 {{- with .Data }}
 <section class="card wide">
-  <h1>Add a host</h1>
+  <h1>Reserve a place</h1>
   <p class="subtitle"><a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a></p>
 
   {{- if .Problem }}
@@ -9,9 +9,18 @@
   {{- end }}
 
   {{/*
+    This form used to create a host. It now reserves a place, and the difference
+    is what exists when you press the button: nothing does. The membership is
+    created when a machine presents the code, so it names that machine from the
+    moment it exists — see docs/model.md §4.
+
     There is no overlay address field, and that is the feature. The control
     plane holds the only authoritative answer to what is free; asking a person
     to remember instead is how two hosts end up claiming one address.
+
+    Lighthouse, relay, public addresses and tags are set from the host page once
+    the machine is there. A reservation carries what an UNATTENDED machine must
+    have decided for it, and setting up a lighthouse is not that case.
   */}}
   <form method="post" action="/ui/networks/{{ .Network.ID }}/hosts">
     <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
@@ -19,7 +28,8 @@
     <label for="name">Name</label>
     <input id="name" name="name" required value="{{ .Form.Name }}" placeholder="web-03"
            spellcheck="false" autocapitalize="off">
-    <p class="hint">An overlay address is allocated automatically.</p>
+    <p class="hint">Held against this network until the code is used or expires.
+      An overlay address is allocated when a machine takes it.</p>
 
     <label for="role_id">Role</label>
     <select id="role_id" name="role_id">
@@ -29,26 +39,7 @@
       {{- end }}
     </select>
 
-    <label for="tags">Tags</label>
-    <input id="tags" name="tags" value="{{ .Form.Tags }}" placeholder="prod, eu-west">
-    <p class="hint">Comma separated.</p>
-
-    <label class="check">
-      <input type="checkbox" name="is_lighthouse" value="1"{{ if .Form.IsLighthouse }} checked{{ end }}>
-      Lighthouse
-    </label>
-    <label class="check">
-      <input type="checkbox" name="is_relay" value="1"{{ if .Form.IsRelay }} checked{{ end }}>
-      Relay
-    </label>
-
-    <label for="static_addrs">Public addresses</label>
-    <input id="static_addrs" name="static_addrs" value="{{ .Form.StaticAddrs }}"
-           placeholder="203.0.113.10:4242" spellcheck="false" autocapitalize="off">
-    <p class="hint">Comma separated <code>host:port</code>. Required for a lighthouse —
-      one nobody can reach is worse than none, because every host keeps dialling it.</p>
-
-    <button type="submit" class="button primary">Create and issue an enrollment code</button>
+    <button type="submit" class="button primary">Reserve and issue a code</button>
   </form>
 </section>
 {{- end }}

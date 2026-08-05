@@ -24,7 +24,7 @@ func testFleet() Snapshot {
 			netip.MustParsePrefix("10.42.0.0/16"),
 			netip.MustParsePrefix("fd00:42::/64"),
 		},
-		Members: []Host{
+		Members: []Membership{
 			{ID: "h-web1", Name: "web1", Role: "app", Tags: []string{"web", "prod"},
 				Addrs: addrs("10.42.0.11", "fd00:42::11")},
 			{ID: "h-web2", Name: "web2", Role: "app", Tags: []string{"web"},
@@ -39,15 +39,15 @@ func testFleet() Snapshot {
 	}
 }
 
-func mustCompile(t *testing.T, raw []byte, hostID string, c Compiler) Ruleset {
+func mustCompile(t *testing.T, raw []byte, membershipID string, c Compiler) Ruleset {
 	t.Helper()
 	d, err := Parse(raw)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	rs, err := c.Host(d, hostID)
+	rs, err := c.Membership(d, membershipID)
 	if err != nil {
-		t.Fatalf("compile for %s: %v", hostID, err)
+		t.Fatalf("compile for %s: %v", membershipID, err)
 	}
 	return rs
 }
@@ -149,7 +149,7 @@ func TestPolicyNamingAMissingHostIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = c.Host(d, "h-db1")
+		_, err = c.Membership(d, "h-db1")
 		if err == nil {
 			t.Fatalf("%s compiled against a fleet that has no such host", sel)
 		}
@@ -205,12 +205,12 @@ func TestCompilationIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := c.Host(d, "h-db1")
+	first, err := c.Membership(d, "h-db1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 40; i++ {
-		got, err := c.Host(d, "h-db1")
+		got, err := c.Membership(d, "h-db1")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -219,14 +219,14 @@ func TestCompilationIsDeterministic(t *testing.T) {
 		}
 	}
 
-	// And All must agree with Host, or a preview would not describe what is
+	// And All must agree with Membership, or a preview would not describe what is
 	// actually rendered.
 	all, err := c.All(d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(all["h-db1"], first) {
-		t.Errorf("All and Host disagree:\n%+v\n%+v", all["h-db1"], first)
+		t.Errorf("All and Membership disagree:\n%+v\n%+v", all["h-db1"], first)
 	}
 }
 
@@ -340,7 +340,7 @@ func TestCIDROutsideTheNetworkIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Host(d, "h-db1")
+	_, err = c.Membership(d, "h-db1")
 	if err == nil {
 		t.Fatal("a prefix no certificate in this network could authorise was accepted")
 	}
@@ -353,7 +353,7 @@ func TestCIDROutsideTheNetworkIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Host(d, "h-db1"); err != nil {
+	if _, err := c.Membership(d, "h-db1"); err != nil {
 		t.Errorf("an unoccupied in-network prefix was refused: %v", err)
 	}
 }
@@ -377,7 +377,7 @@ func TestManagementFloor(t *testing.T) {
 	c := Compiler{
 		Fleet: Snapshot{
 			CIDRs: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
-			Members: []Host{
+			Members: []Membership{
 				{ID: "h-cp", Name: "control-plane", Addrs: addrs("10.42.0.2")},
 				{ID: "h-a", Name: "a", Addrs: addrs("10.42.0.10")},
 			},
@@ -390,7 +390,7 @@ func TestManagementFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	agent, err := c.Host(d, "h-a")
+	agent, err := c.Membership(d, "h-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestManagementFloor(t *testing.T) {
 		t.Errorf("the floor opened the agent to inbound traffic: %+v", agent.Inbound)
 	}
 
-	cp, err := c.Host(d, "h-cp")
+	cp, err := c.Membership(d, "h-cp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestManagementFloor(t *testing.T) {
 func TestCompilingForAHostOutsideTheFleet(t *testing.T) {
 	c := Compiler{Fleet: testFleet()}
 	d, _ := Parse([]byte(`{"version":1,"allow":[]}`))
-	if _, err := c.Host(d, "h-elsewhere"); err == nil {
+	if _, err := c.Membership(d, "h-elsewhere"); err == nil {
 		t.Fatal("compiled rules for a host that is not in this network")
 	}
 }

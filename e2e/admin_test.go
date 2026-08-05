@@ -130,7 +130,7 @@ func TestTokenScopesAreEnforced(t *testing.T) {
 	// Mint a read-only token using the bootstrap token.
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "read-only-" + uuid.NewString()[:8], Scopes: []string{"hosts:read", "networks:read"},
+		Name: "read-only-" + uuid.NewString()[:8], Scopes: []string{"memberships:read", "networks:read"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
@@ -165,8 +165,8 @@ func TestConvergenceRendersForHumans(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	var host wire.HostResponse
-	h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "laggard", OverlayAddr: "10.42.30.5",
 		RoleID: h.roleID.String(),
 	}, &host)

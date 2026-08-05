@@ -9,9 +9,9 @@ import "net/netip"
 // context and no clock in it. Everything interesting about this package is
 // testable from a literal.
 type Fleet interface {
-	// Hosts returns every host a selector may name, in any order. The compiler
+	// Memberships returns every host a selector may name, in any order. The compiler
 	// sorts what it needs to; a caller must not have to.
-	Hosts() []Host
+	Memberships() []Membership
 
 	// Prefixes returns the network's overlay CIDRs. They bound which cidr:
 	// selectors are meaningful, and they are what "*" compiles to: since Orbit
@@ -20,8 +20,8 @@ type Fleet interface {
 	Prefixes() []netip.Prefix
 }
 
-// Host is one member of a network, as far as policy is concerned.
-type Host struct {
+// Membership is one member of a network, as far as policy is concerned.
+type Membership struct {
 	// ID is the Orbit host id, matched by id: and used to address a compiled
 	// ruleset. A string rather than a uuid.UUID because nothing here needs to
 	// parse it, and a plain string keeps this package free of dependencies.
@@ -58,15 +58,15 @@ type Host struct {
 // Snapshot is a Fleet held in memory: what a store query produces, and what a
 // test writes by hand.
 type Snapshot struct {
-	Members []Host
+	Members []Membership
 	CIDRs   []netip.Prefix
 }
 
-func (s Snapshot) Hosts() []Host            { return s.Members }
-func (s Snapshot) Prefixes() []netip.Prefix { return s.CIDRs }
+func (s Snapshot) Memberships() []Membership { return s.Members }
+func (s Snapshot) Prefixes() []netip.Prefix  { return s.CIDRs }
 
 // hasAddr reports whether the host holds a.
-func (h Host) hasAddr(a netip.Addr) bool {
+func (h Membership) hasAddr(a netip.Addr) bool {
 	for _, x := range h.Addrs {
 		if x == a {
 			return true
@@ -75,9 +75,9 @@ func (h Host) hasAddr(a netip.Addr) bool {
 	return false
 }
 
-// hostPrefix is a host address as the single-address prefix a nebula cidr: rule
+// membershipPrefix is a host address as the single-address prefix a nebula cidr: rule
 // takes. /32 for v4 and /128 for v6, so a v4-only host in a dual-stack network
 // contributes v4 rules and nothing else rather than a mangled v6 one.
-func hostPrefix(a netip.Addr) netip.Prefix {
+func membershipPrefix(a netip.Addr) netip.Prefix {
 	return netip.PrefixFrom(a, a.BitLen())
 }

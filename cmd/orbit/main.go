@@ -24,7 +24,7 @@
 //	token     list, mint, and revoke admin tokens
 //	session   list and end browser sessions on the operator console
 //	audit     read the audit trail
-//	agent     enroll a host, keep its nebula configuration current, recover it
+//	agent     join a network, keep its nebula configuration current
 package main
 
 import (
@@ -52,8 +52,10 @@ func main() {
 	switch os.Args[1] {
 	case "whoami":
 		err = whoamiCmd(ctx, os.Args[2:])
-	case "host":
-		err = hostCmd(ctx, os.Args[2:])
+	case "membership", "member":
+		err = membershipCmd(ctx, os.Args[2:])
+	case "device":
+		err = deviceCmd(ctx, os.Args[2:])
 	case "converge":
 		err = convergeCmd(ctx, os.Args[2:])
 	case "network":
@@ -105,7 +107,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `orbit <command> [flags]
 
   whoami     describe the credential in use
-  host       ls, show, create, set, code, block, unblock, rm
+  membership ls, show, pending, authorize, reserve, set, code, block, unblock, rm
+             a machine IN a network. Aliased as "member"
+  device     ls, show, block, unblock — the machines themselves, across every network
   converge   how much of the fleet has applied the current configuration
   network    ls
   role       ls, show, edit, rm
@@ -114,7 +118,7 @@ func usage() {
   token      ls, create, revoke
   session    ls, revoke — browser sessions on the operator console
   audit      read the audit trail
-  agent      install, uninstall, enroll, run, recover — what runs ON a managed host
+  agent      install, uninstall, join, enroll, run — what runs ON a managed host
   status     what the agent on THIS host is doing, on every network it joined
   peers      the tunnels THIS host actually has, from nebula's own hostmap
   why        why THIS host can or cannot reach a peer

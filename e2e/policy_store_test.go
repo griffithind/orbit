@@ -390,15 +390,15 @@ func TestPolicyCheckCompilesForAHost(t *testing.T) {
 	h.createTaggedHost(t, ts.URL, "policy-db", "10.42.90.2", []string{"db"})
 
 	body := h.checkPolicyFor(t, ts.URL, policyDocV1, "policy-web")
-	if body.Host == nil {
+	if body.Membership == nil {
 		t.Fatal("check with ?host= returned no host")
 	}
-	if body.Host.ID != web.ID {
-		t.Errorf("check resolved host %s, want %s", body.Host.ID, web.ID)
+	if body.Membership.ID != web.ID {
+		t.Errorf("check resolved host %s, want %s", body.Membership.ID, web.ID)
 	}
-	if !slices.Contains(body.Host.Tags, "web") {
+	if !slices.Contains(body.Membership.Tags, "web") {
 		t.Errorf("host tags reported as %v, want the web tag — the selector inputs are "+
-			"the half of this answer that explains a rule that did not appear", body.Host.Tags)
+			"the half of this answer that explains a rule that did not appear", body.Membership.Tags)
 	}
 	if body.Compiled == nil {
 		t.Fatal("check with ?host= returned no compiled rule set")
@@ -555,7 +555,7 @@ func TestPolicySwitchIsGatedWhenHostsAreLive(t *testing.T) {
 		t.Fatalf("PUT policy: %d", code)
 	}
 	host := h.createTaggedHost(t, ts.URL, "policy-gated", "10.42.92.1", []string{"web"})
-	h.setState(t, mustUUID(t, host.ID), store.HostActive)
+	h.setState(t, mustUUID(t, host.ID), store.MembershipActive)
 
 	before := h.networkEpochs(t, ts.URL).ConfigEpoch
 
@@ -573,8 +573,8 @@ func TestPolicySwitchIsGatedWhenHostsAreLive(t *testing.T) {
 	// The host count is the part that matters. A client decoding only "error"
 	// tells an operator "this needs acknowledging" without saying how much of
 	// their fleet it moves, which is the entire question.
-	if gate.HostsAffected < 1 {
-		t.Errorf("the 409 reports %d hosts affected; a live host exists", gate.HostsAffected)
+	if gate.MembershipsAffected < 1 {
+		t.Errorf("the 409 reports %d hosts affected; a live host exists", gate.MembershipsAffected)
 	}
 	if gate.From != store.FirewallSourceRole || gate.To != store.FirewallSourcePolicy {
 		t.Errorf("the 409 reports %q -> %q", gate.From, gate.To)
@@ -596,9 +596,9 @@ func TestPolicySwitchIsGatedWhenHostsAreLive(t *testing.T) {
 	}, &ok); code != http.StatusOK {
 		t.Fatalf("acknowledged switch: %d", code)
 	}
-	if !ok.FirewallSourceChanged || ok.HostsAffected < 1 {
+	if !ok.FirewallSourceChanged || ok.MembershipsAffected < 1 {
 		t.Errorf("acknowledged switch reported changed=%v affected=%d",
-			ok.FirewallSourceChanged, ok.HostsAffected)
+			ok.FirewallSourceChanged, ok.MembershipsAffected)
 	}
 	if after := h.networkEpochs(t, ts.URL).ConfigEpoch; after <= before {
 		t.Fatalf("config epoch %d -> %d: a firewall source change no host is told about "+
@@ -807,10 +807,10 @@ func hasRule(rules []wire.PolicyRule, proto, port, cidr string) bool {
 // createTaggedHost creates a host with tags, which is what tag: selectors resolve
 // against. The harness's own createAndEnroll runs a full enrollment; these tests
 // need the row and its addresses, not a certificate.
-func (h *harness) createTaggedHost(t *testing.T, baseURL, name, addr string, tags []string) wire.HostResponse {
+func (h *harness) createTaggedHost(t *testing.T, baseURL, name, addr string, tags []string) wire.MembershipResponse {
 	t.Helper()
-	var host wire.HostResponse
-	if code := h.adminPost(t, baseURL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, baseURL, membershipSpec{
 		NetworkID: h.netID.String(), Name: name, OverlayAddr: addr,
 		RoleID: h.roleID.String(), Tags: tags,
 	}, &host); code != http.StatusCreated {

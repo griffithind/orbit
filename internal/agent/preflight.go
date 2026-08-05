@@ -64,15 +64,15 @@ func WarnInstanceCollisions(l Layout, log *slog.Logger) {
 	}
 }
 
-type hostSettings struct {
+type membershipSettings struct {
 	port int
 	dev  string
 }
 
-func readHostSettings(path string) (hostSettings, bool) {
+func readHostSettings(path string) (membershipSettings, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return hostSettings{}, false
+		return membershipSettings{}, false
 	}
 	var doc struct {
 		Listen struct {
@@ -83,8 +83,8 @@ func readHostSettings(path string) (hostSettings, bool) {
 		} `yaml:"tun"`
 	}
 	if err := yaml.Unmarshal(b, &doc); err != nil {
-		return hostSettings{}, false
+		return membershipSettings{}, false
 	}
 	// Port 0 means "any", which cannot collide.
-	return hostSettings{port: doc.Listen.Port, dev: doc.Tun.Dev}, true
+	return membershipSettings{port: doc.Listen.Port, dev: doc.Tun.Dev}, true
 }

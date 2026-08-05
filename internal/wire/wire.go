@@ -37,8 +37,8 @@ type EnrollRequest struct {
 
 // EnrollResponse carries everything a host needs to join.
 type EnrollResponse struct {
-	HostID   string `json:"host_id"`
-	HostName string `json:"host_name"`
+	MembershipID   string `json:"membership_id"`
+	MembershipName string `json:"membership_name"`
 
 	// Certificate is this host's PEM certificate.
 	Certificate string `json:"certificate"`
@@ -162,6 +162,15 @@ type ReportRequest struct {
 	NebulaVersion  string `json:"nebula_version,omitempty"`
 	AgentVersion   string `json:"agent_version,omitempty"`
 
+	// Facts and Posture describe the MACHINE, not this membership.
+	//
+	// Sent on the per-network report because that is the channel that exists,
+	// and recorded once per device on receipt: a laptop on three networks sends
+	// three reports carrying the same posture, and the control plane keeps one
+	// answer. See docs/model.md §3.
+	Facts   *DeviceFacts   `json:"facts,omitempty"`
+	Posture *DevicePosture `json:"posture,omitempty"`
+
 	// DataPlaneDown reports that nebula is not running on this host.
 	//
 	// The agent does NOT restart it — systemd owns that, and two supervisors
@@ -209,63 +218,6 @@ type ReportRequest struct {
 type RenewRequest struct {
 	PublicKey string `json:"public_key"`
 	Curve     string `json:"curve"`
-}
-
-// RecoveryChallengeResponse is the server's half of the proof-of-possession
-// exchange for a host whose certificate expired while it was offline.
-type RecoveryChallengeResponse struct {
-	Nonce           string    `json:"nonce"`
-	ServerPublicKey string    `json:"server_public_key"`
-	Curve           string    `json:"curve"`
-	ExpiresAt       time.Time `json:"expires_at"`
-}
-
-// RecoverRequest redeems a challenge.
-//
-// The host proves possession of the private key from its last certificate by
-// deriving the same shared secret the server can, and MACs the NEW public key
-// with it. Binding the new key is what makes a captured proof useless to
-// anyone else: it cannot be replayed to obtain a certificate for a key the
-// attacker controls.
-type RecoverRequest struct {
-	HostID string `json:"host_id"`
-	Nonce  string `json:"nonce"`
-	// PublicKey is the new host key, generated locally as at enrollment.
-	PublicKey string `json:"public_key"`
-	Curve     string `json:"curve"`
-	Proof     string `json:"proof"`
-}
-
-// CreateHostRequest is the admin API's host creation payload.
-type CreateHostRequest struct {
-	NetworkID string `json:"network_id"`
-	Name      string `json:"name"`
-
-	// OverlayAddr is optional. Omit it and the control plane allocates one,
-	// which is the normal case: an operator naming addresses by hand is
-	// maintaining a spreadsheet the database could maintain for them, and every
-	// address chosen that way is one that might already be taken.
-	//
-	// Supplying one is still supported for the cases that need it — a lighthouse
-	// whose address is baked into somebody's runbook, a machine being migrated
-	// onto Orbit with an address it already has.
-	OverlayAddr string `json:"overlay_addr,omitempty"`
-
-	// OverlayPrefix names which of the network's CIDRs to allocate from. Ignored
-	// when OverlayAddr is supplied; empty means the first.
-	//
-	// Allocation produces ONE address, not one per address family. Dual-stacking
-	// by default would double what a later address change disrupts and would
-	// silently convert a fleet the moment an IPv6 prefix is added to the
-	// network. A host that wants both asks for the second explicitly, and that
-	// request is a line in the audit log.
-	OverlayPrefix string `json:"overlay_prefix,omitempty"`
-
-	RoleID       string   `json:"role_id,omitempty"`
-	Tags         []string `json:"tags,omitempty"`
-	IsLighthouse bool     `json:"is_lighthouse,omitempty"`
-	IsRelay      bool     `json:"is_relay,omitempty"`
-	StaticAddrs  []string `json:"static_addrs,omitempty"`
 }
 
 // AddHostAddressRequest claims an additional overlay address.
@@ -319,8 +271,8 @@ type RestartRequiredError struct {
 // requires a restart" without saying that the host in question is the only relay
 // on the network, which is the entire question.
 type AddressImpact struct {
-	HostID   string `json:"host_id"`
-	HostName string `json:"host_name"`
+	MembershipID   string `json:"membership_id"`
+	MembershipName string `json:"membership_name"`
 
 	IsLighthouse   bool `json:"is_lighthouse,omitempty"`
 	IsRelay        bool `json:"is_relay,omitempty"`
@@ -334,11 +286,11 @@ type AddressImpact struct {
 	OnlyRelay        bool `json:"only_relay,omitempty"`
 	OnlyControlPlane bool `json:"only_control_plane,omitempty"`
 
-	// HostsUsingRelays is how many hosts have use_relays set and could therefore
+	// MembershipsUsingRelays is how many hosts have use_relays set and could therefore
 	// be carrying traffic through this one. Present only when this host relays.
-	HostsUsingRelays int `json:"hosts_using_relays,omitempty"`
+	MembershipsUsingRelays int `json:"memberships_using_relays,omitempty"`
 
-	HostsInNetwork    int `json:"hosts_in_network"`
+	HostsInNetwork    int `json:"memberships_in_network"`
 	Lighthouses       int `json:"lighthouses,omitempty"`
 	Relays            int `json:"relays,omitempty"`
 	LiveControlPlanes int `json:"live_control_planes,omitempty"`
@@ -349,9 +301,9 @@ type AddressImpact struct {
 	Consequences []string `json:"consequences,omitempty"`
 }
 
-// HostAddressesResponse is the address set after a change.
-type HostAddressesResponse struct {
-	HostID       string   `json:"host_id"`
+// MembershipAddressesResponse is the address set after a change.
+type MembershipAddressesResponse struct {
+	MembershipID string   `json:"membership_id"`
 	OverlayAddrs []string `json:"overlay_addrs"`
 
 	// RestartRequiredEpoch is the generation the host must restart for, echoed
@@ -373,15 +325,15 @@ type NetworkCIDRRequest struct {
 // Same shape and same reasoning as RoleInUseError: the refusal is not the useful
 // part of the answer, the list of who is blocking it is.
 type CIDRInUseError struct {
-	Error string          `json:"error"`
-	Hosts []AddressHolder `json:"hosts,omitempty"`
+	Error       string          `json:"error"`
+	Memberships []AddressHolder `json:"memberships,omitempty"`
 }
 
 // AddressHolder is a host holding an address inside a prefix.
 type AddressHolder struct {
-	HostID string `json:"host_id"`
-	Name   string `json:"name"`
-	Addr   string `json:"addr"`
+	MembershipID string `json:"membership_id"`
+	Name         string `json:"name"`
+	Addr         string `json:"addr"`
 }
 
 // UpdateHostRequest changes a host's roles and metadata.
@@ -397,7 +349,7 @@ type UpdateHostRequest struct {
 	StaticAddrs  *[]string `json:"static_addrs,omitempty"`
 }
 
-type HostResponse struct {
+type MembershipResponse struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	NetworkID    string   `json:"network_id"`
@@ -466,7 +418,7 @@ type HostResponse struct {
 	ActiveCertificates []CertificateResponse `json:"active_certificates,omitempty"`
 }
 
-// HostListResponse is one page of GET /v1/hosts.
+// MembershipListResponse is one page of GET /v1/memberships.
 //
 // An envelope, not a bare array with X-Total-Count and Link headers. Both
 // clients this is about — a CLI drawing a table and a UI drawing a list — have
@@ -477,8 +429,8 @@ type HostResponse struct {
 //
 // This replaces a bare JSON array and is a breaking change on purpose. Nothing
 // is deployed, and the alternative is a listing that silently truncates.
-type HostListResponse struct {
-	Hosts []HostResponse `json:"hosts"`
+type MembershipListResponse struct {
+	Memberships []MembershipResponse `json:"memberships"`
 
 	// NextCursor is empty on the last page, and is the only way to ask for the
 	// next one: pass it back unmodified as ?cursor=. It is opaque — it encodes
@@ -522,7 +474,7 @@ type CertificateResponse struct {
 }
 
 // CertificateListResponse is one page of a host's certificate history. Envelope
-// and cursor for the same reasons as HostListResponse; no count, because
+// and cursor for the same reasons as MembershipListResponse; no count, because
 // nothing an operator asks of a certificate history is answered by how many
 // certificates there have been.
 type CertificateListResponse struct {
@@ -546,17 +498,17 @@ type BlockResponse struct {
 
 // ConvergenceResponse backs the rotation gate and the revocation SLO.
 type ConvergenceResponse struct {
-	ConfigEpoch    int64 `json:"config_epoch"`
-	BlocklistEpoch int64 `json:"blocklist_epoch"`
-	HostsTotal     int   `json:"hosts_total"`
-	ConfigApplied  int   `json:"config_applied"`
-	BlockApplied   int   `json:"blocklist_applied"`
+	ConfigEpoch      int64 `json:"config_epoch"`
+	BlocklistEpoch   int64 `json:"blocklist_epoch"`
+	MembershipsTotal int   `json:"memberships_total"`
+	ConfigApplied    int   `json:"config_applied"`
+	BlockApplied     int   `json:"blocklist_applied"`
 
 	Lagging []LaggingHost `json:"lagging,omitempty"`
 }
 
 type LaggingHost struct {
-	HostID                string     `json:"host_id"`
+	MembershipID          string     `json:"membership_id"`
 	Name                  string     `json:"name"`
 	AppliedConfigEpoch    int64      `json:"applied_config_epoch"`
 	AppliedBlocklistEpoch int64      `json:"applied_blocklist_epoch"`
@@ -573,7 +525,7 @@ type LaggingHost struct {
 //
 // Entries outlive the host they revoke — DeleteHost removes the host row but
 // deliberately leaves the blocklist entries, or a decommission would quietly
-// un-revoke the machine it decommissioned. So HostName is best-effort and empty
+// un-revoke the machine it decommissioned. So MembershipName is best-effort and empty
 // for a host that no longer exists, which is exactly the case worth seeing.
 type BlocklistEntryResponse struct {
 	Fingerprint string `json:"fingerprint"`
@@ -582,9 +534,9 @@ type BlocklistEntryResponse struct {
 	// NotAfter is when the revoked certificate expires, and therefore when this
 	// entry stops being worth distributing: nebula rejects an expired
 	// certificate before it consults the blocklist.
-	NotAfter  string `json:"not_after"`
-	CreatedAt string `json:"created_at"`
-	HostName  string `json:"host_name,omitempty"`
+	NotAfter       string `json:"not_after"`
+	CreatedAt      string `json:"created_at"`
+	MembershipName string `json:"membership_name,omitempty"`
 }
 
 // TrustBundleResponse is every CA a host should currently trust.
@@ -606,10 +558,10 @@ type TrustBundleResponse struct {
 // The metrics endpoint reports how many; this reports which. During a renewal
 // failure the count says something is wrong and only the names say what.
 type ExpiringCertificateResponse struct {
-	HostID      string `json:"host_id"`
-	HostName    string `json:"host_name"`
-	Fingerprint string `json:"fingerprint"`
-	NotAfter    string `json:"not_after"`
+	MembershipID   string `json:"membership_id"`
+	MembershipName string `json:"membership_name"`
+	Fingerprint    string `json:"fingerprint"`
+	NotAfter       string `json:"not_after"`
 	// RenewAt is when the host should already have renewed. A RenewAt in the
 	// past is the actionable signal, not NotAfter.
 	RenewAt    string `json:"renew_at"`
@@ -618,10 +570,10 @@ type ExpiringCertificateResponse struct {
 
 // ControlPlaneResponse is one live replica serving a network's agent API.
 type ControlPlaneResponse struct {
-	HostID     string `json:"host_id"`
-	Addr       string `json:"addr"`
-	AgentPort  int    `json:"agent_port"`
-	LastSeenAt string `json:"last_seen_at"`
+	MembershipID string `json:"membership_id"`
+	Addr         string `json:"addr"`
+	AgentPort    int    `json:"agent_port"`
+	LastSeenAt   string `json:"last_seen_at"`
 }
 
 // HealthResponse is the liveness and readiness answer.
@@ -848,9 +800,9 @@ type PolicyCheckResponse struct {
 	// their change is live.
 	FirewallSource string `json:"firewall_source"`
 
-	// Host is the host named by ?host=, when one was named, resolved to what the
+	// Membership is the host named by ?host=, when one was named, resolved to what the
 	// compiler will be given for it. Absent when no host was named.
-	Host *PolicyCheckHost `json:"host,omitempty"`
+	Membership *PolicyCheckHost `json:"membership,omitempty"`
 
 	// Compiled is exactly what this host would render: the real compiler, the
 	// current fleet, and the management floor included. Absent when no host was
@@ -910,7 +862,7 @@ type PolicyCheckHost struct {
 //
 // Typed for the same reason LaggingHostsError is, and the remedy is likewise not
 // in the Error field: what an operator needs to see is how many hosts are about
-// to have their entire rule set replaced, and that is HostsAffected.
+// to have their entire rule set replaced, and that is MembershipsAffected.
 //
 // NOT a convergence gate. CA activation refuses because hosts have not caught up
 // and waiting fixes it; this refuses because the change is large and
@@ -925,10 +877,10 @@ type FirewallSourceChangeError struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 
-	// HostsAffected is how many enrolled or active hosts re-render their firewall
-	// when this proceeds. Hosts that have never enrolled are excluded: they have
+	// MembershipsAffected is how many enrolled or active hosts re-render their firewall
+	// when this proceeds. Memberships that have never enrolled are excluded: they have
 	// no configuration to replace.
-	HostsAffected int `json:"hosts_affected"`
+	MembershipsAffected int `json:"memberships_affected"`
 
 	// Detail spells out the consequence in words, worst first.
 	Detail string `json:"detail,omitempty"`
@@ -947,8 +899,8 @@ type NetworkUpdateResponse struct {
 	// the requested source. Nothing was written and no epoch was bumped.
 	FirewallSourceChanged bool `json:"firewall_source_changed"`
 
-	// HostsAffected is how many hosts re-render on their next poll.
-	HostsAffected int `json:"hosts_affected,omitempty"`
+	// MembershipsAffected is how many hosts re-render on their next poll.
+	MembershipsAffected int `json:"memberships_affected,omitempty"`
 
 	Detail string `json:"detail,omitempty"`
 }
@@ -960,6 +912,11 @@ type NetworkResponse struct {
 	// rename cannot retarget it. Name is for people.
 	Slug string `json:"slug"`
 	Name string `json:"name"`
+
+	// NetworkID is the verifiable identifier a machine joins by. Unlike the
+	// uuid and the slug it is a commitment to a key, so a machine holding one
+	// can refuse a control plane that cannot prove it holds the other half.
+	NetworkID string `json:"network_id"`
 
 	CIDRs       []string `json:"cidrs"`
 	Curve       string   `json:"curve"`
@@ -1038,9 +995,9 @@ type RoleUpdateResponse struct {
 	// GroupsChanged marks the edit that outlives this request.
 	GroupsChanged bool `json:"groups_changed,omitempty"`
 
-	// HostsAwaitingCertificate is how many hosts still present a certificate
+	// MembershipsAwaitingCertificate is how many hosts still present a certificate
 	// carrying the old groups.
-	HostsAwaitingCertificate int `json:"hosts_awaiting_certificate,omitempty"`
+	MembershipsAwaitingCertificate int `json:"memberships_awaiting_certificate,omitempty"`
 
 	// CertificatesConvergeBy is when the last of them will have renewed.
 	// Computed from live certificate rows and the agent's renewal policy, which
@@ -1067,8 +1024,8 @@ type LaggingHostsError struct {
 // reasoning: ON DELETE RESTRICT refuses the delete, and the useful part of the
 // answer is the list of hosts that are blocking it.
 type RoleInUseError struct {
-	Error string     `json:"error"`
-	Hosts []RoleHost `json:"hosts,omitempty"`
+	Error       string     `json:"error"`
+	Memberships []RoleHost `json:"memberships,omitempty"`
 }
 
 // RoleHost identifies a host that carries a role.
@@ -1088,7 +1045,7 @@ type RoleResponse struct {
 type CreateCARequest struct {
 	NetworkID string `json:"network_id"`
 	Name      string `json:"name"`
-	// Days is the CA lifetime. Host certificates cannot outlive it, so a short
+	// Days is the CA lifetime. Membership certificates cannot outlive it, so a short
 	// CA forces a rotation cadence.
 	Days int `json:"days,omitempty"`
 	// Networks and Groups bound what subordinate certificates may claim. Empty
@@ -1256,4 +1213,286 @@ type ReachabilityResponse struct {
 	// Note carries anything that bounds the answer — a network with no policy,
 	// a mode where one direction is not enforced.
 	Note string `json:"note,omitempty"`
+}
+
+//------------------------------------------------------------------------------
+// Joining
+//------------------------------------------------------------------------------
+
+// JoinRequest is posted to the public join endpoint by a device that wants to
+// become a member of a network.
+//
+// It is not enrollment. Enrollment presents a secret and gets a certificate
+// back in the same round trip; a join presents an IDENTITY and gets a row that
+// holds nothing until somebody authorizes it. The difference is where the gate
+// sits — on a credential that had to travel, or on a person who says yes — and
+// both exist because unattended provisioning needs the first and a laptop
+// handed to an employee is better served by the second.
+//
+// See docs/design-device-identity.md §3.
+type JoinRequest struct {
+	// Network is the network to join, as a uuid or a slug.
+	//
+	// The verifiable network ID from design-device-identity.md §4 is not
+	// accepted yet: it commits to a network identity key, and that key is
+	// specified but not built (docs/model.md §8). When it lands it becomes a
+	// third accepted form here rather than a replacement — a deployment that
+	// wrote a slug into its provisioning scripts should not have to rewrite
+	// them.
+	Network string `json:"network"`
+
+	// Name is the membership name, unique within the network.
+	Name string `json:"name"`
+
+	// PublicKey is the device's DER SubjectPublicKeyInfo, base64 standard
+	// encoding. NOT the nebula static key: this one is permanent, is the same
+	// across every network and control plane, and is never used for the mesh.
+	PublicKey string `json:"public_key"`
+
+	// KeyBacking is 'file' or 'token' — where the device claims to hold its
+	// private key. A claim, never a fact, until attestation can prove it.
+	KeyBacking string `json:"key_backing,omitempty"`
+
+	// Hostname is advisory and exists so a human deciding whether to authorize
+	// a pending join can tell which row is the laptop on their desk.
+	Hostname string `json:"hostname,omitempty"`
+
+	// SignedAt is when the device signed this request, unix seconds. The
+	// control plane bounds how far it may be from its own clock; see
+	// device.JoinFreshness.
+	SignedAt int64 `json:"signed_at"`
+
+	// Signature is the device's signature over the canonical join statement,
+	// base64 standard encoding. See device.JoinStatement for exactly what is
+	// signed and why each field is in it.
+	Signature string `json:"signature"`
+
+	// Credential is an optional reservation code.
+	//
+	// Presenting a valid one auto-authorizes the join: the membership is created
+	// straight into an authorized state with the name, address and role the
+	// reservation named, instead of landing in a queue. That is what keeps
+	// unattended provisioning working — a machine can come up fully configured
+	// with nobody watching.
+	//
+	// When it is set, Name is IGNORED in favour of the reserved name. The
+	// operator who made the reservation decided; a machine must not be able to
+	// take a reserved place under a different name.
+	Credential string `json:"credential,omitempty"`
+}
+
+// JoinResponse is what a device gets back.
+//
+// Deliberately thin. A pending join has no certificate, no address and no
+// configuration, because none of those exist until authorization — and a
+// response shaped like EnrollResponse with the interesting fields empty would
+// invite an agent to treat "not yet" as "something went wrong".
+type JoinResponse struct {
+	// MembershipID names the row an operator will authorize. Returned so the
+	// agent can say something specific while it waits, and so a human can be
+	// pointed at exactly one row.
+	MembershipID string `json:"membership_id"`
+
+	// DeviceID is this machine's identity on this control plane, stable across
+	// every network it joins.
+	DeviceID string `json:"device_id"`
+
+	// State is the membership's state: 'pending' when it awaits an operator, or
+	// 'created' when a reservation code auto-authorized it.
+	State string `json:"state"`
+
+	// Name is what the membership is actually called. Worth returning rather
+	// than echoing the request, because a reservation overrides the requested
+	// name and a machine that logged what it asked for would be logging a
+	// falsehood.
+	Name string `json:"name"`
+
+	// NetworkID is this network's verifiable identifier, and NetworkKey the
+	// Ed25519 public key it commits to (base64). NetworkProof is a signature by
+	// that key over the CLIENT'S OWN join statement.
+	//
+	// Together they answer the question a URL cannot: is this the control plane
+	// I meant to talk to? The client checks that the key hashes to the ID it was
+	// given, and that the proof verifies — the first alone is worthless, since
+	// anyone who read the ID can serve the right public key.
+	//
+	// Signing the client's own statement rather than a constant is what stops a
+	// recording of one machine's join convincing another: the statement carries
+	// that machine's key fingerprint and a timestamp.
+	//
+	// A client that joined by uuid or slug gets these too, and should still
+	// check the proof against the ID it receives — then RECORD that ID, so the
+	// next contact can be verified. Trust on first use is weaker than an ID
+	// handed over out of band, and much stronger than nothing.
+	NetworkID    string `json:"network_id"`
+	NetworkKey   string `json:"network_key"`
+	NetworkProof string `json:"network_proof"`
+}
+
+// ClaimRequest collects the credential an authorized membership entitles a
+// device to.
+//
+// This is what replaces the enrollment code on the join path, and the shape is
+// the point: NO SECRET TRAVELS. The device proves it holds the key it joined
+// with, and the control plane issues over the mesh key that proof names. There
+// is nothing to leak from a provisioning repository because there is nothing to
+// put in one.
+type ClaimRequest struct {
+	// MembershipID is what JoinResponse returned.
+	MembershipID string `json:"membership_id"`
+
+	// PublicKey is the nebula static public key, base64 standard encoding —
+	// freshly generated, and NOT the device key. The certificate is issued over
+	// this one.
+	PublicKey string `json:"public_key"`
+
+	// Curve is CURVE25519 or P256 and must match the network's. The device key
+	// is always P-256 and is unrelated to this: one is an identity, the other
+	// is a mesh key, and a network on Curve25519 has both.
+	Curve string `json:"curve"`
+
+	AgentVersion  string `json:"agent_version,omitempty"`
+	NebulaVersion string `json:"nebula_version,omitempty"`
+
+	// SignedAt is when the device signed, unix seconds.
+	SignedAt int64 `json:"signed_at"`
+
+	// Signature is over device.ClaimStatement, base64 standard encoding. It
+	// covers PublicKey, which is what stops a certificate being minted over a
+	// key the device did not choose.
+	Signature string `json:"signature"`
+}
+
+// PendingJoin is one row in the authorization queue.
+//
+// Thin on purpose. What an operator needs in order to decide is the name the
+// machine asked for, when it asked, and which device it is — not a full host
+// rendering of a row that has no address, no role and no certificate. Fields
+// that are always empty at this stage would read as missing data rather than as
+// data that does not exist yet.
+type PendingJoin struct {
+	MembershipID string    `json:"membership_id"`
+	Name         string    `json:"name"`
+	DeviceID     string    `json:"device_id"`
+	RequestedAt  time.Time `json:"requested_at"`
+}
+
+type PendingJoinList struct {
+	Pending []PendingJoin `json:"pending"`
+}
+
+// AuthorizeRequest is the optional body of an authorization.
+type AuthorizeRequest struct {
+	// RoleID assigns a role as part of authorizing. Optional: a membership can
+	// be authorized with none and given one later, which is the same thing
+	// PATCH /v1/memberships/{id} has always done.
+	RoleID string `json:"role_id,omitempty"`
+}
+
+// DeviceFacts is descriptive metadata a machine reports about itself.
+//
+// Advisory. An agent can claim any kernel version it likes, so nothing here is
+// an authorization input on its own; it exists so an operator can see a fleet.
+type DeviceFacts struct {
+	OS            string `json:"os,omitempty"`
+	OSVersion     string `json:"os_version,omitempty"`
+	Kernel        string `json:"kernel,omitempty"`
+	Arch          string `json:"arch,omitempty"`
+	AgentVersion  string `json:"agent_version,omitempty"`
+	NebulaVersion string `json:"nebula_version,omitempty"`
+}
+
+// DevicePosture is a machine's security configuration as its agent could read
+// it.
+//
+// EVERY FIELD IS A POINTER, and a missing field means UNKNOWN, not false. The
+// distinction is load-bearing: a machine whose disk encryption could not be read
+// is not a machine with an unencrypted disk. omitempty on a *bool omits only
+// nil, so an explicit false survives the round trip — which is the only reason
+// this can be pointers rather than an enum.
+type DevicePosture struct {
+	DiskEncrypted   *bool `json:"disk_encrypted,omitempty"`
+	SecureBoot      *bool `json:"secure_boot,omitempty"`
+	FirewallEnabled *bool `json:"firewall_enabled,omitempty"`
+	TPMPresent      *bool `json:"tpm_present,omitempty"`
+}
+
+// DeviceResponse is a machine as the admin API renders it.
+//
+// The device is the noun an operator asks posture questions about — "is this
+// laptop encrypted", "which machines have a TPM" — and it answers them once
+// rather than once per network the machine is on.
+type DeviceResponse struct {
+	ID             string `json:"id"`
+	KeyFingerprint string `json:"key_fingerprint"`
+
+	// KeyBacking is 'file' or 'token', and is a CLAIM until attestation can
+	// prove it. Named in the JSON as what it is so a consumer does not read it
+	// as a verified fact.
+	KeyBacking string `json:"key_backing"`
+
+	Hostname string `json:"hostname,omitempty"`
+
+	Blocked       bool       `json:"blocked"`
+	BlockedAt     *time.Time `json:"blocked_at,omitempty"`
+	BlockedReason string     `json:"blocked_reason,omitempty"`
+
+	Facts           DeviceFacts   `json:"facts"`
+	FactsObservedAt *time.Time    `json:"facts_observed_at,omitempty"`
+	Posture         DevicePosture `json:"posture"`
+
+	// PostureObservedAt is as important as the posture itself and is why it is
+	// a sibling rather than folded inside. A reading from six months ago is not
+	// evidence about a machine today, and a consumer that cannot see the age
+	// cannot tell the difference.
+	PostureObservedAt *time.Time `json:"posture_observed_at,omitempty"`
+
+	// Memberships names the networks this machine is on, so "where is this
+	// laptop" is one request rather than one per network.
+	Memberships []DeviceMembership `json:"memberships,omitempty"`
+
+	FirstSeenAt time.Time `json:"first_seen_at"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
+}
+
+type DeviceMembership struct {
+	MembershipID string   `json:"membership_id"`
+	NetworkID    string   `json:"network_id"`
+	Name         string   `json:"name"`
+	State        string   `json:"state"`
+	OverlayAddrs []string `json:"overlay_addrs,omitempty"`
+}
+
+type DeviceList struct {
+	Devices []DeviceResponse `json:"devices"`
+}
+
+// BlockDeviceRequest blocks a machine everywhere on this control plane.
+type BlockDeviceRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// ReserveRequest holds a place in a network for a machine that has not arrived.
+//
+// It replaced CreateHostRequest, and the difference is where the intent lives. A
+// created host was a row that named no machine; a reservation is intent recorded
+// on a credential, redeemed into a membership that names its machine from the
+// moment it exists.
+type ReserveRequest struct {
+	// Name the membership will take. The reservation decides it, not the
+	// joining machine — a machine must not be able to take a reserved place
+	// under a different name.
+	Name string `json:"name"`
+
+	// OverlayAddr pins a specific address. Empty allocates from the network's
+	// prefixes, which is what almost every caller wants; naming one is for
+	// machines whose address is written into something Orbit does not manage.
+	OverlayAddr string `json:"overlay_addr,omitempty"`
+
+	RoleID string `json:"role_id,omitempty"`
+
+	// TTLSeconds overrides the default lifetime. A reservation for a machine
+	// that will be racked next week needs longer than the fifteen minutes that
+	// suit an installer being run right now.
+	TTLSeconds int `json:"ttl_seconds,omitempty"`
 }

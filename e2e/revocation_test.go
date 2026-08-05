@@ -164,7 +164,7 @@ func TestRevocationPropagation(t *testing.T) {
 	// ---- t0 ----
 	t0 := time.Now()
 	var blocked wire.BlockResponse
-	if code := h.adminPost(t, lhServer.URL+"/v1/hosts/"+victim.id+"/block", nil, &blocked); code != http.StatusOK {
+	if code := h.adminPost(t, lhServer.URL+"/v1/memberships/"+victim.id+"/block", nil, &blocked); code != http.StatusOK {
 		t.Fatalf("block: status %d", code)
 	}
 	t.Logf("blocked victim at epoch %d", blocked.BlocklistEpoch)
@@ -230,7 +230,7 @@ func TestRevocationPropagation(t *testing.T) {
 		t.Fatalf("convergence: status %d", code)
 	}
 	t.Logf("convergence: %d/%d hosts at blocklist epoch %d",
-		conv.BlockApplied, conv.HostsTotal, conv.BlocklistEpoch)
+		conv.BlockApplied, conv.MembershipsTotal, conv.BlocklistEpoch)
 	if conv.BlockApplied < len(obsList) {
 		t.Errorf("convergence reports %d applied, but %d observers demonstrably applied it",
 			conv.BlockApplied, len(obsList))
@@ -297,7 +297,7 @@ func TestPushBeatsPolling(t *testing.T) {
 
 	t0 := time.Now()
 	var blocked wire.BlockResponse
-	if code := h.adminPost(t, lhServer.URL+"/v1/hosts/"+victim.id+"/block", nil, &blocked); code != http.StatusOK {
+	if code := h.adminPost(t, lhServer.URL+"/v1/memberships/"+victim.id+"/block", nil, &blocked); code != http.StatusOK {
 		t.Fatalf("block: status %d", code)
 	}
 

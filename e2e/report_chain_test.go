@@ -28,7 +28,7 @@ func TestRevertSurvivesTheReportHandler(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "chain", "10.42.11.1", false, false, nil)
-	hostID := uuid.MustParse(host.id)
+	membershipID := uuid.MustParse(host.id)
 	client := xffClient(t, ts.URL, host.addr)
 
 	// Converge on a generation, the ordinary way.
@@ -37,7 +37,7 @@ func TestRevertSurvivesTheReportHandler(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("report: %v", err)
 	}
-	if cfg, _ := h.appliedEpochs(t, hostID); cfg != 40 {
+	if cfg, _ := h.appliedEpochs(t, membershipID); cfg != 40 {
 		t.Fatalf("applied config epoch = %d, want 40", cfg)
 	}
 
@@ -49,7 +49,7 @@ func TestRevertSurvivesTheReportHandler(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("report: %v", err)
 	}
-	if cfg, _ := h.appliedEpochs(t, hostID); cfg != 40 {
+	if cfg, _ := h.appliedEpochs(t, membershipID); cfg != 40 {
 		t.Errorf("an unnamed lower epoch moved the record to %d; monotonicity is broken", cfg)
 	}
 
@@ -62,7 +62,7 @@ func TestRevertSurvivesTheReportHandler(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("report: %v", err)
 	}
-	cfg, _ := h.appliedEpochs(t, hostID)
+	cfg, _ := h.appliedEpochs(t, membershipID)
 	if cfg != 39 {
 		t.Fatalf("named revert did not lower the recorded epoch: got %d, want 39.\n"+
 			"The store accepts this; if it failed here the report handler is\n"+
@@ -95,7 +95,7 @@ func TestReplayedRevertIsANoOp(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "replay", "10.42.11.2", false, false, nil)
-	hostID := uuid.MustParse(host.id)
+	membershipID := uuid.MustParse(host.id)
 	client := xffClient(t, ts.URL, host.addr)
 
 	report := func(r wire.ReportRequest) {
@@ -110,14 +110,14 @@ func TestReplayedRevertIsANoOp(t *testing.T) {
 		ConfigEpoch: 19, BlocklistEpoch: 3, RevertedFromConfigEpoch: 20,
 	}
 	report(revert)
-	if cfg, _ := h.appliedEpochs(t, hostID); cfg != 19 {
+	if cfg, _ := h.appliedEpochs(t, membershipID); cfg != 19 {
 		t.Fatalf("after revert = %d, want 19", cfg)
 	}
 
 	// Same message again. The stored epoch is now 19, which no longer matches
 	// RevertedFromConfigEpoch=20, so the condition fails and nothing moves.
 	report(revert)
-	if cfg, _ := h.appliedEpochs(t, hostID); cfg != 19 {
+	if cfg, _ := h.appliedEpochs(t, membershipID); cfg != 19 {
 		t.Errorf("a replayed revert moved the epoch again, to %d", cfg)
 	}
 }

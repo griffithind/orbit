@@ -22,7 +22,7 @@ import (
 
 // TestCLIResolvesNamesToIDs covers the mappings that are unique by construction.
 //
-// Host and role names carry UNIQUE (network_id, name), so an exact match is the
+// Membership and role names carry UNIQUE (network_id, name), so an exact match is the
 // only match. Network names are globally unique. What the CLI adds beyond
 // convenience is `-role <name>` on the host listing, which the server refuses
 // outright — "role_id must be a uuid, not a role name" — because a name there
@@ -31,8 +31,8 @@ func TestCLIResolvesNamesToIDs(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "resolve-me", OverlayAddr: "10.42.74.1",
 		RoleID: h.roleID.String(),
 	}, &host); code != http.StatusCreated {
@@ -47,8 +47,8 @@ func TestCLIResolvesNamesToIDs(t *testing.T) {
 	}, &other); code != http.StatusCreated {
 		t.Fatalf("create role: %d", code)
 	}
-	var offRole wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var offRole wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "other-role", OverlayAddr: "10.42.74.2",
 		RoleID: other.ID,
 	}, &offRole); code != http.StatusCreated {
@@ -56,8 +56,8 @@ func TestCLIResolvesNamesToIDs(t *testing.T) {
 	}
 
 	t.Run("host by name and by uuid agree", func(t *testing.T) {
-		byName := h.cli(t, ts, "host", "show", "resolve-me", "-json")
-		byID := h.cli(t, ts, "host", "show", host.ID, "-json")
+		byName := h.cli(t, ts, "membership", "show", "resolve-me", "-json")
+		byID := h.cli(t, ts, "membership", "show", host.ID, "-json")
 		if byName.code != 0 || byID.code != 0 {
 			t.Fatalf("exits %d/%d: %s%s", byName.code, byID.code, byName.stderr, byID.stderr)
 		}
@@ -70,7 +70,7 @@ func TestCLIResolvesNamesToIDs(t *testing.T) {
 		// "resolve" is a prefix of a real host, and name_contains will return
 		// that host. Accepting it would make `orbit host rm resolve` delete
 		// something the operator did not name.
-		got := h.cli(t, ts, "host", "show", "resolve")
+		got := h.cli(t, ts, "membership", "show", "resolve")
 		if got.code != 2 {
 			t.Errorf("substring resolved: exit %d, want 2\n%s", got.code, got.stderr)
 		}
@@ -80,21 +80,21 @@ func TestCLIResolvesNamesToIDs(t *testing.T) {
 	})
 
 	t.Run("role name on the host filter", func(t *testing.T) {
-		got := h.cli(t, ts, "host", "ls", "-role", "cli-other", "-json")
+		got := h.cli(t, ts, "membership", "ls", "-role", "cli-other", "-json")
 		if got.code != 0 {
 			t.Fatalf("exit %d: %s", got.code, got.stderr)
 		}
-		var page wire.HostListResponse
+		var page wire.MembershipListResponse
 		if err := jsonUnmarshal([]byte(got.stdout), &page); err != nil {
 			t.Fatal(err)
 		}
-		if len(page.Hosts) != 1 || page.Hosts[0].Name != "other-role" {
+		if len(page.Memberships) != 1 || page.Memberships[0].Name != "other-role" {
 			t.Errorf("-role cli-other returned %v, want just other-role", listedNames(page))
 		}
 	})
 
 	t.Run("network by name", func(t *testing.T) {
-		got := h.cli(t, ts, "host", "ls", "-network", h.netName, "-json")
+		got := h.cli(t, ts, "membership", "ls", "-network", h.netName, "-json")
 		if got.code != 0 {
 			t.Fatalf("exit %d: %s", got.code, got.stderr)
 		}
@@ -107,7 +107,7 @@ func TestCLIResolvesNamesToIDs(t *testing.T) {
 		// The failure being avoided: a name that reaches the server as nothing,
 		// returning the whole fleet or none of it, either of which reads as an
 		// answer.
-		got := h.cli(t, ts, "host", "ls", "-role", "no-such-role")
+		got := h.cli(t, ts, "membership", "ls", "-role", "no-such-role")
 		if got.code != 2 {
 			t.Errorf("exit %d, want 2\n%s", got.code, got.stderr)
 		}
@@ -226,15 +226,15 @@ func TestCLIRefusesIrreversibleActionsWithoutConsent(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "consent", OverlayAddr: "10.42.75.1",
 		RoleID: h.roleID.String(),
 	}, &host); code != http.StatusCreated {
 		t.Fatalf("create host: %d", code)
 	}
 
-	got := h.cli(t, ts, "host", "rm", "consent")
+	got := h.cli(t, ts, "membership", "rm", "consent")
 	if got.code != 2 {
 		t.Errorf("host rm without -y = exit %d, want 2\n%s", got.code, got.stderr)
 	}
@@ -242,22 +242,22 @@ func TestCLIRefusesIrreversibleActionsWithoutConsent(t *testing.T) {
 		t.Errorf("the refusal does not name the way to proceed:\n%s", got.stderr)
 	}
 	// And nothing happened.
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts/"+host.ID, nil, nil); code != http.StatusOK {
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+host.ID, nil, nil); code != http.StatusOK {
 		t.Errorf("the host was removed despite the refusal: %d", code)
 	}
 
 	// Blocking is reversible and is deliberately not gated: a prompt on a
 	// reversible action trains people to confirm without reading, which is what
 	// makes the prompt on an irreversible one worthless.
-	if got := h.cli(t, ts, "host", "block", "consent"); got.code != 0 {
+	if got := h.cli(t, ts, "membership", "block", "consent"); got.code != 0 {
 		t.Errorf("host block should not require consent: exit %d\n%s", got.code, got.stderr)
 	}
 
 	// With -y the removal goes through.
-	if got := h.cli(t, ts, "host", "rm", "consent", "-y"); got.code != 0 {
+	if got := h.cli(t, ts, "membership", "rm", "consent", "-y"); got.code != 0 {
 		t.Errorf("host rm -y = exit %d\n%s", got.code, got.stderr)
 	}
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts/"+host.ID, nil, nil); code != http.StatusNotFound {
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+host.ID, nil, nil); code != http.StatusNotFound {
 		t.Errorf("host survived rm -y: %d", code)
 	}
 }
@@ -272,14 +272,14 @@ func TestCLIPipedOutputStaysParseable(t *testing.T) {
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
 	long := "a-deliberately-long-host-name-that-would-be-truncated-on-any-terminal"
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: long, OverlayAddr: "10.42.76.1",
 		RoleID: h.roleID.String(),
 	}, nil); code != http.StatusCreated {
 		t.Fatalf("create host: %d", code)
 	}
 
-	got := h.cli(t, ts, "host", "ls")
+	got := h.cli(t, ts, "membership", "ls")
 	if got.code != 0 {
 		t.Fatalf("exit %d: %s", got.code, got.stderr)
 	}

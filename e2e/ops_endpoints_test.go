@@ -32,11 +32,11 @@ import (
 // Taken from the store rather than parsed out of the enrollment response,
 // because the blocklist stores whatever the certificate row holds and this test
 // is about matching that exactly.
-func (h *harness) fingerprintOf(t *testing.T, hostID string) string {
+func (h *harness) fingerprintOf(t *testing.T, membershipID string) string {
 	t.Helper()
-	id, err := uuid.Parse(hostID)
+	id, err := uuid.Parse(membershipID)
 	if err != nil {
-		t.Fatalf("host id %q: %v", hostID, err)
+		t.Fatalf("host id %q: %v", membershipID, err)
 	}
 
 	var fp string
@@ -46,7 +46,7 @@ func (h *harness) fingerprintOf(t *testing.T, hostID string) string {
 			return err
 		}
 		if len(certs) == 0 {
-			t.Fatalf("host %s has no active certificate", hostID)
+			t.Fatalf("host %s has no active certificate", membershipID)
 		}
 		fp = certs[0].Fingerprint
 		return nil
@@ -87,15 +87,15 @@ func TestBlocklistSurvivesTheHostItRevoked(t *testing.T) {
 	deletedFP := h.fingerprintOf(t, deleted.id)
 	untouchedFP := h.fingerprintOf(t, untouched.id)
 
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+blocked.id+"/block", nil, nil); code != http.StatusOK {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+blocked.id+"/block", nil, nil); code != http.StatusOK {
 		t.Fatalf("block: %d", code)
 	}
-	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/hosts/"+deleted.id, nil, nil); code != http.StatusOK {
+	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/memberships/"+deleted.id, nil, nil); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
 
 	// The premise: the deleted host is gone from the read surface entirely.
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts/"+deleted.id, nil, nil); code != http.StatusNotFound {
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+deleted.id, nil, nil); code != http.StatusNotFound {
 		t.Fatalf("deleted host still readable: %d", code)
 	}
 
@@ -130,7 +130,7 @@ func TestBlocklistMatchesWhatHostsAreGiven(t *testing.T) {
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "ops-live", "10.42.9.10", false, false, nil)
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+host.id+"/block", nil, nil); code != http.StatusOK {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+host.id+"/block", nil, nil); code != http.StatusOK {
 		t.Fatalf("block: %d", code)
 	}
 
@@ -175,7 +175,7 @@ func TestBlocklistRendersForATerminal(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "ops-text", "10.42.9.11", false, false, nil)
 	fp := h.fingerprintOf(t, host.id)
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+host.id+"/block", nil, nil); code != http.StatusOK {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+host.id+"/block", nil, nil); code != http.StatusOK {
 		t.Fatalf("block: %d", code)
 	}
 
@@ -295,13 +295,13 @@ func TestExpiringCertificatesNameTheHosts(t *testing.T) {
 
 	found := false
 	for _, c := range due {
-		if c.HostID != host.id {
+		if c.MembershipID != host.id {
 			continue
 		}
 		found = true
-		if c.HostName != "ops-renewing" {
+		if c.MembershipName != "ops-renewing" {
 			t.Errorf("host_name = %q, want %q — a uuid alone sends the reader to another endpoint per row",
-				c.HostName, "ops-renewing")
+				c.MembershipName, "ops-renewing")
 		}
 		if c.Fingerprint == "" {
 			t.Error("no fingerprint; it is what identifies the certificate to revoke")
@@ -386,11 +386,11 @@ func TestReplicasReportTheEndpointsAgentsAreGiven(t *testing.T) {
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "ops-replica", "10.42.9.30", false, false, nil)
-	hostID := uuid.MustParse(host.id)
+	membershipID := uuid.MustParse(host.id)
 	addr := netip.MustParseAddr("10.42.9.30")
 
 	err := h.store.Tx(context.Background(), func(ctx context.Context, tx *store.Tx) error {
-		return tx.RegisterControlPlane(ctx, h.netID, hostID, addr, 8443)
+		return tx.RegisterControlPlane(ctx, h.netID, membershipID, addr, 8443)
 	})
 	if err != nil {
 		t.Fatalf("register control plane: %v", err)
@@ -411,8 +411,8 @@ func TestReplicasReportTheEndpointsAgentsAreGiven(t *testing.T) {
 	if found == nil {
 		t.Fatalf("the replica that just heartbeated is missing: %+v", replicas)
 	}
-	if found.HostID != host.id {
-		t.Errorf("host_id = %q, want %q", found.HostID, host.id)
+	if found.MembershipID != host.id {
+		t.Errorf("membership_id = %q, want %q", found.MembershipID, host.id)
 	}
 	if found.AgentPort != 8443 {
 		t.Errorf("agent_port = %d, want 8443 — an endpoint without its port is not dialable",

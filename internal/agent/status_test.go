@@ -200,11 +200,11 @@ func TestStatusRoundTrip(t *testing.T) {
 		Root:    "/var/lib/orbit",
 		PID:     4242,
 		Networks: []NetworkStatus{{
-			Network:     "prod",
-			Ready:       true,
-			HostID:      "abc",
-			ConfigEpoch: 41,
-			Nebula:      NebulaStatus{Known: true, Running: true, Instance: "gen-1"},
+			Network:      "prod",
+			Ready:        true,
+			MembershipID: "abc",
+			ConfigEpoch:  41,
+			Nebula:       NebulaStatus{Known: true, Running: true, Instance: "gen-1"},
 		}},
 	}
 	path := serveForTest(t, want)

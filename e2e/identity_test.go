@@ -22,20 +22,22 @@ func TestAuditNamesTheActor(t *testing.T) {
 	name := "deploy-bot-" + uuid.NewString()[:8]
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: name, Scopes: []string{"hosts:create", "hosts:read", "audit:read"},
+		Name: name, Scopes: []string{"memberships:create", "memberships:read", "audit:read"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
 
-	var host wire.HostResponse
-	if code := h.reqAs(t, tok.Token, http.MethodPost, ts.URL+"/v1/hosts", wire.CreateHostRequest{
-		NetworkID: h.netID.String(), Name: "named-actor", OverlayAddr: "10.42.7.1",
-		RoleID: h.roleID.String(),
-	}, &host); code != http.StatusCreated {
-		t.Fatalf("create host: %d", code)
+	// Reserving is the token-authored action that replaced creating a host: an
+	// operator decides a machine's place, and a machine takes it later. The
+	// entry has to name the operator, not the machine.
+	if code := h.reqAs(t, tok.Token, http.MethodPost,
+		ts.URL+"/v1/networks/"+h.netID.String()+"/reservations",
+		wire.ReserveRequest{Name: "named-actor", OverlayAddr: "10.42.7.1",
+			RoleID: h.roleID.String()}, nil); code != http.StatusCreated {
+		t.Fatalf("reserve: %d", code)
 	}
 
-	entries := h.auditFor(t, ts.URL, store.ActionHostCreated, host.ID)
+	entries := h.auditFor(t, ts.URL, store.ActionEnrollCodeCreated, h.netID.String())
 	if len(entries) != 1 {
 		t.Fatalf("got %d entries, want 1", len(entries))
 	}
@@ -61,24 +63,23 @@ func TestAuditSurvivesTheActorBeingRevoked(t *testing.T) {
 	name := "departed-" + uuid.NewString()[:8]
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: name, Scopes: []string{"hosts:create"},
+		Name: name, Scopes: []string{"memberships:create"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
 
-	var host wire.HostResponse
-	if code := h.reqAs(t, tok.Token, http.MethodPost, ts.URL+"/v1/hosts", wire.CreateHostRequest{
-		NetworkID: h.netID.String(), Name: "orphaned-entry", OverlayAddr: "10.42.7.2",
-		RoleID: h.roleID.String(),
-	}, &host); code != http.StatusCreated {
-		t.Fatalf("create host: %d", code)
+	if code := h.reqAs(t, tok.Token, http.MethodPost,
+		ts.URL+"/v1/networks/"+h.netID.String()+"/reservations",
+		wire.ReserveRequest{Name: "orphaned-entry", OverlayAddr: "10.42.7.2",
+			RoleID: h.roleID.String()}, nil); code != http.StatusCreated {
+		t.Fatalf("reserve: %d", code)
 	}
 
 	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/tokens/"+tok.ID, nil, nil); code != http.StatusNoContent {
 		t.Fatalf("revoke: %d", code)
 	}
 
-	entries := h.auditFor(t, ts.URL, store.ActionHostCreated, host.ID)
+	entries := h.auditFor(t, ts.URL, store.ActionEnrollCodeCreated, h.netID.String())
 	if len(entries) != 1 || entries[0].ActorDisplay != name {
 		t.Errorf("after revoking the actor, audit_display = %q, want %q",
 			entries[0].ActorDisplay, name)
@@ -97,20 +98,20 @@ func TestEnrollmentCodeIsAttributedToATokenNotAUser(t *testing.T) {
 	name := "enroller-" + uuid.NewString()[:8]
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: name, Scopes: []string{"hosts:create", "hosts:enroll"},
+		Name: name, Scopes: []string{"memberships:create", "memberships:enroll"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
 
-	var host wire.HostResponse
-	if code := h.reqAs(t, tok.Token, http.MethodPost, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "coded", OverlayAddr: "10.42.7.3",
 		RoleID: h.roleID.String(),
 	}, &host); code != http.StatusCreated {
 		t.Fatalf("create host: %d", code)
 	}
 	if code := h.reqAs(t, tok.Token, http.MethodPost,
-		ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, nil); code != http.StatusCreated {
+		ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, nil); code != http.StatusCreated {
 		t.Fatalf("create code: %d", code)
 	}
 
@@ -127,7 +128,7 @@ func TestEnrollmentCodeIsAttributedToATokenNotAUser(t *testing.T) {
 	}
 }
 
-// TestAgentActionsNameTheHost. Hosts are hard-deleted by DELETE /v1/hosts, so
+// TestAgentActionsNameTheHost. Memberships are hard-deleted by DELETE /v1/memberships, so
 // an agent entry that carried only a uuid would become unreadable the moment
 // the host it describes is decommissioned.
 func TestAgentActionsNameTheHost(t *testing.T) {
@@ -148,7 +149,7 @@ func TestAgentActionsNameTheHost(t *testing.T) {
 	}
 
 	// And it outlives the host.
-	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/hosts/"+host.id, nil, nil); code != http.StatusOK {
+	if code := h.adminReq(t, http.MethodDelete, ts.URL+"/v1/memberships/"+host.id, nil, nil); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
 	after := h.auditFor(t, ts.URL, store.ActionEnrolled, host.id)
@@ -165,4 +166,40 @@ func (h *harness) auditFor(t *testing.T, baseURL, action, targetID string) []wir
 		t.Fatalf("read audit: %d", code)
 	}
 	return out
+}
+
+// TestAMembershipIsAttributedToTheDeviceThatTookIt.
+//
+// The other half of what reservations changed. Creating a host used to be one
+// action by one actor; it is now two, at two times, by two actors — an operator
+// reserves a place (ActionEnrollCodeCreated, attributed to their token) and a
+// machine takes it (ActionMembershipCreated, attributed to its device fingerprint).
+//
+// Attributing the second to the operator would be the easy mistake and would
+// lose the fact an auditor actually needs: WHICH MACHINE took the place, and
+// when. A reservation minted on Monday and redeemed on Friday by a laptop
+// nobody expected is exactly the sequence this has to be able to show.
+func TestAMembershipIsAttributedToTheDeviceThatTookIt(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
+		NetworkID: h.netID.String(), Name: "taken-by-a-machine", OverlayAddr: "10.42.7.9",
+	}, &host); code != http.StatusCreated {
+		t.Fatalf("create host: %d", code)
+	}
+
+	entries := h.auditFor(t, ts.URL, store.ActionMembershipCreated, host.ID)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	got := entries[0]
+	if got.ActorType != store.ActorAgent {
+		t.Errorf("actor_type = %q, want %q: the machine took the place, not the operator",
+			got.ActorType, store.ActorAgent)
+	}
+	if want := h.membershipDevices[host.ID].Fingerprint(); got.ActorID != want {
+		t.Errorf("actor_id = %q, want the device fingerprint %q", got.ActorID, want)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -218,4 +220,135 @@ func (c *Client) Watch(ctx context.Context, configEpoch, blockEpoch int64, hold 
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Join asks a control plane to admit this device to a network.
+//
+// The device key signs the request; nothing secret travels. What comes back is
+// a membership id and a state, not a certificate — see Claim for the second
+// half, and docs/design-device-identity.md §3 for why it is two steps.
+func (c *Client) Join(ctx context.Context, id *device.Identity, network, name, hostname, keyBacking string, now time.Time) (*wire.JoinResponse, error) {
+	return c.JoinWithCode(ctx, id, network, name, hostname, keyBacking, "", now)
+}
+
+// JoinWithCode is Join carrying a reservation code.
+//
+// A valid code auto-authorizes: the membership is created with the name,
+// address and role the reservation named, instead of landing in a queue. That
+// is what keeps unattended provisioning working — a machine can come up fully
+// configured with nobody watching.
+//
+// The code is NOT part of the signed statement, and that is worth being explicit
+// about. The signature proves who is asking; the code proves the asking was
+// pre-authorized. They are independent claims, and binding them would mean a
+// reservation could only ever be redeemed by a device chosen before the code was
+// minted — which is the opposite of what a reservation is for.
+func (c *Client) JoinWithCode(ctx context.Context, id *device.Identity,
+	network, name, hostname, keyBacking, code string, now time.Time) (*wire.JoinResponse, error) {
+
+	sig, err := id.SignJoin(network, name, now)
+	if err != nil {
+		return nil, fmt.Errorf("sign join: %w", err)
+	}
+	req := wire.JoinRequest{
+		Network:    network,
+		Name:       name,
+		PublicKey:  base64.StdEncoding.EncodeToString(id.PublicKey()),
+		KeyBacking: keyBacking,
+		Hostname:   hostname,
+		SignedAt:   now.Unix(),
+		Signature:  base64.StdEncoding.EncodeToString(sig),
+		Credential: code,
+	}
+	var resp wire.JoinResponse
+	if err := c.post(ctx, "/enroll/v1/join", req, &resp); err != nil {
+		return nil, err
+	}
+
+	// Verify that the control plane that answered is the one the network ID
+	// names, BEFORE anything it said is acted on.
+	//
+	// This is the step that makes a network ID worth having. Without it a
+	// machine pointed at a hostile URL joins, is issued a certificate by
+	// somebody else's CA, and is on somebody else's mesh — and nothing in a
+	// uuid, a slug, or a URL could have told it otherwise.
+	//
+	// The challenge is reconstructed rather than trusted: it is the statement
+	// this client just signed, so a proof over anything else does not verify.
+	if err := verifyNetwork(network, name, id.Fingerprint(), now, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// verifyNetwork checks a join response's proof of network identity.
+//
+// When the caller joined BY network ID, that ID is what must be satisfied — the
+// one in the response is the control plane's own claim about itself and cannot
+// be the thing it is checked against.
+//
+// When the caller joined by uuid or slug there is nothing to check against, so
+// this verifies the response is at least internally consistent — the key hashes
+// to the ID it claims, and the proof verifies under it — and the caller records
+// the ID for next time. Trust on first use: weaker than an ID handed over out of
+// band, much stronger than nothing.
+func verifyNetwork(ref, name, fingerprint string, at time.Time, resp *wire.JoinResponse) error {
+	key, err := base64.StdEncoding.DecodeString(resp.NetworkKey)
+	if err != nil {
+		return fmt.Errorf("control plane sent an unreadable network key: %w", err)
+	}
+	proof, err := base64.StdEncoding.DecodeString(resp.NetworkProof)
+	if err != nil {
+		return fmt.Errorf("control plane sent an unreadable network proof: %w", err)
+	}
+
+	expect := resp.NetworkID
+	if _, err := ca.ParseNetworkID(ref); err == nil {
+		expect = ref
+	}
+
+	challenge := device.JoinStatement(ref, name, fingerprint, at)
+	if err := ca.VerifyNetworkProof(expect, key, challenge, proof); err != nil {
+		return fmt.Errorf("refusing to join: %w", err)
+	}
+	return nil
+}
+
+// Claim collects the certificate an authorized membership entitles this device
+// to, issued over a freshly generated mesh key.
+//
+// The 409 an unauthorized membership produces is a normal, expected answer here
+// and not a failure — see ErrPendingAuthorization.
+func (c *Client) Claim(ctx context.Context, id *device.Identity, membershipID string, kp *Keypair, agentVersion string, now time.Time) (*wire.EnrollResponse, error) {
+	// Signed over the base64 exactly as it will be sent, so there is no
+	// encoding step between what was signed and what is verified.
+	sig, err := id.SignClaim(membershipID, kp.PublicB64, now)
+	if err != nil {
+		return nil, fmt.Errorf("sign claim: %w", err)
+	}
+	req := wire.ClaimRequest{
+		MembershipID: membershipID,
+		PublicKey:    kp.PublicB64,
+		Curve:        kp.Curve.String(),
+		AgentVersion: agentVersion,
+		SignedAt:     now.Unix(),
+		Signature:    base64.StdEncoding.EncodeToString(sig),
+	}
+	var resp wire.EnrollResponse
+	if err := c.post(ctx, "/enroll/v1/claim", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// IsPendingAuthorization reports whether a Claim failed only because nobody has
+// approved the membership yet.
+//
+// A predicate rather than a sentinel error because the signal arrives as an
+// HTTP status from a server this client does not otherwise interpret, and the
+// caller's response to it — keep waiting — is the one case where a non-2xx is
+// not a problem.
+func IsPendingAuthorization(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict
 }

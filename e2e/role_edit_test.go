@@ -30,11 +30,11 @@ import (
 // these assertions fail, which is the point.
 type roleUpdateResponse struct {
 	wire.RoleResponse
-	Changed                  bool   `json:"changed"`
-	GroupsChanged            bool   `json:"groups_changed"`
-	HostsAwaitingCertificate int    `json:"hosts_awaiting_certificate"`
-	CertificatesConvergeBy   string `json:"certificates_converge_by"`
-	Detail                   string `json:"detail"`
+	Changed                        bool   `json:"changed"`
+	GroupsChanged                  bool   `json:"groups_changed"`
+	MembershipsAwaitingCertificate int    `json:"memberships_awaiting_certificate"`
+	CertificatesConvergeBy         string `json:"certificates_converge_by"`
+	Detail                         string `json:"detail"`
 }
 
 // adminRaw returns the status and the body, which adminReq deliberately does
@@ -218,9 +218,9 @@ func TestRoleGroupChangeReportsCertificateLag(t *testing.T) {
 	if !resp.Changed || !resp.GroupsChanged {
 		t.Fatalf("group change reported changed=%v groups_changed=%v", resp.Changed, resp.GroupsChanged)
 	}
-	if resp.HostsAwaitingCertificate != 1 {
+	if resp.MembershipsAwaitingCertificate != 1 {
 		t.Errorf("hosts_awaiting_certificate = %d, want 1 (%s still holds the old groups)",
-			resp.HostsAwaitingCertificate, host.name)
+			resp.MembershipsAwaitingCertificate, host.name)
 	}
 	if resp.Detail == "" {
 		t.Error("no detail: the numbers alone do not say what they mean")

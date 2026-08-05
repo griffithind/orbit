@@ -34,6 +34,7 @@ func newNetworkFull(t *testing.T, s *store.Store, n store.Network) *store.Networ
 	if n.Name == "" {
 		n.Name = "net " + uuid.NewString()[:8]
 	}
+	withIdentity(t, &n)
 	err := s.Tx(context.Background(), func(ctx context.Context, tx *store.Tx) error {
 		return tx.CreateNetwork(ctx, &n)
 	})
@@ -43,11 +44,11 @@ func newNetworkFull(t *testing.T, s *store.Store, n store.Network) *store.Networ
 	return &n
 }
 
-func newBareHost(t *testing.T, s *store.Store, net *store.Network, name string) *store.Host {
+func newBareHost(t *testing.T, s *store.Store, net *store.Network, name string) *store.Membership {
 	t.Helper()
-	h := store.Host{NetworkID: net.ID, Name: name, State: store.HostActive}
+	h := store.Membership{NetworkID: net.ID, Name: name, State: store.MembershipActive}
 	err := s.Tx(context.Background(), func(ctx context.Context, tx *store.Tx) error {
-		return tx.CreateHost(ctx, &h)
+		return insertHost(ctx, tx, &h)
 	})
 	if err != nil {
 		t.Fatalf("CreateHost %s: %v", name, err)
@@ -71,7 +72,7 @@ func TestConcurrentAllocationHasExactlyOneWinnerPerAddress(t *testing.T) {
 	net := newNetworkFull(t, s, store.Network{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.31.0.0/28")}})
 
 	const callers = 40
-	hosts := make([]*store.Host, callers)
+	hosts := make([]*store.Membership, callers)
 	for i := range hosts {
 		hosts[i] = newBareHost(t, s, net, fmt.Sprintf("racer-%02d", i))
 	}
@@ -85,7 +86,7 @@ func TestConcurrentAllocationHasExactlyOneWinnerPerAddress(t *testing.T) {
 	start := make(chan struct{})
 	for i := range hosts {
 		wg.Add(1)
-		go func(h *store.Host) {
+		go func(h *store.Membership) {
 			defer wg.Done()
 			<-start
 			var addr netip.Addr
@@ -247,7 +248,7 @@ func TestRemovingTheLastAddressIsRefused(t *testing.T) {
 		t.Fatalf("removing the only address = %v, want ErrLastAddress", err)
 	}
 
-	var after *store.Host
+	var after *store.Membership
 	if err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		var err error
 		after, err = tx.GetHost(ctx, h.ID)
@@ -262,7 +263,7 @@ func TestRemovingTheLastAddressIsRefused(t *testing.T) {
 
 // TestRemoveCIDRInUseIsRefusedAndNamesTheHosts.
 //
-// Removing a prefix does not take the addresses away — the host_address rows
+// Removing a prefix does not take the addresses away — the membership_address rows
 // survive and the hosts keep answering — it breaks their NEXT renewal, hours
 // later, when certNetworks can no longer pair the address with a prefix. So the
 // refusal has to name who is blocking it, or an operator is left scanning a host
@@ -383,6 +384,7 @@ func TestIPv6RequiresCertVersionTwo(t *testing.T) {
 			CIDRs:   []netip.Prefix{netip.MustParsePrefix("fd00:1::/64")},
 			CertVer: 1,
 		}
+		withIdentity(t, &n)
 		return tx.CreateNetwork(ctx, &n)
 	})
 	if !errors.Is(err, store.ErrInvalid) {
@@ -510,6 +512,7 @@ func TestSlugCharsetIsEnforcedByTheDatabase(t *testing.T) {
 			Slug: strings.Repeat("a", 24) + uuid.NewString()[:8], Name: "long slug " + uuid.NewString()[:8],
 			CIDRs: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
 		}
+		withIdentity(t, &n)
 		return tx.CreateNetwork(ctx, &n)
 	}); err != nil {
 		t.Errorf("a 32-character slug was refused: %v", err)
@@ -526,6 +529,7 @@ func TestSlugCharsetIsEnforcedByTheDatabase(t *testing.T) {
 		Name:  "Prod EU " + uuid.NewString()[:8],
 		CIDRs: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")},
 	}
+	withIdentity(t, &derived)
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		return tx.CreateNetwork(ctx, &derived)
 	}); err != nil {
@@ -562,9 +566,9 @@ func TestAddressChangeMarksRestartAndPullsRenewalForward(t *testing.T) {
 	net := newNetworkFull(t, s, store.Network{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.43.0.0/24")}})
 
 	// A host that has never enrolled.
-	fresh := store.Host{NetworkID: net.ID, Name: "fresh", State: store.HostCreated}
+	fresh := store.Membership{NetworkID: net.ID, Name: "fresh", State: store.MembershipCreated}
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		return tx.CreateHost(ctx, &fresh)
+		return insertHost(ctx, tx, &fresh)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +585,7 @@ func TestAddressChangeMarksRestartAndPullsRenewalForward(t *testing.T) {
 	}
 
 	// A live one.
-	live := newBareHost(t, s, net, "live") // created HostActive
+	live := newBareHost(t, s, net, "live") // created MembershipActive
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		var err error
 		epoch, err = tx.MarkAddressChanged(ctx, net.ID, live.ID)
@@ -593,7 +597,7 @@ func TestAddressChangeMarksRestartAndPullsRenewalForward(t *testing.T) {
 		t.Fatal("a live host produced no epoch, so no agent is told to restart")
 	}
 
-	var after *store.Host
+	var after *store.Membership
 	if err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		var err error
 		after, err = tx.GetHost(ctx, live.ID)
@@ -623,16 +627,16 @@ func TestAddressChangeImpactIsRoleAware(t *testing.T) {
 
 	net := newNetworkFull(t, s, store.Network{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.44.0.0/24")}})
 
-	relay := store.Host{
-		NetworkID: net.ID, Name: "relay", State: store.HostActive,
+	relay := store.Membership{
+		NetworkID: net.ID, Name: "relay", State: store.MembershipActive,
 		IsRelay: true, IsLighthouse: true, StaticAddrs: []string{"198.51.100.1:4242"},
 	}
-	plain := store.Host{NetworkID: net.ID, Name: "plain", State: store.HostActive}
+	plain := store.Membership{NetworkID: net.ID, Name: "plain", State: store.MembershipActive}
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		if err := tx.CreateHost(ctx, &relay); err != nil {
+		if err := insertHost(ctx, tx, &relay); err != nil {
 			return err
 		}
-		return tx.CreateHost(ctx, &plain)
+		return insertHost(ctx, tx, &plain)
 	}); err != nil {
 		t.Fatal(err)
 	}

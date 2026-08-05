@@ -19,9 +19,9 @@ type NetworkStats struct {
 	ConfigEpoch    int64
 	BlocklistEpoch int64
 
-	HostsTotal    int
-	ConfigApplied int
-	BlockApplied  int
+	MembershipsTotal int
+	ConfigApplied    int
+	BlockApplied     int
 
 	// LagSeconds is how long the most stale un-converged host has gone without
 	// reporting. Zero when everything has converged.
@@ -58,29 +58,34 @@ func (t *Tx) FleetStats(ctx context.Context) ([]NetworkStats, error) {
 		       -- Only enrolled and active hosts count. A host in 'created' has
 		       -- never had a certificate and can never converge, so including
 		       -- it would peg the ratio below 100% forever.
-		       (SELECT count(*) FROM orbit.host h
+		       (SELECT count(*) FROM orbit.membership h
 		         WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')),
-		       (SELECT count(*) FROM orbit.host h
+		       (SELECT count(*) FROM orbit.membership h
 		         WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')
 		           AND h.applied_config_epoch >= n.config_epoch),
-		       (SELECT count(*) FROM orbit.host h
+		       (SELECT count(*) FROM orbit.membership h
 		         WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')
 		           AND h.applied_blocklist_epoch >= n.blocklist_epoch),
-		       -- A host that has never reported has no last_seen_at; coalescing
-		       -- to created_at makes a never-converged host register as lagging
-		       -- since it was created rather than as zero.
-		       COALESCE((SELECT max(extract(epoch FROM now() - COALESCE(h.last_seen_at, h.created_at)))
-		                   FROM orbit.host h
+		       -- Liveness comes from the DEVICE: it is the machine that talks to
+		       -- the control plane, and a machine on three networks is heard
+		       -- from once. A device row is created at the same moment as its
+		       -- first membership and stamps last_seen_at then, so this is
+		       -- never null — the old COALESCE to created_at, which existed
+		       -- because a host could be pre-created and never report, has
+		       -- nothing left to guard.
+		       COALESCE((SELECT max(extract(epoch FROM now() - d.last_seen_at))
+		                   FROM orbit.membership h
+		                   JOIN orbit.device d ON d.id = h.device_id
 		                  WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')
 		                    AND (h.applied_config_epoch < n.config_epoch
 		                      OR h.applied_blocklist_epoch < n.blocklist_epoch)), 0),
 		       (SELECT count(*) FROM orbit.certificate c
-		          JOIN orbit.host h ON h.id = c.host_id
+		          JOIN orbit.membership h ON h.id = c.membership_id
 		         WHERE h.network_id = n.id AND c.state = 'active'
 		           AND (c.not_after - now()) < (c.not_after - c.not_before) * 0.25),
 		       COALESCE((SELECT min(extract(epoch FROM c.not_after - now()))
 		                   FROM orbit.certificate c
-		                   JOIN orbit.host h ON h.id = c.host_id
+		                   JOIN orbit.membership h ON h.id = c.membership_id
 		                  WHERE h.network_id = n.id AND c.state = 'active'), 0),
 		       (SELECT count(*) FROM orbit.blocklist_entry b
 		         WHERE b.network_id = n.id AND b.not_after > now())
@@ -95,7 +100,7 @@ func (t *Tx) FleetStats(ctx context.Context) ([]NetworkStats, error) {
 	for rows.Next() {
 		var s NetworkStats
 		if err := rows.Scan(&s.NetworkID, &s.Name, &s.ConfigEpoch, &s.BlocklistEpoch,
-			&s.HostsTotal, &s.ConfigApplied, &s.BlockApplied,
+			&s.MembershipsTotal, &s.ConfigApplied, &s.BlockApplied,
 			&s.LagSeconds, &s.CertsExpiringSoon, &s.MinCertRemainingSeconds,
 			&s.BlocklistSize); err != nil {
 			return nil, mapErr(err, "scan fleet stats")

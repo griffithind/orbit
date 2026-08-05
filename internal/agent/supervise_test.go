@@ -225,7 +225,7 @@ func loopWithSupervisor(t *testing.T, sup Supervisor) *Loop {
 	return &Loop{
 		Applier: &Applier{Layout: layout, Reloader: NoopReloader{}, Supervisor: sup, Log: log},
 		Layout:  layout,
-		State:   State{BaseURL: "http://control.invalid", HostID: "h"},
+		State:   State{BaseURL: "http://control.invalid", MembershipID: "h"},
 		Log:     log,
 	}
 }

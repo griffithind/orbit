@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,7 +35,7 @@ func (h *harness) overdueHost(t *testing.T, name string) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
 
-	hostID := h.createHostRow(t, name)
+	membershipID := h.createHostRow(t, name)
 	now := time.Now()
 
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
@@ -48,8 +49,8 @@ func (h *harness) overdueHost(t *testing.T, name string) uuid.UUID {
 		// for recovery, and a host sitting in it is a renewal that has been
 		// failing for hours with nothing else saying so.
 		cert := store.Certificate{
-			HostID: hostID,
-			CAID:   ca.ID,
+			MembershipID: membershipID,
+			CAID:         ca.ID,
 			// Unique per call: certificate.fingerprint is globally unique, and two
 			// tests seeding the same literal collide in a way that reads as a bug
 			// in the code under test rather than in the fixture.
@@ -64,12 +65,12 @@ func (h *harness) overdueHost(t *testing.T, name string) uuid.UUID {
 		if err := tx.InsertCertificate(ctx, &cert); err != nil {
 			return err
 		}
-		return tx.SetHostState(ctx, hostID, store.HostActive)
+		return tx.SetHostState(ctx, membershipID, store.MembershipActive)
 	})
 	if err != nil {
 		t.Fatalf("seed an overdue certificate: %v", err)
 	}
-	return hostID
+	return membershipID
 }
 
 // TestUIHostDetailDiagnosesAnOverdueRenewal.
@@ -80,11 +81,11 @@ func (h *harness) overdueHost(t *testing.T, name string) uuid.UUID {
 func TestUIHostDetailDiagnosesAnOverdueRenewal(t *testing.T) {
 	h := setup(t)
 	u := h.serveWeb(t)
-	hostID := h.overdueHost(t, "overdue-web-01")
+	membershipID := h.overdueHost(t, "overdue-web-01")
 
 	u.signInBrowser(t, true)
 
-	page := body(t, u.get(t, "/ui/hosts/"+hostID.String()))
+	page := body(t, u.get(t, "/ui/memberships/"+membershipID.String()))
 
 	// The marker, in words. Not a colour, not a red row: OVERDUE is readable in
 	// a greyscale screenshot pasted into a ticket.
@@ -115,13 +116,13 @@ func TestUIHostDetailDiagnosesAnOverdueRenewal(t *testing.T) {
 func TestUIBlockAHostWithoutJavaScript(t *testing.T) {
 	h := setup(t)
 	u := h.serveWeb(t)
-	hostID := h.overdueHost(t, "block-me-01")
+	membershipID := h.overdueHost(t, "block-me-01")
 
 	u.signInBrowser(t, true)
 
 	// 1. The host page offers a LINK to the confirmation, not a scripted button.
-	detail := body(t, u.get(t, "/ui/hosts/"+hostID.String()))
-	confirmPath := "/ui/hosts/" + hostID.String() + "/block"
+	detail := body(t, u.get(t, "/ui/memberships/"+membershipID.String()))
+	confirmPath := "/ui/memberships/" + membershipID.String() + "/block"
 	if !strings.Contains(detail, `href="`+confirmPath+`"`) {
 		t.Fatal("no link to the block confirmation; the action is not reachable without scripting")
 	}
@@ -143,21 +144,21 @@ func TestUIBlockAHostWithoutJavaScript(t *testing.T) {
 		t.Fatalf("block: %d\n%s", resp.StatusCode, body(t, resp))
 	}
 	// Post/Redirect/Get, so a refresh does not block it a second time.
-	if loc := resp.Header.Get("Location"); !strings.HasPrefix(loc, "/ui/hosts/"+hostID.String()) {
+	if loc := resp.Header.Get("Location"); !strings.HasPrefix(loc, "/ui/memberships/"+membershipID.String()) {
 		t.Errorf("Location = %q, want the host page", loc)
 	}
 
 	// 4. It really happened.
 	ctx := context.Background()
-	var host *store.Host
+	var host *store.Membership
 	if err := h.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		host, err = tx.GetHost(ctx, hostID)
+		host, err = tx.GetHost(ctx, membershipID)
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if host.State != store.HostSuspended {
+	if host.State != store.MembershipSuspended {
 		t.Fatalf("host state = %q, want suspended", host.State)
 	}
 
@@ -167,7 +168,7 @@ func TestUIBlockAHostWithoutJavaScript(t *testing.T) {
 	if err := h.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		var err error
 		entries, err = tx.ListAudit(ctx, store.AuditFilter{
-			Action: store.ActionHostBlocked, TargetID: hostID.String(),
+			Action: store.ActionMembershipBlocked, TargetID: membershipID.String(),
 		})
 		return err
 	}); err != nil {
@@ -191,7 +192,7 @@ func TestUIBlockAHostWithoutJavaScript(t *testing.T) {
 
 	// 6. The page now offers Unblock instead, so the action is reversible from
 	// the same screen it was taken on.
-	after := body(t, u.get(t, "/ui/hosts/"+hostID.String()))
+	after := body(t, u.get(t, "/ui/memberships/"+membershipID.String()))
 	if !strings.Contains(after, "/unblock") {
 		t.Error("a blocked host offers no way back")
 	}
@@ -207,7 +208,7 @@ func TestUIBlockAHostWithoutJavaScript(t *testing.T) {
 func TestUINoScreenRequiresJavaScript(t *testing.T) {
 	h := setup(t)
 	u := h.serveWeb(t)
-	hostID := h.overdueHost(t, "js-off-01")
+	membershipID := h.overdueHost(t, "js-off-01")
 	u.signInBrowser(t, true)
 
 	paths := []string{
@@ -218,8 +219,8 @@ func TestUINoScreenRequiresJavaScript(t *testing.T) {
 		"/ui/networks/" + h.netID.String() + "/hosts",
 		"/ui/networks/" + h.netID.String() + "/hosts/new",
 		"/ui/networks/" + h.netID.String() + "/rotation",
-		"/ui/hosts/" + hostID.String(),
-		"/ui/hosts/" + hostID.String() + "/block",
+		"/ui/memberships/" + membershipID.String(),
+		"/ui/memberships/" + membershipID.String() + "/block",
 		"/ui/audit",
 		"/ui/tokens",
 	}
@@ -298,12 +299,12 @@ func TestUIEventStreamFailsSoftWithoutPush(t *testing.T) {
 	}
 }
 
-// TestUIAddHostHandsOutAnEnrollmentCodeOnce.
+// TestUIReserveHandsOutACodeOnce.
 //
 // The code is the deliverable, and it exists in exactly one HTTP response: the
 // store keeps a peppered hash and cannot recover the original. no-store on the
 // response is what stops the back button producing a second copy.
-func TestUIAddHostHandsOutAnEnrollmentCode(t *testing.T) {
+func TestUIReserveHandsOutACode(t *testing.T) {
 	h := setup(t)
 	u := h.serveWeb(t)
 	u.signInBrowser(t, true)
@@ -316,7 +317,7 @@ func TestUIAddHostHandsOutAnEnrollmentCode(t *testing.T) {
 		"name":       {name},
 	})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("create host: %d", resp.StatusCode)
+		t.Fatalf("reserve: %d", resp.StatusCode)
 	}
 	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q; an enrollment code must not survive a back button", got)
@@ -326,49 +327,66 @@ func TestUIAddHostHandsOutAnEnrollmentCode(t *testing.T) {
 	if !strings.Contains(page, "Shown once") {
 		t.Error("the handout does not say the code cannot be shown again")
 	}
-	if !strings.Contains(page, "orbit agent enroll") {
+	// `join`, not `enroll`. A reservation is redeemed by a machine that has no
+	// membership yet; printing the enroll command would fail on the machine, in
+	// a way that reads as a broken code rather than a wrong instruction.
+	if !strings.Contains(page, "orbit agent join") {
 		t.Error("the handout does not include the command to run on the new machine")
 	}
 
-	// The host really exists, with an address allocated for it — the form never
-	// asked for one.
+	// AND NO HOST EXISTS YET. This is the property the whole step turns on: the
+	// membership is created when a machine redeems the code, so it names that
+	// machine from the moment it exists. A row here would be the device-less
+	// host that docs/model.md §5 invariant 1 forbids.
 	ctx := context.Background()
-	var host *store.Host
-	if err := h.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
-		var err error
-		host, err = tx.GetHostByName(ctx, h.netID, name)
+	err := h.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		_, err := tx.GetHostByName(ctx, h.netID, name)
 		return err
-	}); err != nil {
-		t.Fatalf("the host was not created: %v", err)
-	}
-	if len(host.Addrs) == 0 {
-		t.Error("no overlay address was allocated; the host can never be issued a certificate")
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("reserving created a host before any machine arrived: %v", err)
 	}
 }
 
-// TestUILighthouseWithoutAnAddressIsRefused mirrors the API's refusal, on the
-// form. A lighthouse nobody can reach is worse than none, because every host
-// keeps dialling it.
-func TestUILighthouseWithoutAnAddressIsRefused(t *testing.T) {
+// TestUIReserveRefusesATakenName.
+//
+// This replaced a test that a lighthouse without a public address is refused.
+// That field is no longer on the form: a reservation carries what an UNATTENDED
+// machine must have decided for it — name, address, role — and lighthouse setup
+// is done from the host page by an operator who is present. The API still
+// refuses it, and e2e/admin_test.go still covers that.
+//
+// What matters on this form now is the name, because an unspent reservation
+// holds one against the network. Two operators reserving "web-03" must not both
+// walk away believing they have it.
+func TestUIReserveRefusesATakenName(t *testing.T) {
 	h := setup(t)
 	u := h.serveWeb(t)
 	u.signInBrowser(t, true)
 
+	name := "contested-" + uuid.NewString()[:8]
 	formPage := body(t, u.get(t, "/ui/networks/"+h.netID.String()+"/hosts/new"))
+	if resp := u.post(t, "/ui/networks/"+h.netID.String()+"/hosts", url.Values{
+		"csrf_token": {csrfFrom(t, formPage)},
+		"name":       {name},
+	}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first reservation: %d", resp.StatusCode)
+	}
+
+	formPage = body(t, u.get(t, "/ui/networks/"+h.netID.String()+"/hosts/new"))
 	resp := u.post(t, "/ui/networks/"+h.netID.String()+"/hosts", url.Values{
-		"csrf_token":    {csrfFrom(t, formPage)},
-		"name":          {"bad-lighthouse-" + uuid.NewString()[:8]},
-		"is_lighthouse": {"1"},
+		"csrf_token": {csrfFrom(t, formPage)},
+		"name":       {name},
 	})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
 	page := body(t, resp)
-	if !strings.Contains(page, "public address") {
-		t.Error("the refusal does not say what is missing")
+	if !strings.Contains(page, "already taken") {
+		t.Error("the refusal does not say what is wrong")
 	}
 	// The submission is handed back rather than discarded.
-	if !strings.Contains(page, "bad-lighthouse-") {
+	if !strings.Contains(page, name) {
 		t.Error("the form was cleared on refusal; the operator has to type it again")
 	}
 }

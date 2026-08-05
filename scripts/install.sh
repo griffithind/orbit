@@ -124,8 +124,15 @@ else
     cat <<EOF
 Next, on this host:
 
-  sudo orbit agent install -url https://<control-plane> -code orb_1_… -network prod
+  sudo orbit agent install
+sudo orbit agent join -url https://<control-plane> -network prod
 
-Get a code with 'orbit host code <name>' from a machine holding an admin token.
+That generates this machine's device identity, asks to join, and waits for an
+operator to authorize it with 'orbit membership authorize <id>'.
+
+To skip the wait, have someone with an admin token reserve a place first —
+'orbit membership reserve -name <name>' prints a single-use code — and pass it:
+
+  sudo orbit agent join -url https://<control-plane> -network prod -code orb_1_…
 EOF
 fi

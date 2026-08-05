@@ -71,7 +71,7 @@ const (
 	// Every /v1 route was written assuming bearer authentication, which a
 	// browser cannot be made to send cross-site — so none of them carry CSRF
 	// defences, and several would be dangerous without one. DELETE
-	// /v1/hosts/{id} takes its reason from a QUERY PARAMETER: honouring a
+	// /v1/memberships/{id} takes its reason from a QUERY PARAMETER: honouring a
 	// cookie there turns a link into a host decommission. The isolation is
 	// structural rather than a check inside a handler — Server.admin is built
 	// from bearerCredential and Server.UI from sessionCredential, and neither
@@ -83,7 +83,7 @@ const (
 
 // route is one endpoint.
 type route struct {
-	// pattern is the ServeMux pattern, method included: "GET /v1/hosts/{id}".
+	// pattern is the ServeMux pattern, method included: "GET /v1/memberships/{id}".
 	pattern string
 	surface surface
 
@@ -99,12 +99,21 @@ type route struct {
 
 // knownScopes is every scope the API recognises.
 //
-// Listed rather than inferred so a typo is a test failure. "hosts:raed" would
+// Listed rather than inferred so a typo is a test failure. "memberships:raed" would
 // otherwise register cleanly, be granted to nobody, and turn its route into one
 // that no token can reach — a 403 with no explanation and nothing to grep for.
 var knownScopes = map[string]bool{
-	"hosts:create": true, "hosts:read": true, "hosts:write": true,
-	"hosts:block": true, "hosts:enroll": true,
+	"memberships:create": true, "memberships:read": true, "memberships:write": true,
+	"memberships:block": true, "memberships:enroll": true,
+
+	// Devices get their own pair rather than reusing hosts:*, for the reason
+	// policy:* is separate from networks:*: the scope should bound what a token
+	// can DO, not which noun it names. A device is not scoped to a network, so
+	// devices:read reveals every machine on the control plane — strictly more
+	// than hosts:read on any one network — and devices:block cuts a machine off
+	// everywhere at once. Granting either through a network-scoped name would
+	// be a quiet escalation.
+	"devices:read": true, "devices:block": true,
 	"networks:read": true, "networks:write": true,
 	"roles:read": true, "roles:write": true,
 	"cas:read": true, "cas:write": true,

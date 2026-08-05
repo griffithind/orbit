@@ -29,8 +29,8 @@ func TestAuditTimeWindowAndLimitNarrow(t *testing.T) {
 
 	var ids []string
 	for i, name := range []string{"audit-a", "audit-b", "audit-c"} {
-		var host wire.HostResponse
-		if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+		var host wire.MembershipResponse
+		if code := h.createHost(t, ts.URL, membershipSpec{
 			NetworkID: h.netID.String(), Name: name,
 			OverlayAddr: fmt.Sprintf("10.42.31.%d", i+1),
 			RoleID:      h.roleID.String(),
@@ -47,7 +47,7 @@ func TestAuditTimeWindowAndLimitNarrow(t *testing.T) {
 
 	// Scoped to one host, so the count is exact despite an audit table shared
 	// with every other test in this database.
-	one := "action=" + store.ActionHostCreated + "&target_id=" + ids[0]
+	one := "action=" + store.ActionMembershipCreated + "&target_id=" + ids[0]
 
 	cases := []struct {
 		name  string
@@ -76,7 +76,7 @@ func TestAuditTimeWindowAndLimitNarrow(t *testing.T) {
 	// created and only two are asked for.
 	var capped []wire.AuditRecordResponse
 	if code := h.adminReq(t, http.MethodGet,
-		ts.URL+"/v1/audit-logs?action="+store.ActionHostCreated+"&limit=2", nil, &capped); code != http.StatusOK {
+		ts.URL+"/v1/audit-logs?action="+store.ActionMembershipCreated+"&limit=2", nil, &capped); code != http.StatusOK {
 		t.Fatalf("limited listing: %d", code)
 	}
 	if len(capped) != 2 {

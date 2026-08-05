@@ -1,27 +1,52 @@
-# Enrollment Protocol
+# Joining and enrollment
 
-Enrollment is where trust is created. Everything downstream — firewall rules,
+Joining is where trust is created. Everything downstream — firewall rules,
 routing, revocation — is only as sound as the moment Orbit decided a given
 public key belongs to a given identity.
 
 This document specifies that moment, the steady-state renewal that follows, and
-the recovery paths when it goes wrong.
+what happens when renewal stops working.
+
+**Two doors, and the difference is where the gate sits.**
+
+| | Gate | Command | When |
+|---|---|---|---|
+| **Join** | a human says yes | `orbit agent join` | a machine handed to a person; anything provisioned before its name is decided |
+| **Reservation** | a code, made in advance | `orbit membership reserve` then `orbit agent join -code` | unattended provisioning, where nobody is watching a queue |
+
+Both end in the same place: a membership that names a device, holding a
+certificate issued over a mesh key that never left the machine. The difference
+is only whether a secret had to travel.
+
+`orbit agent enroll` is a third, narrower thing: re-issuing a certificate to a
+membership that already exists, with a code bound to it. It is not how a machine
+gets onto a network for the first time.
 
 ---
 
 ## 1. The bootstrap problem
 
-A host that has never enrolled has no certificate, therefore no Nebula tunnel,
+A machine that has never joined has no certificate, therefore no Nebula tunnel,
 therefore no way to reach the overlay-only Agent API (`design.md` §4.3). It must
-talk to a **public** endpoint, and it must prove it is entitled to a certificate
-using something it was given out of band.
+talk to a **public** endpoint, and it must prove it is entitled to a certificate.
 
-That "something" is the enrollment credential. Its strength is the ceiling on
-the strength of every identity in the mesh.
+The old answer was that it proves it with a secret given out of band, and that
+secret's strength was the ceiling on the strength of every identity in the mesh.
 
-**Orbit implements one method: `code`.** Two more are designed in §4 and §5 and
-are not built. They are documented because the reasoning is worth keeping, not
-because you can use them.
+**The current answer is that it proves possession of a key it generated itself.**
+At first start the agent writes a device key to `/var/lib/orbit/device.key`;
+`join` is a signature over it. Nobody issues that key and nothing expires it, so
+the ceiling moved: what a joining machine can prove no longer depends on how well
+a secret was handled on the way to it.
+
+A code still exists and is still useful — it is what pre-authorizes a join so
+nobody has to watch a queue — but it now carries the operator's *intent* (a name,
+optionally an address and a role) rather than being the only thing standing
+between a stranger and a certificate. See `design-device-identity.md`.
+
+**Orbit implements one credential method: `code`.** Two more are designed in §4
+and §5 and are not built. They are documented because the reasoning is worth
+keeping, not because you can use them.
 
 | Method | Bootstrap secret | Assurance | Status |
 |---|---|---|---|
@@ -40,13 +65,20 @@ for. Adding either is an `ALTER` and a handler.
 
 These hold for every method. They are the properties to regression-test.
 
-1. **The host private key is generated on the host and never transmitted.**
+1. **The host private key is generated on the membership and never transmitted.**
    Orbit only ever receives a public key. There is no code path that accepts a
    private key, and no column to store one.
 2. **A credential is single-use.** Redemption is an atomic conditional update;
    a replay loses the race and is rejected.
-3. **A credential is bound to exactly one host record.** It cannot be redeemed
-   for a different name, address, or role than the one it was issued against.
+3. **A credential names exactly one outcome.** Either an existing membership
+   (re-enrolment) or a reservation — never both, enforced by a CHECK constraint.
+   It cannot be redeemed for a different name, address, or role than the one it
+   was issued against, and a machine redeeming a reservation takes the reserved
+   name rather than one it asks for.
+
+3a. **A membership cannot exist without a device.** `device_id NOT NULL`. Every
+   path that creates one takes a device: a join, a reservation redemption, or
+   the control plane's own row. See `model.md` §5.
 4. **A credential is short-lived.** 15 minutes by default. Long-lived join
    tokens are how fleets get compromised.
 5. **Every redemption attempt is audited**, with source address and outcome.
@@ -55,8 +87,8 @@ These hold for every method. They are the properties to regression-test.
    because there is no host to name — but the attempt itself is exactly what
    someone reviewing an incident wants to see, and a burst of them from one
    address is the signature of a replayed or guessed code. Once a credential
-   *has* been redeemed the host is known, and any subsequent failure is audited
-   against it as `host.enroll_failed`.
+   *has* been redeemed the membership is known, and any subsequent failure is audited
+   against it as `membership.enroll_failed`.
 
 6. **Rate-limited per source address**, with a global ceiling. Enrollment is the
    one public, unauthenticated, and cryptographically expensive surface: every
@@ -78,15 +110,15 @@ The operator-mediated path. Equivalent in shape to the incumbent's
 ### 3.1 Issuing
 
 ```http
-POST /v1/hosts
-Authorization: Bearer <token with hosts:create>
+POST /v1/memberships
+Authorization: Bearer <token with memberships:create>
 
 { "network_id": "net_…", "name": "web-01",
   "overlay_addr": "10.42.0.7", "role_id": "role_…", "tags": ["prod"] }
 ```
 ```http
-POST /v1/hosts/host_…/enrollment-code
-Authorization: Bearer <token with hosts:enroll>
+POST /v1/memberships/host_…/enrollment-code
+Authorization: Bearer <token with memberships:enroll>
 
 → 201
 { "code": "orb_1_aBcD…",        // shown exactly once
@@ -94,19 +126,37 @@ Authorization: Bearer <token with hosts:enroll>
   "enroll_url": "https://orbit.example.com/enroll/v1/enroll" }
 ```
 
-**Storage:** only `secret_hash` is persisted, as `HMAC-SHA256(pepper, code)`.
-The plaintext exists only in the HTTP response.
+**Storage:** only `secret_hash` is persisted, as `SHA-256(code)`. The plaintext
+exists only in the HTTP response.
 
-An earlier draft of this document specified Argon2id, on the theory that
-enrollment codes are low-entropy secrets. That is true of human-chosen codes and
-false of these: 24 random bytes is 192 bits, and Argon2id's cost buys nothing
-against a value that size. Worse, it would have forced a choice between a random
-salt (making lookup-by-hash impossible) and a fixed salt (a slow keyed hash with
-extra steps). The two properties actually needed are that the stored form be
-useless after a database leak and that it be deterministic enough for a single
-indexed lookup. A keyed hash gives both. The pepper lives outside the database;
-losing it invalidates outstanding credentials, which at a 15-minute TTL is a
-minor operational event and is what makes pepper rotation cheap enough to do.
+Everything about that line follows from one number: 24 random bytes is **192
+bits**.
+
+An early draft specified Argon2id, on the theory that enrollment codes are
+low-entropy secrets. True of human-chosen codes, false of these — Argon2id's cost
+buys nothing against a value that size, and it would have forced a choice between
+a random salt (making lookup-by-hash impossible) and a fixed salt (a slow keyed
+hash with extra steps).
+
+A later draft used `HMAC-SHA256(pepper, code)` with a per-deployment pepper,
+justified as making the stored form useless to an attacker holding the table.
+**That was redundant for the same reason.** Against 192 bits of CSPRNG output,
+plain SHA-256 is exactly as underivable: there is no precomputation to frustrate,
+no dictionary to widen, and no guess to slow down. The pepper stopped nothing the
+entropy had not already stopped, while costing a secret that had to be
+byte-identical on every replica and stored apart from the database — one of the
+things that made a second control plane not actually work. See
+[key-custody.md](key-custody.md) §4.3.
+
+The two properties actually needed are that the stored form be useless after a
+database leak and deterministic enough for a single indexed lookup. A plain
+digest gives both, and needs no configuration, no distribution, and nothing to
+lose.
+
+**Single use is a database fact, not a cryptographic one.** Redemption is
+`UPDATE … WHERE used_at IS NULL` — one statement, one winner. This is why a
+self-verifying signed token was rejected as a replacement: a signature can prove
+a code is authentic and unexpired, and cannot prove it is unspent.
 
 **Format:** `orb_<version>_<base32(24 random bytes)>` plus a short checksum. The
 version prefix makes rotation possible; the checksum lets the client reject a
@@ -141,7 +191,7 @@ Server, in one transaction:
 Response:
 
 ```json
-{ "host_id": "host_…",
+{ "membership_id": "host_…",
   "certificate": "-----BEGIN NEBULA CERTIFICATE-----\n…",
   "ca_bundle":   "-----BEGIN NEBULA CERTIFICATE-----\n…",
   "config":      "pki:\n  …",
@@ -151,7 +201,7 @@ Response:
   "renew_after": "2026-08-04T09:00:00Z" }
 ```
 
-Note `agent_endpoint` is an **overlay** address. From here on the host talks to
+Note `agent_endpoint` is an **overlay** address. From here on the membership talks to
 Orbit over Nebula, and holds no bearer credential at all.
 
 ### 3.3 Agent side
@@ -215,7 +265,7 @@ enrollment_rules:
       name_template: "{{ .instance_id }}"
 ```
 
-The host record is created on first enrollment rather than in advance, since
+The membership is created on first enrollment rather than in advance, since
 autoscaled instances do not exist when the rule is written.
 
 **Failure mode to design against:** anyone who can launch an instance in that
@@ -226,7 +276,7 @@ account, region, and tag set can join the mesh. Scope rules narrowly, and treat
 
 ## 5. Method: `attestation` — designed, not built
 
-Highest assurance: the host key is generated **inside** a TPM 2.0 or Secure
+Highest assurance: the membership key is generated **inside** a TPM 2.0 or Secure
 Enclave and provably cannot be exported.
 
 Blocked on a decision, not on effort: TPM 2.0 has no X25519, so this forces the
@@ -273,7 +323,7 @@ POST /agent/v1/renew          (from 10.42.0.7, over the tunnel)
 { "public_key": "…", "curve": "CURVE25519" }
 ```
 
-Orbit resolves the host from the source overlay address, confirms it is not
+Orbit resolves the membership from the source overlay address, confirms it is not
 blocked, and issues a fresh certificate from the network's **active** CA.
 
 ### 6.1 Timing
@@ -313,85 +363,76 @@ verify: certificate.ttl_seconds gauge advanced AND a tunnel re-established
 ```
 
 **Do not renew into an address change.** `pki.go:reloadCerts` rejects a reload
-whose networks differ (`design.md` §1.5). If the host's assigned address changed,
+whose networks differ (`design.md` §1.5). If the membership's assigned address changed,
 the agent must schedule a service restart, not a SIGHUP, and surface it as a
 distinct event.
 
 ---
 
-## 7. Recovery paths
+## 7. When renewal stops working
 
-Three ways a host ends up unable to renew normally. All three need an answer, or
-the fleet slowly bleeds hosts.
+Three ways a machine ends up unable to renew normally. All three need an answer,
+or the fleet slowly bleeds machines.
 
-### 7.1 Expired certificate (host was offline)
+### 7.1 Expired certificate (machine was offline)
 
-The host cannot reach the overlay to renew, so it falls back to the public
-endpoint and proves possession of the key from its last certificate.
+**There is no recovery command, because there is nothing to recover from.**
 
-```http
-GET  /enroll/v1/recover/challenge?host_id=host_…
-  → { nonce, server_public_key, curve, expires_at }
+The old flow — an ECDH challenge over the public listener, a proof of possession
+against the key still on disk, a 30-day grace window, `orbit agent recover` —
+existed for one reason: the agent API listens only on the overlay, so a machine
+whose certificate expired could not reach the control plane to renew the
+certificate that would give it a working overlay. Breaking that circle took a
+protocol.
 
-POST /enroll/v1/recover
-{ "host_id": "host_…", "nonce": "…",
-  "public_key": "<new key>", "curve": "CURVE25519", "proof": "…" }
-```
-
-Proof is Diffie-Hellman, not a signature: nebula host keys on Curve25519 are
-X25519 and have no signing operation at all.
-
-```
-client:  ss    = ECDH(host_private, server_public)
-         proof = HMAC(HKDF(ss, nonce, "orbit-recovery-v1"), host_id ‖ new_public_key)
-
-server:  ss    = ECDH(ephemeral_private, host_public_from_last_certificate)
-         compare in constant time
-```
-
-Four properties carry this:
-
-**The server keeps no state.** The ephemeral private key is derived from the
-server pepper and the nonce, so it is recomputed at verification time rather
-than stored or transmitted. That removes a table, a TTL sweep, and a challenge
-store an attacker could fill. An attacker may choose their own nonce — the
-server will happily derive a keypair from it — and still learns nothing, because
-without the host's private key they cannot compute the shared secret.
-
-**The proof binds the new public key.** A captured proof cannot be replayed to
-obtain a certificate for a key the attacker holds; the MAC would not match.
-That is what makes a stateless design without single-use nonces safe.
-
-**The key to prove against comes from our records**, never from the request. An
-earlier draft had the client submit its expired certificate — which would let an
-attacker nominate a key they hold.
-
-**Failures are indistinguishable.** A bad proof, an unknown host id, a blocked
-host, and one past its grace window all return `401 recovery denied`. Telling
-them apart would let a caller enumerate host ids and learn which are
-recoverable, which is reconnaissance for exactly this attack.
-
-Policy gates: within `RecoveryGrace` of expiry (30 days by default), host not
-blocked, host actually enrolled. Every recovery is audited as `host.recovered`
-carrying the previous expiry, and logged at warning level — routine recovery
-means renewal is broken for that host, and that is the thing worth fixing.
+A device identity is generated on the machine at first start, is issued by
+nobody, and expires never (`design-device-identity.md` §2). So the circle is
+gone, and the way back is the way in:
 
 ```bash
-orbit agent recover -network prod -reload "systemctl reload nebula@prod"
+orbit agent join -url https://orbit.example.com -network prod
 ```
 
-The command needs the old key still on disk, which is why the agent never
-deletes it.
+The join is idempotent: it resolves the device by its key and returns the
+membership that device already holds — same address, same role, same name. The
+name on the command line is IGNORED for a machine that is already a member,
+which is deliberate: a machine must not be able to rename itself out from under
+a policy that selects on the name. The claim that follows is authenticated by
+the device key, so no clock is involved anywhere.
 
-### 7.2 Lost key (disk failure, reimage)
+Two consequences worth stating:
 
-No proof is possible. This is a re-enrollment: an operator issues a fresh
-enrollment credential, and the old certificate is blocklisted. Treat it as such
-in the UI; do not offer a "recover without proof" path.
+- **Nothing is time-limited.** The grace window is gone. A laptop switched off
+  for a year comes back the same way one switched off for a day does.
+- **A lost mesh key is not a problem.** The old command needed the previous
+  private key still on disk to prove possession. The device key is a different
+  key with a different lifetime, and the mesh key is regenerated on every claim.
+
+`e2e/join_test.go:TestExpiredCertificateRecoversByRejoining` asserts all of it.
+
+### 7.2 Lost device key (disk failure, reimage)
+
+A machine that lost `/var/lib/orbit/device.key` is, to this control plane, a
+DIFFERENT MACHINE. That is not a limitation to work around — it is the property
+the whole model rests on. The key is the identity; a control plane that would
+accept "it is really me, I just lost my key" would accept it from anyone.
+
+So it joins again, as new: `orbit agent join` generates a fresh device key and
+lands in the pending queue, or redeems a reservation an operator made for it.
+Either way somebody decides, which is the correct amount of ceremony for a
+machine claiming a place it cannot prove it held.
+
+The old membership is a separate decision and should usually be removed
+(`orbit membership rm`), which revokes its certificate. Leaving it is a row
+holding an address for a machine that no longer exists.
+
+Do not build a "re-key this membership" path. It would be a way to move a
+membership onto a key nobody verified, which is exactly what an attacker who
+learns a membership id wants.
 
 ### 7.3 Host cannot reach Orbit at all after a bad config push
 
-Handled by the agent-side revert described in `design.md` §9: if the host cannot
+Handled by the agent-side revert described in `design.md` §9: if the membership cannot
 reach Orbit for longer than a threshold after applying epoch *N*, it reverts to
 *N−1*. This is the only defence against pushing a firewall rule that severs
 every host's path back to the control plane, and it is worth building before the
@@ -408,11 +449,11 @@ first production rollout rather than after the first outage.
 | Brute-force codes | 192 bits of entropy; per-address rate limit plus a global ceiling; constant-time lookup by hash |
 | Database leak yields usable codes | Only Argon2id hashes stored |
 | Enroll with someone else's public key | Harmless — the attacker has no private key and cannot handshake. The victim simply cannot enroll with a used code, which surfaces as an alert |
-| Redeem a code for a different identity | Credential is bound to one host record; name, address and role come from that record, never from the request |
+| Redeem a code for a different identity | Credential is bound to one membership; name, address and role come from that record, never from the request |
 | Compromised host renews forever | Blocking sets host state and blocklists the fingerprint; renewal checks state; short TTL bounds the window |
 | Cloud IID replay from another instance | `instance_id` uniqueness constraint; document freshness window |
 | Cloud IID from an attacker's own account | `account_id` is mandatory in every rule |
-| Recovery endpoint abused to mint certificates | Requires ECDH proof against the key in the expired certificate; grace window; blocked hosts refused; alerted |
+| Recovery endpoint abused to mint certificates | Requires ECDH proof against the key in the expired certificate; grace window; blocked memberships refused; alerted |
 | Agent API called from off-overlay | Listener bound to the overlay address only; source address is cryptographically verified by Nebula's own anti-spoof check on every packet |
 
 ---

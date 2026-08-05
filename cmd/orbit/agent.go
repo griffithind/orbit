@@ -51,6 +51,8 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/version"
 )
 
@@ -81,6 +83,21 @@ func (d *dirFlags) explicit() bool {
 	return *d.dir != "" || *d.network != ""
 }
 
+// networkRef is the network the caller named, for passing on to a subcommand.
+//
+// The slug when they gave one, otherwise the directory's base name — which is
+// what LayoutFor already treats as the network's name, so the two agree by
+// construction rather than by a caller remembering to keep them in step.
+func (d *dirFlags) networkRef() string {
+	if *d.network != "" {
+		return *d.network
+	}
+	if *d.dir != "" {
+		return filepath.Base(filepath.Clean(*d.dir))
+	}
+	return ""
+}
+
 func (d *dirFlags) layout() (agent.Layout, error) {
 	mode, err := agent.ParseConfigMode(*d.mode)
 	if err != nil {
@@ -105,7 +122,7 @@ func (d *dirFlags) layout() (agent.Layout, error) {
 	return agent.LayoutFor(filepath.Clean(*d.dir), mode), nil
 }
 
-const agentVerbs = "install, uninstall, enroll, run, recover"
+const agentVerbs = "install, uninstall, join, enroll, run"
 
 func agentCmd(_ context.Context, args []string) error {
 	if len(args) == 0 {
@@ -116,12 +133,12 @@ func agentCmd(_ context.Context, args []string) error {
 		return installCmd(args[1:])
 	case "uninstall":
 		return uninstallCmd(args[1:])
+	case "join":
+		return joinCmd(args[1:])
 	case "enroll":
 		return enrollCmd(args[1:])
 	case "run":
 		return runCmd(args[1:])
-	case "recover":
-		return recoverCmd(args[1:])
 	case "-h", "--help", "help":
 		return agentUsage()
 	default:
@@ -132,13 +149,18 @@ func agentCmd(_ context.Context, args []string) error {
 func agentUsage() error {
 	fmt.Fprint(errOut, `orbit agent <command> [flags]
 
-  install    enroll into a network and set this host up as a service
+  install    set THIS MACHINE up: generate its device identity, install the service
   uninstall  leave a network and remove its local state
-  enroll     join a network using an enrollment code
+  join       join a network — repeat once per network
+  enroll     re-enrol an existing membership with a code
   run        serve every joined network: poll, apply, renew
-  recover    re-obtain a certificate after this host's expired while offline
 
-A host can join SEVERAL networks, including ones run by different control
+Install once per MACHINE, join once per NETWORK. That split is the model: a
+machine has one agent, one service and one device identity however many networks
+it joins, and a membership is what belongs to a network. The service rescans its
+root, so a join lands without a restart.
+
+A machine can join SEVERAL networks, including ones run by different control
 planes that have never heard of each other. Each keeps its own directory under
 `+agent.DefaultRoot+`, its own certificate, and its own
 nebula instance — two overlays cannot share a UDP port or a tun device — but
@@ -177,6 +199,11 @@ func enrollCmd(args []string) error {
 		url   = fs.String("url", "", "control plane base URL")
 		code  = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
 		curve = fs.String("curve", "CURVE25519", "key curve; must match the network")
+
+		// A token URI rather than a boolean, because which object on which
+		// token is not something the agent can guess, and getting it wrong must
+		// fail here rather than at the first handshake.
+		keyRef = fs.String("key", "", "PKCS#11 URI of a token-resident private key, e.g. pkcs11:token=orbit;object=host-key. Empty generates a key on this host and writes it to disk. Implies P-256, which the network must also use; requires a binary built with -tags pkcs11")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -203,11 +230,27 @@ func enrollCmd(args []string) error {
 		return err
 	}
 
-	// The keypair is generated here, on the host. The private half is written
-	// to disk by the applier and is never transmitted.
-	kp, err := agent.GenerateKeypair(c)
-	if err != nil {
-		return fmt.Errorf("generate keypair: %w", err)
+	// Either way the private half stays on this host and is never transmitted.
+	// The difference is how strong that guarantee is: a file can be copied off
+	// a disk image, a token key cannot leave the chip.
+	var kp *agent.Keypair
+	if *keyRef != "" {
+		if !agent.IsTokenRef(*keyRef) {
+			return fmt.Errorf("-key must be a pkcs11: URI, got %q", *keyRef)
+		}
+		// No -curve check: the token's curve is P-256 by construction and the
+		// enrollment request carries the keypair's own curve, so -curve simply
+		// does not participate. The control plane rejects a mismatch against
+		// the network, which is the check that matters.
+		kp, err = agent.KeypairFromToken(*keyRef)
+		if err != nil {
+			return fmt.Errorf("read public key from token: %w", err)
+		}
+	} else {
+		kp, err = agent.GenerateKeypair(c)
+		if err != nil {
+			return fmt.Errorf("generate keypair: %w", err)
+		}
 	}
 
 	client := agent.NewClient(*url)
@@ -229,6 +272,7 @@ func enrollCmd(args []string) error {
 		Layout:            layout,
 		Reloader:          agent.NoopReloader{},
 		DisableValidation: true,
+		KeyRef:            *keyRef,
 		Log:               log,
 	}
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
@@ -236,7 +280,7 @@ func enrollCmd(args []string) error {
 	}
 
 	log.Info("enrolled",
-		"host", resp.HostName, "hostId", resp.HostID, "layout", layout.Describe(),
+		"host", resp.MembershipName, "membershipId", resp.MembershipID, "layout", layout.Describe(),
 		"configEpoch", resp.ConfigEpoch, "renewAfter", resp.RenewAfter)
 
 	if len(resp.AgentEndpoints) > 0 {
@@ -253,13 +297,14 @@ func enrollCmd(args []string) error {
 		AgentURLs:      resp.AgentEndpoints,
 		ConfigEpoch:    resp.ConfigEpoch,
 		BlocklistEpoch: resp.BlocklistEpoch,
-		HostID:         resp.HostID,
+		MembershipID:   resp.MembershipID,
+		KeyRef:         *keyRef,
 	}); err != nil {
 		return err
 	}
 
 	fmt.Printf("enrolled as %s (%s)\ncertificate expires %s\nrenew after %s\n",
-		resp.HostName, resp.HostID,
+		resp.MembershipName, resp.MembershipID,
 		resp.NotAfter.Format(time.RFC3339), resp.RenewAfter.Format(time.RFC3339))
 	return nil
 }
@@ -297,23 +342,32 @@ func runCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(dirs) == 0 {
-		return fmt.Errorf("no joined networks under %s: enroll one with `orbit agent install`", *root)
+	if len(dirs) == 0 && *once {
+		// -once is a single pass for a test or a cron. Nothing to do and no
+		// later chance to do it, so say so rather than exiting 0 silently.
+		return fmt.Errorf("no joined networks under %s: join one with `orbit agent join`", *root)
 	}
 
-	slots := make([]*netSlot, len(dirs))
-	for i, dir := range dirs {
-		slots[i] = &netSlot{dir: dir}
+	// The set of networks is DISCOVERED and REDISCOVERED, not fixed at startup.
+	//
+	// This is what lets `orbit agent install` be a device-level action and
+	// `orbit agent join` a per-network one. The service is installed once, and
+	// starts before this machine belongs to anything; each join drops a
+	// directory under -root and this loop picks it up on the next pass, with no
+	// restart and nothing to remember to do.
+	//
+	// Zero networks is therefore a normal running state, not an error. A freshly
+	// installed machine idles here until somebody joins it, which is exactly
+	// what a newly provisioned laptop should do.
+	sup := &supervisor{
+		root: *root, df: df, curve: c,
+		verifyURL: *verifyURL, reuseKey: *reuseKey,
+		interval: *interval, once: *once, log: log,
+		running: map[string]*netSlot{},
 	}
 
 	var wg sync.WaitGroup
-	for _, s := range slots {
-		wg.Add(1)
-		go func(s *netSlot) {
-			defer wg.Done()
-			serveNetwork(ctx, s, c, *verifyURL, *reuseKey, *interval, *once, log)
-		}(s)
-	}
+	sup.start(ctx, &wg, dirs)
 
 	// The status socket, which `orbit status` reads.
 	//
@@ -327,12 +381,12 @@ func runCmd(args []string) error {
 		srv := &agent.StatusServer{
 			Path:   agent.SocketPath(socketRoot(df, *root)),
 			Log:    log,
-			Report: func(ctx context.Context) agent.Report { return report(ctx, *root, slots) },
+			Report: func(ctx context.Context) agent.Report { return report(ctx, *root, sup.slots()) },
 			Peers: func(ctx context.Context, network string) (agent.PeerReport, error) {
-				return peerReport(ctx, network, slots)
+				return peerReport(ctx, network, sup.slots())
 			},
 			Explain: func(ctx context.Context, network string, req agent.ExplainRequest) (agent.Explanation, error) {
-				return explain(network, req, slots)
+				return explain(network, req, sup.slots())
 			},
 		}
 		go func() {
@@ -345,8 +399,111 @@ func runCmd(args []string) error {
 
 	log.Info("agent running", "networks", len(dirs), "root", *root)
 
+	// Watch for networks joined after this process started. Not under -once,
+	// and not when the caller named a single network with -dir or -network:
+	// both mean "exactly this", and rescanning would contradict it.
+	if !*once && !df.explicit() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sup.watch(ctx, &wg)
+		}()
+	}
+
 	wg.Wait()
 	return nil
+}
+
+// supervisor owns the set of networks this process serves.
+//
+// It exists because that set is not fixed: `orbit agent join` writes a new
+// directory under the agent root at any moment, and the service should pick it
+// up without an operator remembering to restart anything. A restart would also
+// drop every OTHER network's tunnels, which is a poor price for adding one.
+type supervisor struct {
+	root      string
+	df        *dirFlags
+	curve     cert.Curve
+	verifyURL string
+	reuseKey  bool
+	interval  time.Duration
+	once      bool
+	log       *slog.Logger
+
+	mu      sync.Mutex
+	running map[string]*netSlot
+}
+
+// slots is the current set, for the status socket.
+//
+// A copy under the lock. The socket's goroutine and the watcher run
+// concurrently, and handing out the live map would be a data race on every
+// `orbit status`.
+func (s *supervisor) slots() []*netSlot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*netSlot, 0, len(s.running))
+	for _, sl := range s.running {
+		out = append(out, sl)
+	}
+	return out
+}
+
+// start serves any of dirs that are not already running.
+func (s *supervisor) start(ctx context.Context, wg *sync.WaitGroup, dirs []string) {
+	s.mu.Lock()
+	fresh := make([]*netSlot, 0, len(dirs))
+	for _, dir := range dirs {
+		if _, ok := s.running[dir]; ok {
+			continue
+		}
+		slot := &netSlot{dir: dir}
+		s.running[dir] = slot
+		fresh = append(fresh, slot)
+	}
+	s.mu.Unlock()
+
+	for _, slot := range fresh {
+		wg.Add(1)
+		go func(slot *netSlot) {
+			defer wg.Done()
+			serveNetwork(ctx, slot, s.curve, s.verifyURL, s.reuseKey, s.interval, s.once, s.log)
+		}(slot)
+	}
+}
+
+// watch rescans the agent root and starts anything new.
+//
+// A poll rather than an inotify watch, deliberately. The event this is looking
+// for happens when a human runs a command, so latency of up to one interval is
+// invisible; inotify would add a platform-specific dependency and a class of
+// failure (watch limits, a root that does not exist yet) to save nothing.
+//
+// It never STOPS a network. A directory disappearing is `orbit agent uninstall`,
+// which stops the service itself, or it is a mistake — and tearing down a live
+// overlay because a directory read failed once would turn a transient disk
+// problem into an outage.
+func (s *supervisor) watch(ctx context.Context, wg *sync.WaitGroup) {
+	t := time.NewTicker(s.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		dirs, err := networksToRun(s.df, s.root)
+		if err != nil {
+			s.log.Warn("could not rescan for newly joined networks", "root", s.root, "error", err)
+			continue
+		}
+		before := len(s.slots())
+		s.start(ctx, wg, dirs)
+		if after := len(s.slots()); after > before {
+			s.log.Info("picked up a newly joined network without a restart",
+				"networks", after, "root", s.root)
+		}
+	}
 }
 
 // socketRoot is the directory the status socket lives in.
@@ -597,7 +754,7 @@ func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
 	}
 
 	if st, err := agent.ReadState(layout.Dir); err == nil {
-		out.HostID = st.HostID
+		out.MembershipID = st.MembershipID
 		out.ControlURL = st.ControlURL()
 		out.Replicas = len(st.AgentURLs)
 		out.ConfigEpoch = st.ConfigEpoch
@@ -637,7 +794,11 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 		// The linked copy IS the copy that will run it, so validating in
 		// process is exact rather than a guess about a host binary's version.
 		DisableValidation: true,
-		Log:               nlog,
+		// From this network's own state, not a flag: one process runs every
+		// joined network, and a host may hold a token key for one and a file
+		// for another.
+		KeyRef: st.KeyRef,
+		Log:    nlog,
 	}
 	applier.Supervisor = engine
 
@@ -664,18 +825,19 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 		Layout:   layout,
 		Curve:    c,
 		ReuseKey: reuseKey,
+		KeyRef:   st.KeyRef,
 		State:    st,
 		Log:      nlog,
 	}
 
 	if nb, na, err := loop.CurrentWindow(); err == nil {
 		nlog.Info("network joined",
-			"host", st.HostID,
+			"host", st.MembershipID,
 			"layout", layout.Describe(),
 			"controlPlane", st.ControlURL(),
 			"replicas", len(st.AgentURLs),
 			"notAfter", na,
-			"renewAt", loop.Policy.RenewAt(nb, na, st.HostID))
+			"renewAt", loop.Policy.RenewAt(nb, na, st.MembershipID))
 	}
 
 	// Two networks render listen.port and tun.dev independently, and no control
@@ -733,143 +895,28 @@ func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool
 	}
 }
 
-func parseCurve(name string) (cert.Curve, error) {
-	switch name {
-	case "CURVE25519", "25519":
-		return cert.Curve_CURVE25519, nil
-	case "P256":
-		return cert.Curve_P256, nil
-	default:
-		return 0, fmt.Errorf("unknown curve %q", name)
-	}
-}
+func parseCurve(name string) (cert.Curve, error) { return ca.ParseCurve(name) }
 
-// recoverCmd re-obtains a certificate for a host whose own expired while it was
-// offline.
+// installCmd sets this MACHINE up: a device identity, a service, nothing else.
 //
-// Such a host cannot reach the overlay, so the normal renewal path is closed to
-// it. This falls back to the public endpoint and proves possession of the key
-// whose certificate expired — that key must still be on disk, which is why the
-// agent never deletes it.
-func recoverCmd(args []string) error {
-	fs := flag.NewFlagSet("recover", flag.ExitOnError)
-	var (
-		url = fs.String("url", "", "public control plane URL (defaults to the one recorded at enrollment)")
-
-		curve = fs.String("curve", "CURVE25519", "key curve; must match the network")
-	)
-	df := addDirFlags(fs)
-	_ = fs.Parse(args)
-
-	log := newLogger()
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	layout, err := df.layout()
-	if err != nil {
-		return err
-	}
-	dir := &layout.Dir
-
-	st, err := agent.ReadState(*dir)
-	if err != nil {
-		return fmt.Errorf("read agent state (has this host enrolled?): %w", err)
-	}
-	if st.HostID == "" {
-		return errors.New("agent state has no host id; this host must re-enroll")
-	}
-
-	// Recovery always uses the public endpoint. The overlay one is unreachable
-	// by definition: that is why this command exists.
-	base := *url
-	if base == "" {
-		base = st.BaseURL
-	}
-	client := agent.NewClient(base)
-
-	c, err := parseCurve(*curve)
-	if err != nil {
-		return err
-	}
-
-	ch, err := client.RecoveryChallenge(ctx, st.HostID)
-	if err != nil {
-		return fmt.Errorf("request recovery challenge: %w", err)
-	}
-
-	// A fresh keypair, as at enrollment. The old one proved identity and is
-	// then done with.
-	kp, err := agent.GenerateKeypair(c)
-	if err != nil {
-		return fmt.Errorf("generate keypair: %w", err)
-	}
-
-	resp, err := client.Recover(ctx, st.HostID, layout.Paths.Key, ch, kp)
-	if err != nil {
-		var apiErr *agent.APIError
-		if errors.As(err, &apiErr) && !apiErr.Retryable() {
-			return fmt.Errorf("recovery denied: %s\n\n"+
-				"This host may be blocked, past the recovery window, or holding a key "+
-				"that does not match its last certificate. Re-enroll it instead.", apiErr.Message)
-		}
-		return fmt.Errorf("recover: %w", err)
-	}
-
-	// Recovery re-keys the host, and a recovered certificate can carry a
-	// different overlay address than the expired one — a restart, not a reload.
-	// The engine is both.
-	engine := &agent.Embedded{ConfigArg: layout.NebulaConfigArg(), Log: log}
-	defer func() { _ = engine.Close() }()
-
-	applier := &agent.Applier{
-		Layout:            layout,
-		Reloader:          engine,
-		Supervisor:        engine,
-		DisableValidation: true,
-		Log:               log,
-	}
-	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
-		return err
-	}
-
-	st.ConfigEpoch = resp.ConfigEpoch
-	st.BlocklistEpoch = resp.BlocklistEpoch
-	st.SetAgentURLs(resp.AgentEndpoints)
-	if err := agent.WriteState(*dir, st); err != nil {
-		return err
-	}
-
-	log.Warn("recovered after certificate expiry; renewal was not working for this host " +
-		"and is worth investigating")
-	fmt.Printf("recovered as %s (%s)\ncertificate expires %s\n",
-		resp.HostName, resp.HostID, resp.NotAfter.Format(time.RFC3339))
-	return nil
-}
-
-// installCmd is enrollment plus everything an operator would otherwise do by
-// hand afterwards: write the service definition, enable it, start it.
+// Device-level, not network-level, and the split is the model showing through.
+// A machine has one agent, one service and one device key however many networks
+// it joins; a membership is per network. Install used to do both, which meant a
+// machine on three networks ran it three times and rewrote the same unit three
+// times.
 //
-// It exists because the manual sequence is six steps on Linux and seven on
-// macOS, every one of them a place to mistype a path — and a deployment that
-// followed the written version hit four separate failures before reaching
-// anything Orbit does.
+// So: install once, then `orbit agent join <network>` per network. The service
+// rescans its root, so a join lands without a restart — and without dropping the
+// tunnels of every other network a restart would have taken with it.
 func installCmd(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	var (
-		url       = fs.String("url", "", "control plane base URL")
-		code      = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
+		root      = fs.String("root", agent.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		dryRun    = fs.Bool("dry-run", false, "print what would be written and installed, and change nothing")
 		noStart   = fs.Bool("no-start", false, "write the service definition but do not enable or start it")
 	)
-	df := addDirFlags(fs)
 	_ = fs.Parse(args)
-
-	layout, err := df.layout()
-	if err != nil {
-		return err
-	}
 
 	// The binary's own path, resolved before anything is written. A unit that
 	// names a path the binary is not at starts once — from the shell that
@@ -882,25 +929,26 @@ func installCmd(args []string) error {
 		return fmt.Errorf("resolve this binary's path: %w", err)
 	}
 
-	plan, err := agent.PlanService(agent.DefaultRoot, binary, *verifyURL)
+	plan, err := agent.PlanService(*root, binary, *verifyURL)
 	if err != nil {
 		return err
 	}
 
 	if *dryRun {
-		fmt.Fprintf(errOut, "would enroll into %s\nwould write %s (%s)\nwould run: %s\n\n",
-			layout.Dir, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
+		fmt.Fprintf(errOut, "would write the device key under %s\nwould write %s (%s)\nwould run: %s\n\n",
+			*root, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
 		fmt.Fprintln(out, plan.Contents)
 		return nil
 	}
 
-	// Enroll FIRST. Writing a service definition for a host that then fails to
-	// enroll leaves a unit pointing at an empty directory, and a service
-	// manager restarting it forever.
-	if err := enrollCmd([]string{
-		"-url", *url, "-code", *code, "-curve", *curve, "-dir", layout.Dir,
-	}); err != nil {
-		return err
+	// The device key FIRST, and this is the one thing install cannot leave to
+	// the service. It is this machine's identity: generated here, never issued,
+	// never expiring, and the same key for every network it will ever join. An
+	// operator can read the fingerprint off this output and recognise the
+	// machine in the authorization queue before it has joined anything.
+	id, err := device.LoadOrCreate(agent.DeviceKeyPath(*root))
+	if err != nil {
+		return fmt.Errorf("device key: %w", err)
 	}
 
 	if err := plan.Write(); err != nil {
@@ -908,32 +956,26 @@ func installCmd(args []string) error {
 	}
 	fmt.Fprintf(errOut, "wrote %s\n", plan.Path)
 
+	fmt.Printf("device %s\n", id.Fingerprint())
+
 	if *noStart {
 		fmt.Fprintf(errOut, "\nNot started. When you are ready:\n\n  %s\n",
 			strings.Join(plan.Start, " "))
-		return nil
-	}
-
-	if err := plan.Enable(); err != nil {
-		return fmt.Errorf("%w\n\nThe host IS enrolled and %s is written; only starting the "+
+	} else if err := plan.Enable(); err != nil {
+		return fmt.Errorf("%w\n\nThe device key and %s are written; only starting the "+
 			"service failed. Fix that and run:\n\n  %s",
 			err, plan.Path, strings.Join(plan.Start, " "))
 	}
 
-	fmt.Fprintf(errOut, `
-%s is running. This host is on the mesh and will renew on its own.
-
-  %s
-`, plan.Name, strings.Join(plan.Status, " "))
+	// The service is running and serving nothing, which is correct and worth
+	// saying — otherwise the obvious reading of "installed" is "done".
+	fmt.Fprintf(errOut, "\nThis machine belongs to no network yet. Join one:\n\n"+
+		"  sudo orbit agent join -url https://<control-plane> -network <slug>\n\n"+
+		"Add -code <reservation> to skip the authorization queue. The service picks\n"+
+		"up each network as it is joined; there is nothing to restart.\n")
 	return nil
 }
 
-// uninstallCmd takes this host off the mesh and leaves nothing behind.
-//
-// It is the inverse of install, and it exists for the same reason: the manual
-// version is stop, disable, remove a unit, reload, delete a directory — and the
-// consequence of getting it half right is a host that still holds a valid
-// certificate and is no longer being told about revocations.
 func uninstallCmd(args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
 	var (

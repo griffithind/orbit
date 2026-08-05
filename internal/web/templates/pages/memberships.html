@@ -44,11 +44,11 @@
   </div>
 </form>
 
-{{- if hasScope $.Scopes "hosts:create" }}
+{{- if hasScope $.Scopes "memberships:create" }}
 <p><a class="button" href="/ui/networks/{{ .Network.ID }}/hosts/new">Add a host</a></p>
 {{- end }}
 
-{{- if .Hosts }}
+{{- if .Memberships }}
 {{/*
   The table is the hard part on a phone, so it lives in an overflow-x wrapper
   and each cell carries a data-label. One media query in app.css turns the rows
@@ -65,9 +65,9 @@
     </tr>
   </thead>
   <tbody>
-  {{- range .Hosts }}
+  {{- range .Memberships }}
     <tr>
-      <td data-label="Host"><a href="/ui/hosts/{{ .ID }}">{{ .Name }}</a></td>
+      <td data-label="Host"><a href="/ui/memberships/{{ .ID }}">{{ .Name }}</a></td>
       <td data-label="State">{{ template "badge" .Badge }}</td>
       <td data-label="Address">{{ range .OverlayAddrs }}<code>{{ . }}</code> {{ end }}</td>
       <td data-label="Role">{{ if .RoleName }}{{ .RoleName }}{{ else }}<span class="note">none</span>{{ end }}</td>

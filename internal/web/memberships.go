@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -21,23 +21,23 @@ import (
 // The host list
 //------------------------------------------------------------------------------
 
-type hostListView struct {
-	Network networkView
-	Hosts   []hostView
-	Total   *int
+type membershipListView struct {
+	Network     networkView
+	Memberships []membershipView
+	Total       *int
 
 	// Filter carries the current query back into the form, so a filtered listing
 	// survives a refresh and can be linked to. Every filter is applied in SQL by
 	// the store; none is applied here. A filter that silently did nothing would
 	// show an unfiltered fleet as the answer to a narrow question, which during
 	// an incident is the wrong conclusion to draw.
-	Filter hostFilterView
+	Filter membershipFilterView
 
 	NextCursor string
 	PrevURL    string
 }
 
-type hostFilterView struct {
+type membershipFilterView struct {
 	State  string
 	Behind bool
 	Query  string
@@ -47,7 +47,7 @@ type hostFilterView struct {
 // listableHostStates mirrors internal/api's list. 'deleted' is absent because
 // DeleteHost removes the row.
 var listableHostStates = []string{
-	store.HostCreated, store.HostEnrolled, store.HostActive, store.HostSuspended,
+	store.MembershipCreated, store.MembershipEnrolled, store.MembershipActive, store.MembershipSuspended,
 }
 
 func (s *Server) handleHostList(w http.ResponseWriter, r *http.Request) error {
@@ -57,7 +57,7 @@ func (s *Server) handleHostList(w http.ResponseWriter, r *http.Request) error {
 	}
 	q := r.URL.Query()
 
-	f := store.HostFilter{
+	f := store.MembershipFilter{
 		NetworkID:    networkID,
 		NameContains: strings.TrimSpace(q.Get("q")),
 		Behind:       q.Get("behind") == "1",
@@ -80,7 +80,7 @@ func (s *Server) handleHostList(w http.ResponseWriter, r *http.Request) error {
 
 	var (
 		net  *store.Network
-		page store.HostPage
+		page store.MembershipPage
 	)
 	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
@@ -94,22 +94,22 @@ func (s *Server) handleHostList(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	v := hostListView{
+	v := membershipListView{
 		Network: newNetworkView(net),
 		Total:   page.Total,
-		Filter: hostFilterView{
+		Filter: membershipFilterView{
 			State:  f.State,
 			Behind: f.Behind,
 			Query:  f.NameContains,
 			States: listableHostStates,
 		},
 	}
-	for i := range page.Hosts {
-		v.Hosts = append(v.Hosts, newHostView(&page.Hosts[i], net))
+	for i := range page.Memberships {
+		v.Memberships = append(v.Memberships, newMembershipView(&page.Memberships[i], net))
 	}
-	if page.More && len(page.Hosts) > 0 {
+	if page.More && len(page.Memberships) > 0 {
 		next := q
-		next.Set("cursor", encodeHostCursor(&page.Hosts[len(page.Hosts)-1]))
+		next.Set("cursor", encodeHostCursor(&page.Memberships[len(page.Memberships)-1]))
 		v.NextCursor = "?" + next.Encode()
 	}
 	if q.Get("cursor") != "" {
@@ -121,18 +121,18 @@ func (s *Server) handleHostList(w http.ResponseWriter, r *http.Request) error {
 		v.PrevURL = "?" + first.Encode()
 	}
 
-	p := s.newPage(r, "Hosts — "+net.Name)
+	p := s.newPage(r, "Memberships — "+net.Name)
 	if err := s.withNav(r.Context(), p, net.ID.String()); err != nil {
 		return err
 	}
 	p.Data = v
-	return s.render(w, r, "hosts.html", http.StatusOK, p)
+	return s.render(w, r, "memberships.html", http.StatusOK, p)
 }
 
 const hostPageSize = 100
 
 //------------------------------------------------------------------------------
-// Host detail — the most important page in the product
+// Membership detail — the most important page in the product
 //------------------------------------------------------------------------------
 
 // It answers "why is this host not renewing" and executes "block it" without
@@ -142,10 +142,10 @@ const hostPageSize = 100
 // epochs to compare against. The diagnosis is assembled in views.go so that it
 // can be tested without rendering HTML.
 
-type hostDetailView struct {
-	Host     hostView
-	Network  networkView
-	Findings []finding
+type membershipDetailView struct {
+	Membership membershipView
+	Network    networkView
+	Findings   []finding
 
 	// Certificates is the whole recent history, not just the active one.
 	// "Has this host been renewing" is answered by the CADENCE — a column of
@@ -161,27 +161,27 @@ type hostDetailView struct {
 const hostCertHistory = 20
 
 func (s *Server) handleHostDetail(w http.ResponseWriter, r *http.Request) error {
-	hostID, err := uuid.Parse(r.PathValue("id"))
+	membershipID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return store.ErrNotFound
 	}
 
 	now := time.Now()
 	var (
-		host     *store.Host
+		host     *store.Membership
 		net      *store.Network
 		certs    store.CertPage
 		activeCA *store.CA
 	)
 	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		if host, err = tx.GetHost(ctx, hostID); err != nil {
+		if host, err = tx.GetHost(ctx, membershipID); err != nil {
 			return err
 		}
 		if net, err = tx.GetNetwork(ctx, host.NetworkID); err != nil {
 			return err
 		}
-		if certs, err = tx.HostCertificates(ctx, hostID,
+		if certs, err = tx.MembershipCertificates(ctx, membershipID,
 			store.CertFilter{Limit: hostCertHistory}); err != nil {
 			return err
 		}
@@ -198,10 +198,10 @@ func (s *Server) handleHostDetail(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 
-	v := hostDetailView{
-		Host:    newHostView(host, net),
-		Network: newNetworkView(net),
-		More:    certs.More,
+	v := membershipDetailView{
+		Membership: newMembershipView(host, net),
+		Network:    newNetworkView(net),
+		More:       certs.More,
 	}
 	for _, c := range certs.Certificates {
 		v.Certificates = append(v.Certificates, newCertView(c, now))
@@ -210,7 +210,7 @@ func (s *Server) handleHostDetail(w http.ResponseWriter, r *http.Request) error 
 		v.ActiveCAID = activeCA.ID.String()
 		v.ActiveCAName = activeCA.Name
 	}
-	v.Findings = diagnose(v.Host, v.Certificates, now, v.ActiveCAID, activeCA != nil)
+	v.Findings = diagnose(v.Membership, v.Certificates, now, v.ActiveCAID, activeCA != nil)
 
 	p := s.newPage(r, host.Name)
 	if err := s.withNav(r.Context(), p, net.ID.String()); err != nil {
@@ -218,7 +218,7 @@ func (s *Server) handleHostDetail(w http.ResponseWriter, r *http.Request) error 
 	}
 	p.LiveNetwork = net.ID.String()
 	p.Data = v
-	return s.render(w, r, "host.html", http.StatusOK, p)
+	return s.render(w, r, "membership.html", http.StatusOK, p)
 }
 
 //------------------------------------------------------------------------------
@@ -238,25 +238,25 @@ func (s *Server) handleHostDetail(w http.ResponseWriter, r *http.Request) error 
 // unchanged.
 
 type blockConfirmView struct {
-	Host    hostView
-	Network networkView
+	Membership membershipView
+	Network    networkView
 	// Consequences are the role-specific costs, worst first.
 	Consequences []string
 }
 
 func (s *Server) handleBlockConfirm(w http.ResponseWriter, r *http.Request) error {
-	hostID, err := uuid.Parse(r.PathValue("id"))
+	membershipID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return store.ErrNotFound
 	}
 
 	var (
-		host *store.Host
+		host *store.Membership
 		net  *store.Network
 	)
 	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		if host, err = tx.GetHost(ctx, hostID); err != nil {
+		if host, err = tx.GetHost(ctx, membershipID); err != nil {
 			return err
 		}
 		net, err = tx.GetNetwork(ctx, host.NetworkID)
@@ -271,7 +271,7 @@ func (s *Server) handleBlockConfirm(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 	p.Data = blockConfirmView{
-		Host:         newHostView(host, net),
+		Membership:   newMembershipView(host, net),
 		Network:      newNetworkView(net),
 		Consequences: blockConsequences(host),
 	}
@@ -283,7 +283,7 @@ func (s *Server) handleBlockConfirm(w http.ResponseWriter, r *http.Request) erro
 // Worst first, and the relay line leads for the reason the address-change gate
 // puts it first: it is the only consequence whose damage lands on machines that
 // have nothing to do with the decision being made.
-func blockConsequences(h *store.Host) []string {
+func blockConsequences(h *store.Membership) []string {
 	var out []string
 	if h.IsRelay {
 		out = append(out, h.Name+" RELAYS FOR OTHER HOSTS. Blocking it drops the traffic "+
@@ -305,7 +305,7 @@ func blockConsequences(h *store.Host) []string {
 }
 
 func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) error {
-	hostID, err := uuid.Parse(r.PathValue("id"))
+	membershipID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return store.ErrNotFound
 	}
@@ -316,16 +316,16 @@ func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) error {
 		name  string
 	)
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, hostID)
+		host, err := tx.GetHost(ctx, membershipID)
 		if err != nil {
 			return err
 		}
 		name = host.Name
 
-		if epoch, err = tx.BlockHost(ctx, hostID, "blocked from the operator UI"); err != nil {
+		if epoch, err = tx.BlockHost(ctx, membershipID, "blocked from the operator UI"); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, s.audit(r, *id, store.ActionHostBlocked, "host", hostID.String()))
+		return tx.AppendAudit(ctx, s.audit(r, *id, store.ActionMembershipBlocked, "host", membershipID.String()))
 	})
 	if err != nil {
 		return err
@@ -335,15 +335,15 @@ func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) error {
 	// in this UI that takes a machine off the mesh, and the log is where someone
 	// correlating an outage with a change will look first.
 	s.log.Warn("host blocked from the operator UI",
-		"host", hostID, "name", name, "actor", id.Display, "blocklistEpoch", epoch)
+		"host", membershipID, "name", name, "actor", id.Display, "blocklistEpoch", epoch)
 
-	return s.redirectWithNotice(w, r, "/ui/hosts/"+hostID.String(),
+	return s.redirectWithNotice(w, r, "/ui/memberships/"+membershipID.String(),
 		fmt.Sprintf("%s is blocked. Blocklist epoch %d — watch convergence to see it reach the fleet.",
 			name, epoch))
 }
 
 func (s *Server) handleUnblock(w http.ResponseWriter, r *http.Request) error {
-	hostID, err := uuid.Parse(r.PathValue("id"))
+	membershipID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return store.ErrNotFound
 	}
@@ -352,30 +352,30 @@ func (s *Server) handleUnblock(w http.ResponseWriter, r *http.Request) error {
 	var epoch int64
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		if epoch, err = tx.UnblockHost(ctx, hostID); err != nil {
+		if epoch, err = tx.UnblockHost(ctx, membershipID); err != nil {
 			return err
 		}
-		return tx.AppendAudit(ctx, s.audit(r, *id, store.ActionHostUnblocked, "host", hostID.String()))
+		return tx.AppendAudit(ctx, s.audit(r, *id, store.ActionMembershipUnblocked, "host", membershipID.String()))
 	})
 	if err != nil {
 		return err
 	}
-	s.log.Info("host unblocked from the operator UI", "host", hostID, "actor", id.Display)
+	s.log.Info("host unblocked from the operator UI", "host", membershipID, "actor", id.Display)
 
-	return s.redirectWithNotice(w, r, "/ui/hosts/"+hostID.String(),
-		fmt.Sprintf("Unblocked. Blocklist epoch %d. The host must still re-enroll or "+
-			"recover before it holds a valid certificate again.", epoch))
+	return s.redirectWithNotice(w, r, "/ui/memberships/"+membershipID.String(),
+		fmt.Sprintf("Unblocked. Blocklist epoch %d. The machine must still re-enroll, or "+
+			"re-run `orbit agent join`, before it holds a valid certificate again.", epoch))
 }
 
 //------------------------------------------------------------------------------
-// Add a host, and hand out its enrollment code
+// Reserve a place, and hand out its code
 //------------------------------------------------------------------------------
 
-type hostNewView struct {
+type membershipNewView struct {
 	Network networkView
 	Roles   []roleOption
 	// Form carries a rejected submission back rather than discarding it.
-	Form    newHostForm
+	Form    newMembershipForm
 	Problem string
 }
 
@@ -384,7 +384,7 @@ type roleOption struct {
 	Name string
 }
 
-type newHostForm struct {
+type newMembershipForm struct {
 	Name         string
 	RoleID       string
 	Tags         string
@@ -394,10 +394,10 @@ type newHostForm struct {
 }
 
 func (s *Server) handleNewHostForm(w http.ResponseWriter, r *http.Request) error {
-	return s.renderNewHost(w, r, newHostForm{}, "", http.StatusOK)
+	return s.renderNewHost(w, r, newMembershipForm{}, "", http.StatusOK)
 }
 
-func (s *Server) renderNewHost(w http.ResponseWriter, r *http.Request, form newHostForm, problem string, status int) error {
+func (s *Server) renderNewHost(w http.ResponseWriter, r *http.Request, form newMembershipForm, problem string, status int) error {
 	networkID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return store.ErrNotFound
@@ -419,7 +419,7 @@ func (s *Server) renderNewHost(w http.ResponseWriter, r *http.Request, form newH
 		return err
 	}
 
-	v := hostNewView{Network: newNetworkView(net), Form: form, Problem: problem}
+	v := membershipNewView{Network: newNetworkView(net), Form: form, Problem: problem}
 	for _, role := range roles {
 		v.Roles = append(v.Roles, roleOption{ID: role.ID.String(), Name: role.Name})
 	}
@@ -432,16 +432,26 @@ func (s *Server) renderNewHost(w http.ResponseWriter, r *http.Request, form newH
 	// The caller's status, not a blanket 200. A refused submission that answers
 	// 200 is one no monitoring system and no scripted check can tell from a
 	// success.
-	return s.render(w, r, "host_new.html", status, p)
+	return s.render(w, r, "membership_new.html", status, p)
 }
 
-// handleCreateHost creates a host with an ALLOCATED overlay address.
+// handleReserveHost holds a place for a machine that has not arrived.
 //
-// The form does not offer an address field. The control plane holds the only
-// authoritative answer to what is free, and asking a person to remember instead
-// is how two hosts end up claiming one address — the case store.CreateHostAllocating
-// exists to make impossible.
-func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) error {
+// This was handleCreateHost, and the change is not cosmetic. Creating a host
+// made a row that named no machine; a reservation records the operator's intent
+// on a credential, and the membership is created — already naming its device —
+// when a machine redeems it. See docs/model.md §4.
+//
+// The form no longer offers lighthouse, relay, static addresses or tags. A
+// reservation carries what an UNATTENDED machine must have decided for it —
+// name, address, role — and the rest is set from the host page once the machine
+// is there. Carrying them here would mean four more columns on the credential to
+// serve a case (setting up a lighthouse) where an operator is present anyway.
+//
+// There is still no address field, for the reason there never was: the control
+// plane holds the only authoritative answer to what is free, and asking a person
+// to remember instead is how two hosts end up claiming one address.
+func (s *Server) handleReserveHost(w http.ResponseWriter, r *http.Request) error {
 	networkID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return store.ErrNotFound
@@ -451,78 +461,49 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) error 
 	}
 	id := identityFrom(r.Context())
 
-	form := newHostForm{
-		Name:         strings.TrimSpace(r.PostFormValue("name")),
-		RoleID:       r.PostFormValue("role_id"),
-		Tags:         strings.TrimSpace(r.PostFormValue("tags")),
-		IsLighthouse: r.PostFormValue("is_lighthouse") != "",
-		IsRelay:      r.PostFormValue("is_relay") != "",
-		StaticAddrs:  strings.TrimSpace(r.PostFormValue("static_addrs")),
+	form := newMembershipForm{
+		Name:   strings.TrimSpace(r.PostFormValue("name")),
+		RoleID: r.PostFormValue("role_id"),
 	}
 	if form.Name == "" {
 		return s.renderNewHost(w, r, form, "A name is required.", http.StatusBadRequest)
 	}
-	static := splitCSV(form.StaticAddrs)
-	if form.IsLighthouse && len(static) == 0 {
-		// The same refusal PATCH /v1/hosts/{id} makes, and for the same reason:
-		// a lighthouse nobody can reach is worse than no lighthouse, because
-		// every host keeps dialling it.
-		return s.renderNewHost(w, r, form,
-			"A lighthouse needs at least one public address. Without one, every host "+
-				"in the network keeps trying to reach it and never can.", http.StatusBadRequest)
-	}
 
-	var roleID *uuid.UUID
+	res := store.Reservation{Name: form.Name}
 	if form.RoleID != "" {
 		rid, err := uuid.Parse(form.RoleID)
 		if err != nil {
 			return s.renderNewHost(w, r, form, "That role is not valid.", http.StatusBadRequest)
 		}
-		roleID = &rid
+		res.RoleID = &rid
 	}
 
-	host := store.Host{
-		NetworkID:    networkID,
-		Name:         form.Name,
-		RoleID:       roleID,
-		Tags:         splitCSV(form.Tags),
-		IsLighthouse: form.IsLighthouse,
-		IsRelay:      form.IsRelay,
-		StaticAddrs:  static,
-	}
-
-	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		net, err := tx.GetNetwork(ctx, networkID)
-		if err != nil {
-			return err
-		}
-		if err := tx.CreateHostAllocating(ctx, net, &host, netip.Prefix{}); err != nil {
-			return err
-		}
-		return tx.AppendAudit(ctx, s.audit(r, *id, store.ActionHostCreated, "host", host.ID.String()))
-	})
+	resp, err := s.enroll.Reserve(r.Context(), networkID.String(), res, 0, *id)
 	if err != nil {
 		switch {
-		case errors.Is(err, store.ErrConflict):
+		case errors.Is(err, enroll.ErrReservedNameTaken), errors.Is(err, store.ErrConflict):
 			return s.renderNewHost(w, r, form,
-				"A host with that name already exists in this network.", http.StatusConflict)
-		case errors.Is(err, store.ErrAddressExhausted):
-			return s.renderNewHost(w, r, form,
-				err.Error()+". Add another prefix to the network, or release an address.",
-				http.StatusConflict)
+				"That name is already taken in this network, either by a host or by "+
+					"an unspent reservation.", http.StatusConflict)
+		case errors.Is(err, enroll.ErrJoinName):
+			return s.renderNewHost(w, r, form, err.Error(), http.StatusBadRequest)
 		}
 		return err
 	}
 
-	// Straight to the code handout when the caller may mint one: creating a host
-	// and then hunting for the button that makes it usable is two steps where the
-	// operator only ever wanted one.
-	if id.HasScope("hosts:enroll") {
-		return s.issueEnrollmentCode(w, r, host.ID, *id)
+	var net *store.Network
+	if err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		net, err = tx.GetNetwork(ctx, networkID)
+		return err
+	}); err != nil {
+		return err
 	}
-	return s.redirectWithNotice(w, r, "/ui/hosts/"+host.ID.String(),
-		"Host created. It needs an enrollment code before it can join, and this "+
-			"credential does not carry the hosts:enroll scope.")
+
+	s.log.Info("reservation issued from the operator UI",
+		"network", net.Slug, "name", form.Name, "actor", id.Display, "expires", resp.ExpiresAt)
+
+	return s.renderCode(w, r, net, nil, form.Name, resp)
 }
 
 //------------------------------------------------------------------------------
@@ -530,7 +511,14 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) error 
 //------------------------------------------------------------------------------
 
 type enrollCodeView struct {
-	Host      hostView
+	// Membership is nil for a reservation: the membership does not exist yet, which
+	// is the whole point of a reservation. The template branches on it rather
+	// than rendering a placeholder, because a page showing an address and a
+	// state for a machine that has not arrived would be inventing both.
+	Membership *membershipView
+
+	// Name is what the machine will be called, whether or not it exists yet.
+	Name      string
 	Network   networkView
 	Code      string
 	ExpiresAt time.Time
@@ -542,11 +530,11 @@ type enrollCodeView struct {
 }
 
 func (s *Server) handleEnrollmentCode(w http.ResponseWriter, r *http.Request) error {
-	hostID, err := uuid.Parse(r.PathValue("id"))
+	membershipID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return store.ErrNotFound
 	}
-	return s.issueEnrollmentCode(w, r, hostID, *identityFrom(r.Context()))
+	return s.issueEnrollmentCode(w, r, membershipID, *identityFrom(r.Context()))
 }
 
 // issueEnrollmentCode mints a code and renders it exactly once.
@@ -557,19 +545,19 @@ func (s *Server) handleEnrollmentCode(w http.ResponseWriter, r *http.Request) er
 // exist. That is also why the whole surface sets Cache-Control: no-store — a
 // back button that re-rendered this page from cache would be a second copy of a
 // credential that is supposed to have exactly one.
-func (s *Server) issueEnrollmentCode(w http.ResponseWriter, r *http.Request, hostID uuid.UUID, id store.Identity) error {
-	resp, err := s.enroll.CreateCode(r.Context(), hostID, 0, id)
+func (s *Server) issueEnrollmentCode(w http.ResponseWriter, r *http.Request, membershipID uuid.UUID, id store.Identity) error {
+	resp, err := s.enroll.CreateCode(r.Context(), membershipID, 0, id)
 	if err != nil {
 		return err
 	}
 
 	var (
-		host *store.Host
+		host *store.Membership
 		net  *store.Network
 	)
 	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
-		if host, err = tx.GetHost(ctx, hostID); err != nil {
+		if host, err = tx.GetHost(ctx, membershipID); err != nil {
 			return err
 		}
 		net, err = tx.GetNetwork(ctx, host.NetworkID)
@@ -580,29 +568,64 @@ func (s *Server) issueEnrollmentCode(w http.ResponseWriter, r *http.Request, hos
 	}
 
 	s.log.Info("enrollment code issued from the operator UI",
-		"host", hostID, "name", host.Name, "actor", id.Display, "expires", resp.ExpiresAt)
+		"host", membershipID, "name", host.Name, "actor", id.Display, "expires", resp.ExpiresAt)
 
-	p := s.newPage(r, "Enrollment code — "+host.Name)
+	hv := newMembershipView(host, net)
+	return s.renderCode(w, r, net, &hv, host.Name, resp)
+}
+
+// renderCode shows a credential exactly once.
+//
+// Shared by the two things that mint one — a code for an existing host, and a
+// reservation for a machine that has not arrived — because the page's whole job
+// is the same in both cases: display a plaintext that exists nowhere else, and
+// the exact command that consumes it.
+//
+// Rendered directly from the POST rather than redirected to a page that would
+// re-read it, because there is nothing to re-read.
+func (s *Server) renderCode(w http.ResponseWriter, r *http.Request, net *store.Network,
+	host *membershipView, name string, resp *wire.EnrollmentCodeResponse) error {
+
+	title := "Enrollment code — " + name
+	if host == nil {
+		title = "Reservation — " + name
+	}
+	p := s.newPage(r, title)
 	if err := s.withNav(r.Context(), p, net.ID.String()); err != nil {
 		return err
 	}
 	p.Data = enrollCodeView{
-		Host:      newHostView(host, net),
-		Network:   newNetworkView(net),
-		Code:      resp.Code,
-		ExpiresAt: resp.ExpiresAt,
-		EnrollURL: resp.EnrollURL,
-		Command:   enrollCommand(net.Slug, resp),
+		Membership: host,
+		Name:       name,
+		Network:    newNetworkView(net),
+		Code:       resp.Code,
+		ExpiresAt:  resp.ExpiresAt,
+		EnrollURL:  resp.EnrollURL,
+		Command:    joinCommand(net.Slug, host != nil, resp),
 	}
 	return s.render(w, r, "enroll_code.html", http.StatusOK, p)
 }
 
-func enrollCommand(slug string, resp *wire.EnrollmentCodeResponse) string {
+// joinCommand is the exact line to run on the new machine.
+//
+// Two commands, because the two credentials mean different things. A
+// reservation is redeemed by `join`: the machine generates its device identity,
+// presents the code, and the membership comes into existence naming it. A code
+// for an EXISTING host is redeemed by `enroll`, which is re-issuing a
+// certificate to a membership that is already there.
+//
+// Printing the wrong one would fail in a way that is hard to read — join would
+// refuse a code bound to a host, saying it belongs to an existing host and not
+// a reservation.
+func joinCommand(slug string, hostExists bool, resp *wire.EnrollmentCodeResponse) string {
 	url := resp.EnrollURL
 	if url == "" {
-		url = "https://<control-plane>/enroll/v1/enroll"
+		url = "https://<control-plane>"
 	}
-	return fmt.Sprintf("orbit agent enroll -url %s -code %s -network %s", url, resp.Code, slug)
+	if hostExists {
+		return fmt.Sprintf("orbit agent enroll -url %s -code %s -network %s", url, resp.Code, slug)
+	}
+	return fmt.Sprintf("orbit agent join -url %s -network %s -code %s", url, slug, resp.Code)
 }
 
 //------------------------------------------------------------------------------
@@ -662,24 +685,24 @@ func containsStr(haystack []string, needle string) bool {
 // because it is four lines and because exporting it would make an internal
 // pagination detail part of that package's API.
 
-func encodeHostCursor(h *store.Host) string {
+func encodeHostCursor(h *store.Membership) string {
 	return base64RawURL(h.Name + "\x00" + h.ID.String())
 }
 
-func decodeHostCursor(s string) (store.HostCursor, error) {
+func decodeHostCursor(s string) (store.MembershipCursor, error) {
 	raw, err := base64RawURLDecode(s)
 	if err != nil {
-		return store.HostCursor{}, err
+		return store.MembershipCursor{}, err
 	}
 	name, rest, found := strings.Cut(raw, "\x00")
 	if !found {
-		return store.HostCursor{}, errors.New("malformed cursor")
+		return store.MembershipCursor{}, errors.New("malformed cursor")
 	}
 	id, err := uuid.Parse(rest)
 	if err != nil {
-		return store.HostCursor{}, err
+		return store.MembershipCursor{}, err
 	}
-	return store.HostCursor{Name: name, ID: id}, nil
+	return store.MembershipCursor{Name: name, ID: id}, nil
 }
 
 func base64RawURL(s string) string {

@@ -133,7 +133,7 @@ func TestStatusReportsAJoinedNetwork(t *testing.T) {
 	if !n.Ready {
 		t.Errorf("an enrolled network reported as not ready: %s", n.Error)
 	}
-	if n.HostID == "" {
+	if n.MembershipID == "" {
 		t.Error("no host id; the report cannot be tied to a host in the console")
 	}
 	if n.ControlURL == "" {

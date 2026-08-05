@@ -106,7 +106,7 @@ func testLoop(t *testing.T, baseURL string) *Loop {
 		Applier: &Applier{Layout: layout, Reloader: NoopReloader{}, Log: log},
 		Policy:  DefaultRenewalPolicy(),
 		Layout:  layout,
-		State:   State{BaseURL: baseURL, HostID: "host-under-test"},
+		State:   State{BaseURL: baseURL, MembershipID: "host-under-test"},
 		Log:     log,
 	}
 }

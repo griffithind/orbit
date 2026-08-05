@@ -58,7 +58,7 @@ func main() {
 		log.Fatalf("validity: %v", err)
 	}
 
-	hostCert, err := issuer.IssueHost(ctx, ca.HostParams{
+	membershipCert, err := issuer.IssueHost(ctx, ca.HostParams{
 		Name:      "web-01",
 		Networks:  []netip.Prefix{netip.MustParsePrefix("10.42.0.7/16")},
 		Groups:    []string{"web"},
@@ -70,7 +70,7 @@ func main() {
 		log.Fatalf("issue host cert: %v", err)
 	}
 
-	hostPEM, err := hostCert.MarshalPEM()
+	hostPEM, err := membershipCert.MarshalPEM()
 	if err != nil {
 		log.Fatalf("marshal host cert: %v", err)
 	}

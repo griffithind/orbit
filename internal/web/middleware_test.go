@@ -369,7 +369,7 @@ func TestCSRFTokenIsPerSession(t *testing.T) {
 }
 
 func TestScopeIsCheckedWithTheSameRuleTheAPIUses(t *testing.T) {
-	_, h := guardedServer(t, "hosts:block", &fakeSessions{identity: identity("hosts:read")})
+	_, h := guardedServer(t, "memberships:block", &fakeSessions{identity: identity("memberships:read")})
 
 	req := browserGet("/ui/guarded")
 	req.AddCookie(&http.Cookie{Name: SessionCookie, Value: "session-value"})
@@ -379,12 +379,12 @@ func TestScopeIsCheckedWithTheSameRuleTheAPIUses(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "hosts:block") {
+	if !strings.Contains(rec.Body.String(), "memberships:block") {
 		t.Error("the refusal does not name the missing scope")
 	}
 
 	// A wildcard passes, exactly as it does on /v1.
-	_, h = guardedServer(t, "hosts:block", &fakeSessions{identity: identity("*")})
+	_, h = guardedServer(t, "memberships:block", &fakeSessions{identity: identity("*")})
 	rec = httptest.NewRecorder()
 	req = browserGet("/ui/guarded")
 	req.AddCookie(&http.Cookie{Name: SessionCookie, Value: "session-value"})

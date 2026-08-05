@@ -20,19 +20,19 @@ func renderConvergence(c *wire.ConvergenceResponse) string {
 	var b strings.Builder
 
 	pct := func(n int) string {
-		if c.HostsTotal == 0 {
+		if c.MembershipsTotal == 0 {
 			return "  n/a"
 		}
-		return fmt.Sprintf("%5.1f%%", 100*float64(n)/float64(c.HostsTotal))
+		return fmt.Sprintf("%5.1f%%", 100*float64(n)/float64(c.MembershipsTotal))
 	}
 
 	fmt.Fprintf(&b, "config     epoch %-8d %4d/%-4d %s\n",
-		c.ConfigEpoch, c.ConfigApplied, c.HostsTotal, pct(c.ConfigApplied))
+		c.ConfigEpoch, c.ConfigApplied, c.MembershipsTotal, pct(c.ConfigApplied))
 	fmt.Fprintf(&b, "blocklist  epoch %-8d %4d/%-4d %s\n",
-		c.BlocklistEpoch, c.BlockApplied, c.HostsTotal, pct(c.BlockApplied))
+		c.BlocklistEpoch, c.BlockApplied, c.MembershipsTotal, pct(c.BlockApplied))
 
 	if len(c.Lagging) == 0 {
-		if c.HostsTotal > 0 {
+		if c.MembershipsTotal > 0 {
 			b.WriteString("\nall hosts converged\n")
 		}
 		return b.String()

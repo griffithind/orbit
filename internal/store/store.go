@@ -26,6 +26,14 @@ import (
 var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
+
+	// ErrNoNetworkIdentity means a network was created without the key its ID
+	// commits to.
+	//
+	// A distinct error because the caller has to generate one — it cannot be
+	// defaulted, invented, or derived from anything else — and a generic
+	// constraint violation would send them looking at the database instead.
+	ErrNoNetworkIdentity = errors.New("a network needs an identity key: it is what its ID commits to")
 	// ErrInvalid is a CHECK constraint refusing the value it was given. The
 	// caller sent something the schema forbids, so it belongs in the 4xx range
 	// with the constraint named — not in a 500, which tells an operator only

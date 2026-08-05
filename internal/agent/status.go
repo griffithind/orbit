@@ -72,9 +72,9 @@ type NetworkStatus struct {
 	Ready bool   `json:"ready"`
 	Error string `json:"error,omitempty"`
 
-	HostID     string `json:"host_id,omitempty"`
-	ControlURL string `json:"control_url,omitempty"`
-	Replicas   int    `json:"replicas,omitempty"`
+	MembershipID string `json:"membership_id,omitempty"`
+	ControlURL   string `json:"control_url,omitempty"`
+	Replicas     int    `json:"replicas,omitempty"`
 
 	Nebula      NebulaStatus `json:"nebula"`
 	Certificate *CertStatus  `json:"certificate,omitempty"`

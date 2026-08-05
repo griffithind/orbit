@@ -38,18 +38,15 @@ import (
 func (h *harness) servePublicOnly(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
 	})
 	srv := api.New(h.store, svc, api.Config{
+		NetworkKeyDir:      t.TempDir(),
 		SignerFactory:      ca.FileSignerFactory,
 		DisableEnrollLimit: true,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -123,19 +120,16 @@ func TestControlPlaneJoinsOverlay(t *testing.T) {
 	// API on agentPort and accepting nothing else inbound.
 	const agentPort = 8446
 	cpPort := freeUDPPort(t)
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	cpSvc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	cpSvc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: cpPort,
 	})
 
 	node, err := mesh.Join(context.Background(), cpSvc, mesh.Config{
+		DeviceKey:  testDeviceKey(t),
 		NetworkID:  h.netID,
 		Addr:       mustAddr("10.42.6.2"),
 		ListenPort: cpPort,
@@ -159,7 +153,8 @@ func TestControlPlaneJoinsOverlay(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	api.New(h.store, cpSvc, api.Config{
-		Agent: &api.AgentListener{NetworkID: node.NetworkID()},
+		NetworkKeyDir: t.TempDir(),
+		Agent:         &api.AgentListener{NetworkID: node.NetworkID()},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil))).AgentRoutes(mux)
 
 	srv := &http.Server{Handler: mux}
@@ -225,14 +220,10 @@ func TestEnrollmentAdvertisesLiveReplicas(t *testing.T) {
 	h := setup(t)
 	ctx := context.Background()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: freeUDPPort(t),
 	})
@@ -248,8 +239,8 @@ func TestEnrollmentAdvertisesLiveReplicas(t *testing.T) {
 	// Register two replicas directly, standing in for two orbitd instances
 	// having announced themselves.
 	mkHost := func(name, addr string) uuid.UUID {
-		var hr wire.HostResponse
-		if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+		var hr wire.MembershipResponse
+		if code := h.createHost(t, ts.URL, membershipSpec{
 			NetworkID: h.netID.String(), Name: name, OverlayAddr: addr,
 		}, &hr); code != http.StatusCreated {
 			t.Fatalf("create %s: %d", name, code)
@@ -268,15 +259,15 @@ func TestEnrollmentAdvertisesLiveReplicas(t *testing.T) {
 		}
 	}
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "learns-endpoints", OverlayAddr: "10.42.5.5",
 		RoleID: h.roleID.String(),
 	}, &host); code != http.StatusCreated {
 		t.Fatalf("create host: %d", code)
 	}
 	var code wire.EnrollmentCodeResponse
-	h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, &code)
+	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &code)
 
 	kp, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
 	resp, err := agent.NewClient(ts.URL).Enroll(ctx, code.Code, kp, "e2e")

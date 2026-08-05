@@ -14,6 +14,7 @@ import (
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/web"
+	"github.com/griffithind/orbit/internal/wire"
 )
 
 // THE HARD RULE, asserted over live HTTP in both directions.
@@ -21,7 +22,7 @@ import (
 // /v1 MUST NEVER ACCEPT A SESSION COOKIE. Every route on that surface was
 // written assuming bearer authentication, which a browser cannot be made to
 // send cross-site — so none of them carry a CSRF defence and several would be
-// dangerous without one. DELETE /v1/hosts/{id} takes its reason from a QUERY
+// dangerous without one. DELETE /v1/memberships/{id} takes its reason from a QUERY
 // PARAMETER; the moment a cookie reaches it, a link in an email decommissions a
 // host and files a reason.
 //
@@ -136,12 +137,13 @@ func TestSessionCookieIsRefusedByV1(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/hosts"},
+		{http.MethodGet, "/v1/memberships"},
 		{http.MethodGet, "/v1/whoami"},
-		{http.MethodPost, "/v1/hosts"},
+		{http.MethodPost, "/v1/networks/00000000-0000-0000-0000-000000000001/reservations"},
+		{http.MethodPost, "/v1/memberships/00000000-0000-0000-0000-000000000001/authorize"},
 		// The one that would hurt: a query parameter carries the reason, so a
 		// cross-site GET-shaped request is a complete, attributed decommission.
-		{http.MethodDelete, "/v1/hosts/00000000-0000-0000-0000-000000000001?reason=csrf"},
+		{http.MethodDelete, "/v1/memberships/00000000-0000-0000-0000-000000000001?reason=csrf"},
 		{http.MethodGet, "/v1/tokens"},
 		{http.MethodPost, "/v1/tokens"},
 	} {
@@ -178,7 +180,7 @@ func TestBearerTokenIsRefusedByTheBrowserSurface(t *testing.T) {
 
 	// The same token still works on /v1, so the refusal above is about the
 	// surface and not about the credential having gone bad.
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
 		t.Fatalf("the bearer token stopped working on /v1 = %d; the test above proves nothing", code)
 	}
 }
@@ -228,4 +230,48 @@ func isLoginRedirect(resp *http.Response) bool {
 		return false
 	}
 	return strings.Contains(resp.Header.Get("Location"), "/ui/login")
+}
+
+// insertHost writes a membership directly, for harnesses with no enroll service.
+//
+// Every path that creates one now runs through enrollment — a reservation is
+// minted there and redeemed there — which is correct for the product and
+// unhelpful for a test whose subject is the browser surface. This is the
+// escape hatch, and it is deliberately blunt: no device, no certificate, just a
+// row with a name and an address for a page to render.
+func (h *harness) insertHost(t *testing.T, name, addr string) wire.MembershipResponse {
+	t.Helper()
+	ctx := context.Background()
+
+	host := store.Membership{
+		NetworkID: h.netID,
+		Name:      name,
+		RoleID:    &h.roleID,
+		State:     store.MembershipCreated,
+	}
+	if err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		net, err := tx.GetNetwork(ctx, h.netID)
+		if err != nil {
+			return err
+		}
+		// A device, because a membership cannot exist without one. Blunt on
+		// purpose: this is the escape hatch for a harness with no enroll
+		// service, and the machine it describes never runs.
+		d := store.Device{PublicKey: testDeviceKey(t)}
+		if err := tx.SeeDevice(ctx, &d); err != nil {
+			return err
+		}
+		host.DeviceID = &d.ID
+		if err := tx.CreateHost(ctx, &host); err != nil {
+			return err
+		}
+		return tx.ClaimHostAddress(ctx, net, host.ID, netip.MustParseAddr(addr))
+	}); err != nil {
+		t.Fatalf("insert host %s: %v", name, err)
+	}
+	return wire.MembershipResponse{
+		ID: host.ID.String(), Name: host.Name,
+		NetworkID: h.netID.String(), OverlayAddrs: []string{addr},
+		State: host.State,
+	}
 }

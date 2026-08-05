@@ -16,7 +16,7 @@
   <tbody>
   {{- range .Lagging }}
     <tr>
-      <td data-label="Host"><a href="/ui/hosts/{{ .HostID }}">{{ .Name }}</a></td>
+      <td data-label="Host"><a href="/ui/memberships/{{ .MembershipID }}">{{ .Name }}</a></td>
       <td data-label="Config"><span class="num">{{ .AppliedConfigEpoch }}</span></td>
       <td data-label="Blocklist"><span class="num">{{ .AppliedBlocklistEpoch }}</span></td>
       <td data-label="Last seen">{{ agoPtr .LastSeenAt }}</td>
@@ -28,7 +28,7 @@
 {{- if .Truncated }}
 <p class="note">The list is capped. A network with more hosts behind than this has one problem, not that many.</p>
 {{- end }}
-{{- else if gt .HostsTotal 0 }}
+{{- else if gt .MembershipsTotal 0 }}
 <p class="note"><span class="glyph" aria-hidden="true">✓</span> Every host has applied the current generation.</p>
 {{- else }}
 <p class="note">No hosts have enrolled into this network yet.</p>

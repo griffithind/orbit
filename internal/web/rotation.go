@@ -166,8 +166,8 @@ func (s *Server) handleRotation(w http.ResponseWriter, r *http.Request) error {
 	v := rotationView{
 		Network:     newNetworkView(net),
 		Convergence: newConvergenceView(conv, overviewLagging),
-		Converged:   conv.HostsTotal == 0 || conv.ConfigApplied >= conv.HostsTotal,
-		CutOff:      conv.HostsTotal - conv.ConfigApplied,
+		Converged:   conv.MembershipsTotal == 0 || conv.ConfigApplied >= conv.MembershipsTotal,
+		CutOff:      conv.MembershipsTotal - conv.ConfigApplied,
 	}
 	for i := range cas {
 		cv := newCAView(&cas[i], counts[cas[i].ID], now)
@@ -251,7 +251,7 @@ func rotationSteps(v rotationView, slug string) []rotationStepView {
 	promote := rotationStepView{
 		N: 3, Title: "Promote it to signer", State: state(stepRenew),
 		Detail: "The new CA starts signing and the old one moves to 'retiring': still " +
-			"trusted by every host, no longer issuing. Hosts move across as they renew, " +
+			"trusted by every host, no longer issuing. Memberships move across as they renew, " +
 			"which happens at the midpoint of each certificate's lifetime.",
 	}
 
@@ -310,8 +310,8 @@ func (s *Server) handleActivateCA(w http.ResponseWriter, r *http.Request) error 
 		if err != nil {
 			return err
 		}
-		total = conv.HostsTotal
-		cutOff = conv.HostsTotal - conv.ConfigApplied
+		total = conv.MembershipsTotal
+		cutOff = conv.MembershipsTotal - conv.ConfigApplied
 		if cutOff > 0 && !acknowledged {
 			blocked = true
 			return errNotConverged
@@ -350,7 +350,7 @@ func (s *Server) handleActivateCA(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 
-	notice := "Promoted " + row.Name + ". Hosts move onto it as they renew."
+	notice := "Promoted " + row.Name + ". Memberships move onto it as they renew."
 	if cutOff > 0 {
 		notice = fmt.Sprintf("Promoted %s past %d unconverged host(s). They are cut off "+
 			"until they apply the new trust bundle.", row.Name, cutOff)

@@ -31,19 +31,16 @@ import (
 func (h *harness) joinControlPlane(t *testing.T, addr string, agentPort int) (*mesh.Node, *enroll.Service) {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: freeUDPPort(t),
 	})
 
 	node, err := mesh.Join(context.Background(), svc, mesh.Config{
+		DeviceKey: testDeviceKey(t),
 		NetworkID: h.netID,
 		Addr:      mustAddr(addr),
 		AgentPort: agentPort,
@@ -70,13 +67,13 @@ func TestControlPlanePicksUpANewCA(t *testing.T) {
 
 	node, svc := h.joinControlPlane(t, "10.42.60.2", 8450)
 
-	before, _, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+	before, _, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if err != nil {
 		t.Fatalf("initial material: %v", err)
 	}
 	_ = before
 
-	_, bundleBefore, _ := svc.ControlPlaneMaterial(ctx, node.HostID())
+	_, bundleBefore, _ := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if countPEMBlocks(bundleBefore) != 1 {
 		t.Fatalf("expected one CA to start with, got %d", countPEMBlocks(bundleBefore))
 	}
@@ -92,7 +89,7 @@ func TestControlPlanePicksUpANewCA(t *testing.T) {
 	if err := node.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	_, bundleAfter, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+	_, bundleAfter, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +116,7 @@ func TestControlPlanePicksUpABlocklistEntry(t *testing.T) {
 
 	node, svc := h.joinControlPlane(t, "10.42.61.2", 8451)
 
-	cfgBefore, _, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+	cfgBefore, _, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,14 +125,14 @@ func TestControlPlanePicksUpABlocklistEntry(t *testing.T) {
 	}
 
 	var blocked wire.BlockResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+victim.id+"/block", nil, &blocked); code != http.StatusOK {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+victim.id+"/block", nil, &blocked); code != http.StatusOK {
 		t.Fatalf("block: %d", code)
 	}
 
 	if err := node.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	cfgAfter, _, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+	cfgAfter, _, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +162,7 @@ func TestControlPlanePicksUpANewLighthouse(t *testing.T) {
 	if err := node.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	cfg, _, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+	cfg, _, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +201,7 @@ func TestMaintainRefreshesOnEpochChange(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		cfg, _, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+		cfg, _, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 		if err == nil && strings.Contains(cfg, "10.42.63.4") {
 			t.Log("control plane refreshed itself on an epoch change")
 			return
@@ -223,18 +220,15 @@ func TestControlPlaneAsLighthouse(t *testing.T) {
 	ctx := context.Background()
 
 	cpPort := freeUDPPort(t)
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths: nebulacfg.DefaultPaths(), ListenPort: freeUDPPort(t),
 	})
 
 	public := fmt.Sprintf("127.0.0.1:%d", cpPort)
 	node, err := mesh.Join(ctx, svc, mesh.Config{
+		DeviceKey: testDeviceKey(t),
 		NetworkID: h.netID, Addr: mustAddr("10.42.64.1"),
 		AgentPort: 8454, ListenPort: cpPort,
 		LighthouseAddrs: []string{public},
@@ -259,13 +253,13 @@ func TestControlPlaneAsLighthouse(t *testing.T) {
 		[]string{fmt.Sprintf("127.0.0.1:%d", lhPort)})
 
 	err = h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		return tx.SetHostRoles(ctx, node.HostID(), false, false, nil)
+		return tx.SetHostRoles(ctx, node.MembershipID(), false, false, nil)
 	})
 	if err != nil {
 		t.Fatalf("stand down as lighthouse: %v", err)
 	}
 
-	after, _, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+	after, _, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,17 +282,14 @@ func TestLighthouseRoleChangesWithoutRestart(t *testing.T) {
 	cpPort := freeUDPPort(t)
 	public := fmt.Sprintf("127.0.0.1:%d", cpPort)
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths: nebulacfg.DefaultPaths(), ListenPort: freeUDPPort(t),
 	})
 
 	node, err := mesh.Join(ctx, svc, mesh.Config{
+		DeviceKey: testDeviceKey(t),
 		NetworkID: h.netID, Addr: mustAddr("10.42.65.1"),
 		AgentPort: 8455, ListenPort: cpPort,
 		LighthouseAddrs: []string{public},
@@ -324,7 +315,7 @@ func TestLighthouseRoleChangesWithoutRestart(t *testing.T) {
 	_ = dedicated
 
 	no := false
-	if code := h.adminReq(t, http.MethodPatch, ts.URL+"/v1/hosts/"+node.HostID().String(),
+	if code := h.adminReq(t, http.MethodPatch, ts.URL+"/v1/memberships/"+node.MembershipID().String(),
 		wire.UpdateHostRequest{IsLighthouse: &no, StaticAddrs: &[]string{}}, nil); code != http.StatusOK {
 		t.Fatalf("stand down via API: %d", code)
 	}
@@ -340,7 +331,7 @@ func TestLighthouseRoleChangesWithoutRestart(t *testing.T) {
 		t.Error("control plane still reports itself a lighthouse after the API change")
 	}
 
-	cfg, _, err := svc.ControlPlaneMaterial(ctx, node.HostID())
+	cfg, _, err := svc.ControlPlaneMaterial(ctx, node.MembershipID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +352,7 @@ func TestLighthouseRequiresAnAddress(t *testing.T) {
 	host := h.createAndEnroll(t, ts, "no-addr", "10.42.66.5", false, false, nil)
 
 	yes := true
-	if code := h.adminReq(t, http.MethodPatch, ts.URL+"/v1/hosts/"+host.id,
+	if code := h.adminReq(t, http.MethodPatch, ts.URL+"/v1/memberships/"+host.id,
 		wire.UpdateHostRequest{IsLighthouse: &yes}, nil); code != http.StatusBadRequest {
 		t.Errorf("making a host a lighthouse with no address = %d, want 400", code)
 	}
@@ -419,7 +410,7 @@ func TestControlPlaneConvergesLikeAnyOtherHost(t *testing.T) {
 	// what an operator reads as a dead host.
 	var seen bool
 	if err := h.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host, err := tx.GetHost(ctx, node.HostID())
+		host, err := tx.GetHost(ctx, node.MembershipID())
 		if err != nil {
 			return err
 		}
@@ -449,7 +440,7 @@ func requireConverged(t *testing.T, h *harness, when string) {
 		}); err != nil {
 			t.Fatalf("convergence: %v", err)
 		}
-		if conv.HostsTotal > 0 && conv.ConfigApplied == conv.HostsTotal {
+		if conv.MembershipsTotal > 0 && conv.ConfigApplied == conv.MembershipsTotal {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -463,7 +454,7 @@ func requireConverged(t *testing.T, h *harness, when string) {
 				"CA activation refuses while any host is. If the control plane is the one "+
 				"lagging, rotation is impossible in the single-VM topology the README "+
 				"recommends.",
-				conv.ConfigApplied, conv.HostsTotal, conv.ConfigEpoch, when,
+				conv.ConfigApplied, conv.MembershipsTotal, conv.ConfigEpoch, when,
 				strings.Join(behind, " "))
 		}
 		time.Sleep(200 * time.Millisecond)

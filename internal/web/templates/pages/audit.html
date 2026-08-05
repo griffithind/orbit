@@ -51,7 +51,7 @@
       <td data-label="Actor">{{ if .ActorDisplay }}{{ .ActorDisplay }}{{ else }}<span class="note">{{ .ActorType }}</span>{{ end }}
         <span class="note">{{ .ActorType }}</span></td>
       <td data-label="Target">
-        {{- if .HostLink }}<a href="{{ .HostLink }}">{{ .TargetID }}</a>
+        {{- if .MembershipLink }}<a href="{{ .MembershipLink }}">{{ .TargetID }}</a>
         {{- else if .TargetID }}<code>{{ .TargetID }}</code>
         {{- else }}<span class="note">—</span>{{ end }}
         {{- if .TargetType }}<span class="note">{{ .TargetType }}</span>{{ end }}</td>

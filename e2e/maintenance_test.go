@@ -30,12 +30,12 @@ func TestMaintenancePrunesBlocklist(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	var host wire.HostResponse
-	h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "prunable", OverlayAddr: "10.42.20.5",
 		RoleID: h.roleID.String(),
 	}, &host)
-	hostID := uuid.MustParse(host.ID)
+	membershipID := uuid.MustParse(host.ID)
 
 	// Give it a certificate that expired long ago, then block it.
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
@@ -44,13 +44,13 @@ func TestMaintenancePrunesBlocklist(t *testing.T) {
 			return err
 		}
 		c := store.Certificate{
-			HostID: hostID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+			MembershipID: membershipID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
 			CertVer: 2, NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-60 * 24 * time.Hour),
 		}
 		if err := tx.InsertCertificate(ctx, &c); err != nil {
 			return err
 		}
-		_, err = tx.BlockHost(ctx, hostID, "test")
+		_, err = tx.BlockHost(ctx, membershipID, "test")
 		return err
 	})
 	if err != nil {
@@ -92,16 +92,16 @@ func TestMaintenancePrunesExpiredCredentials(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	ctx := context.Background()
 
-	var host wire.HostResponse
-	h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "cred-prune", OverlayAddr: "10.42.20.9",
 		RoleID: h.roleID.String(),
 	}, &host)
-	hostID := uuid.MustParse(host.ID)
+	membershipID := uuid.MustParse(host.ID)
 
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		c := store.EnrollmentCredential{
-			NetworkID: h.netID, HostID: &hostID, Method: store.MethodCode,
+			NetworkID: h.netID, MembershipID: &membershipID, Method: store.MethodCode,
 			ExpiresAt: time.Now().Add(-time.Hour),
 		}
 		return tx.CreateEnrollmentCredential(ctx, &c, []byte("stale-"+uuid.NewString()))
@@ -129,15 +129,15 @@ func TestMaintenanceReportsOverdueRenewals(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	var host wire.HostResponse
-	h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "overdue", OverlayAddr: "10.42.20.11",
 		RoleID: h.roleID.String(),
 	}, &host)
-	hostID := uuid.MustParse(host.ID)
+	membershipID := uuid.MustParse(host.ID)
 
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		if err := tx.SetHostState(ctx, hostID, store.HostActive); err != nil {
+		if err := tx.SetHostState(ctx, membershipID, store.MembershipActive); err != nil {
 			return err
 		}
 		caRow, err := tx.GetActiveCA(ctx, h.netID)
@@ -146,7 +146,7 @@ func TestMaintenanceReportsOverdueRenewals(t *testing.T) {
 		}
 		// Past its midpoint: issued 20h ago with a 24h lifetime.
 		c := store.Certificate{
-			HostID: hostID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+			MembershipID: membershipID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
 			CertVer: 2, NotBefore: now.Add(-20 * time.Hour), NotAfter: now.Add(4 * time.Hour),
 		}
 		return tx.InsertCertificate(ctx, &c)
@@ -199,14 +199,14 @@ func TestFailedEnrollmentIsAudited(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	ctx := context.Background()
 
-	var host wire.HostResponse
-	h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "audited-failure", OverlayAddr: "10.42.20.21",
 		RoleID: h.roleID.String(),
 	}, &host)
 
 	var code wire.EnrollmentCodeResponse
-	h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, &code)
+	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &code)
 
 	// Redeem with a public key for the wrong curve: redemption succeeds (so the
 	// host is known), issuance then fails.

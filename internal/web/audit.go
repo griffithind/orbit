@@ -52,10 +52,10 @@ type auditRecordView struct {
 	TargetID     string
 	SourceIP     string
 	Meta         string
-	// HostLink is set when the target is a host, so an entry is one click from
+	// MembershipLink is set when the target is a host, so an entry is one click from
 	// the machine it describes. An audit line that names a uuid and stops is a
 	// line that sends the reader to a search box.
-	HostLink string
+	MembershipLink string
 }
 
 const auditPageSize = 200
@@ -66,15 +66,14 @@ const auditPageSize = 200
 // incident actually asks about, and a select with forty options is one nobody
 // reads to the end of. The free-text target filter covers the rest.
 var auditActions = []string{
-	store.ActionHostBlocked,
-	store.ActionHostUnblocked,
-	store.ActionHostCreated,
-	store.ActionHostDeleted,
-	store.ActionHostUpdated,
+	store.ActionMembershipBlocked,
+	store.ActionMembershipUnblocked,
+	store.ActionMembershipCreated,
+	store.ActionMembershipDeleted,
+	store.ActionMembershipUpdated,
 	store.ActionEnrollCodeCreated,
 	store.ActionEnrolled,
 	store.ActionEnrollFailed,
-	store.ActionRecovered,
 	store.ActionCAActivated,
 	store.ActionCAForceActivated,
 	store.ActionCARetired,
@@ -130,7 +129,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) error {
 			rv.SourceIP = rec.SourceIP.String()
 		}
 		if rec.TargetType == "host" && rec.TargetID != "" {
-			rv.HostLink = "/ui/hosts/" + rec.TargetID
+			rv.MembershipLink = "/ui/memberships/" + rec.TargetID
 		}
 		v.Records = append(v.Records, rv)
 	}

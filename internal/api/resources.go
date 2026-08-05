@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -117,10 +119,10 @@ func (s *Server) resourceRoutes() []route {
 		// material through a different path — the same reasoning that keeps
 		// GET /v1/cas behind cas:read.
 		a("GET /v1/networks/{id}/trust-bundle", "cas:read", s.handleTrustBundle),
-		// hosts:read, for the reason GET /v1/hosts/{id}/certificates uses it:
+		// hosts:read, for the reason GET /v1/memberships/{id}/certificates uses it:
 		// the response names hosts and certificates but carries no PEM and no
 		// key material.
-		a("GET /v1/networks/{id}/certificates/expiring", "hosts:read", s.handleExpiringCertificates),
+		a("GET /v1/networks/{id}/certificates/expiring", "memberships:read", s.handleExpiringCertificates),
 		a("GET /v1/networks/{id}/replicas", "networks:read", s.handleReplicas),
 
 		// No scope, and the only route allowed one. routes.go documents why,
@@ -319,22 +321,22 @@ func (s *Server) handleExpiringCertificates(w http.ResponseWriter, r *http.Reque
 		out = make([]wire.ExpiringCertificateResponse, 0, len(certs))
 		for _, c := range certs {
 			e := wire.ExpiringCertificateResponse{
-				HostID:      c.HostID.String(),
-				Fingerprint: c.Fingerprint,
-				NotAfter:    c.NotAfter.Format(time.RFC3339),
-				RenewAt:     c.RenewAt().Format(time.RFC3339),
+				MembershipID: c.MembershipID.String(),
+				Fingerprint:  c.Fingerprint,
+				NotAfter:     c.NotAfter.Format(time.RFC3339),
+				RenewAt:      c.RenewAt().Format(time.RFC3339),
 			}
 
 			// One lookup per certificate. Acceptable only because limit bounds
 			// it: a name and a last-seen are the two things that make this list
 			// actionable, and a host id alone sends the reader back to another
 			// endpoint for every row. The right fix is for the store query to
-			// return them — it already joins orbit.host to filter on state.
-			host, err := tx.GetHost(ctx, c.HostID)
+			// return them — it already joins orbit.membership to filter on state.
+			host, err := tx.GetHost(ctx, c.MembershipID)
 			if err != nil {
 				return err
 			}
-			e.HostName = host.Name
+			e.MembershipName = host.Name
 			if host.LastSeenAt != nil {
 				e.LastSeenAt = host.LastSeenAt.Format(time.RFC3339)
 			}
@@ -430,10 +432,10 @@ func (s *Server) handleReplicas(w http.ResponseWriter, r *http.Request) {
 		out = make([]wire.ControlPlaneResponse, 0, len(live))
 		for _, cp := range live {
 			out = append(out, wire.ControlPlaneResponse{
-				HostID:     cp.HostID.String(),
-				Addr:       cp.Addr.String(),
-				AgentPort:  cp.AgentPort,
-				LastSeenAt: cp.LastSeenAt.Format(time.RFC3339),
+				MembershipID: cp.MembershipID.String(),
+				Addr:         cp.Addr.String(),
+				AgentPort:    cp.AgentPort,
+				LastSeenAt:   cp.LastSeenAt.Format(time.RFC3339),
 			})
 		}
 		return nil
@@ -462,8 +464,8 @@ func renderBlocklist(networkID string, entries []wire.BlocklistEntryResponse) st
 	fmt.Fprintf(&b, "revoked  %d fingerprint(s) distributed to every host\n\n", len(entries))
 	for _, e := range entries {
 		fmt.Fprintf(&b, "  %s", e.Fingerprint)
-		if e.HostName != "" {
-			fmt.Fprintf(&b, "  %s", e.HostName)
+		if e.MembershipName != "" {
+			fmt.Fprintf(&b, "  %s", e.MembershipName)
 		}
 		b.WriteString("\n")
 	}
@@ -516,7 +518,7 @@ func renderExpiring(certs []wire.ExpiringCertificateResponse, window time.Durati
 			}
 		}
 		fmt.Fprintf(&b, "  %-28s %-14s %-22s %s\n",
-			truncate(c.HostName, 28), renew, c.NotAfter, seen)
+			truncate(c.MembershipName, 28), renew, c.NotAfter, seen)
 	}
 
 	if overdue > 0 {
@@ -602,12 +604,32 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		ttl = d
 	}
 
+	// The network's identity key, and the ID that commits to it. Generated
+	// before anything is written, because a network without one cannot be
+	// safely joined and half-creating it would leave a row that has to be
+	// cleaned up by hand.
+	if s.cfg.NetworkKeyDir == "" {
+		writeErr(w, http.StatusServiceUnavailable,
+			"this server is not configured to create networks: it has nowhere to put the "+
+				"network identity key. Start orbitd with -key-dir, or create the network "+
+				"with `orbitd bootstrap`")
+		return
+	}
+	identityPub, identityRef, err := s.writeNetworkIdentity()
+	if err != nil {
+		s.log.Error("could not write a network identity key", "dir", s.cfg.NetworkKeyDir, "error", err)
+		writeErr(w, http.StatusInternalServerError, "could not store the network identity key")
+		return
+	}
+
 	net := store.Network{
-		Name:    req.Name,
-		CIDRs:   cidrs,
-		CertTTL: ttl,
-		Curve:   cert.Curve_CURVE25519.String(),
-		CertVer: 2,
+		Name:              req.Name,
+		CIDRs:             cidrs,
+		CertTTL:           ttl,
+		Curve:             cert.Curve_CURVE25519.String(),
+		CertVer:           2,
+		IdentityPublicKey: identityPub,
+		IdentitySignerRef: identityRef,
 	}
 	if req.Curve != "" {
 		if req.Curve != "CURVE25519" && req.Curve != "P256" {
@@ -624,7 +646,7 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		net.CertVer = int16(req.CertVersion)
 	}
 
-	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
 		if err := tx.CreateNetwork(ctx, &net); err != nil {
 			return err
 		}
@@ -977,7 +999,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 			meta, merr := json.Marshal(map[string]any{
 				"groups_before":              change.Before.Groups,
 				"groups_after":               change.After.Groups,
-				"hosts_awaiting_certificate": lag.Hosts,
+				"hosts_awaiting_certificate": lag.Memberships,
 				"certificates_converge_by":   lag.formatted(),
 			})
 			if merr != nil {
@@ -1014,10 +1036,10 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.log.Warn("role groups changed; hosts keep the old groups until they renew",
-		"role", roleID, "hosts", lag.Hosts, "convergeBy", lag.formatted())
+		"role", roleID, "hosts", lag.Memberships, "convergeBy", lag.formatted())
 
 	resp.GroupsChanged = true
-	resp.HostsAwaitingCertificate = lag.Hosts
+	resp.MembershipsAwaitingCertificate = lag.Memberships
 	resp.CertificatesConvergeBy = lag.formatted()
 	resp.Detail = lag.detail()
 	writeJSON(w, http.StatusAccepted, resp)
@@ -1025,12 +1047,12 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 
 // certificateLag is how far behind a role's hosts are after a group change.
 type certificateLag struct {
-	// Hosts is how many are still presenting a certificate with the old
-	// groups. Hosts that have never enrolled are excluded: they have no stale
+	// Memberships is how many are still presenting a certificate with the old
+	// groups. Memberships that have never enrolled are excluded: they have no stale
 	// certificate, and will be issued the new groups the first time they ask.
-	Hosts int
+	Memberships int
 
-	// ConvergeBy is when the last of them renews. Zero when Hosts is zero.
+	// ConvergeBy is when the last of them renews. Zero when Memberships is zero.
 	ConvergeBy time.Time
 }
 
@@ -1055,10 +1077,10 @@ func certificateLagFor(hosts []store.RoleHost, now time.Time) certificateLag {
 		if h.CertNotAfter.IsZero() {
 			continue // never enrolled; nothing stale to replace
 		}
-		if h.State != store.HostEnrolled && h.State != store.HostActive {
+		if h.State != store.MembershipEnrolled && h.State != store.MembershipActive {
 			continue // suspended or deleted; not renewing, and not on the mesh
 		}
-		lag.Hosts++
+		lag.Memberships++
 
 		at := policy.RenewAt(h.CertNotBefore, h.CertNotAfter, h.ID.String())
 		if at.Before(now) {
@@ -1079,14 +1101,14 @@ func (l certificateLag) formatted() string {
 }
 
 func (l certificateLag) detail() string {
-	if l.Hosts == 0 {
+	if l.Memberships == 0 {
 		return "firewall and configuration changes are live; no host currently holds a certificate for this role"
 	}
 	return fmt.Sprintf(
 		"firewall and configuration changes are live, but groups are carried in the signed certificate: "+
 			"%d host(s) keep the previous groups until they renew, the last by %s. "+
 			"Revoke a host's certificate to force it sooner",
-		l.Hosts, l.formatted())
+		l.Memberships, l.formatted())
 }
 
 // handleDeleteRole removes a role no host carries.
@@ -1135,7 +1157,7 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, wire.RoleInUseError{
 				Error: "role is still assigned to hosts; reassign them first. " +
 					"Deleting it would change the firewall on every one of them at once",
-				Hosts: hosts,
+				Memberships: hosts,
 			})
 			return
 		}
@@ -1337,10 +1359,10 @@ func (s *Server) handleActivateCA(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if conv.ConfigApplied < conv.HostsTotal && !req.AcknowledgeCutoff {
+		if conv.ConfigApplied < conv.MembershipsTotal && !req.AcknowledgeCutoff {
 			for _, l := range conv.Lagging {
 				lagging = append(lagging, wire.LaggingHost{
-					HostID: l.HostID.String(), Name: l.Name,
+					MembershipID: l.MembershipID.String(), Name: l.Name,
 					AppliedConfigEpoch:    l.AppliedConfigEpoch,
 					AppliedBlocklistEpoch: l.AppliedBlocklistEpoch,
 					LastSeenAt:            l.LastSeenAt,
@@ -1355,13 +1377,13 @@ func (s *Server) handleActivateCA(w http.ResponseWriter, r *http.Request) {
 
 		action := store.ActionCAActivated
 		meta := []byte(`{}`)
-		if conv.ConfigApplied < conv.HostsTotal {
+		if conv.ConfigApplied < conv.MembershipsTotal {
 			action = store.ActionCAForceActivated
 			meta = []byte(fmt.Sprintf(`{"hosts_cut_off":%d,"hosts_total":%d}`,
-				conv.HostsTotal-conv.ConfigApplied, conv.HostsTotal))
+				conv.MembershipsTotal-conv.ConfigApplied, conv.MembershipsTotal))
 			s.log.Warn("CA activated before convergence; unconverged hosts are cut off",
 				"ca", caID, "network", row.NetworkID,
-				"cutOff", conv.HostsTotal-conv.ConfigApplied, "total", conv.HostsTotal)
+				"cutOff", conv.MembershipsTotal-conv.ConfigApplied, "total", conv.MembershipsTotal)
 		}
 		e := id.Audit(action, "ca", caID.String())
 		e.Meta = meta
@@ -1726,7 +1748,8 @@ func networkResponse(n *store.Network) wire.NetworkResponse {
 		cidrs = append(cidrs, c.String())
 	}
 	out := wire.NetworkResponse{
-		ID: n.ID.String(), Slug: n.Slug, Name: n.Name, CIDRs: cidrs,
+		NetworkID: n.NetworkID,
+		ID:        n.ID.String(), Slug: n.Slug, Name: n.Name, CIDRs: cidrs,
 		Curve: n.Curve, CertVersion: int(n.CertVer), CertTTL: n.CertTTL.String(),
 		ConfigMode:     n.ConfigMode,
 		FirewallSource: n.FirewallSource,
@@ -1767,4 +1790,45 @@ func containsStr(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// writeNetworkIdentity generates a network identity keypair and stores the
+// private half.
+//
+// Named after the network ID rather than the network's uuid or slug: the id is
+// derived from the key, so the file name cannot disagree with its contents, and
+// a directory of these is self-describing without the database.
+//
+// Mode 0600, and the passphrase if one is configured — the same treatment the CA
+// key gets, because the consequence is comparable: this key cannot mint a
+// certificate, but anyone holding it can convince a JOINING machine that their
+// control plane is this network.
+func (s *Server) writeNetworkIdentity() ([]byte, string, error) {
+	pub, priv, err := ca.GenerateNetworkIdentity()
+	if err != nil {
+		return nil, "", err
+	}
+	networkID, err := ca.NetworkIDFor(pub)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if err := os.MkdirAll(s.cfg.NetworkKeyDir, 0o700); err != nil {
+		return nil, "", err
+	}
+	path := filepath.Join(s.cfg.NetworkKeyDir, "network-"+networkID+".key")
+	if err := os.WriteFile(path, ca.MarshalNetworkIdentityPEM(priv), 0o600); err != nil {
+		return nil, "", err
+	}
+
+	passphrase, err := ca.CAKeyPassphrase()
+	if err != nil {
+		return nil, "", err
+	}
+	if len(passphrase) > 0 {
+		if err := ca.EncryptKeyFile(path, passphrase); err != nil {
+			return nil, "", err
+		}
+	}
+	return pub, "file://" + path, nil
 }

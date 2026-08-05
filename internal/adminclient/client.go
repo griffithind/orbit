@@ -98,7 +98,7 @@ func (e *APIError) Lagging() []wire.LaggingHost {
 func (e *APIError) BlockingHosts() []wire.RoleHost {
 	var body wire.RoleInUseError
 	_ = json.Unmarshal(e.Body, &body)
-	return body.Hosts
+	return body.Memberships
 }
 
 // MissingScope extracts the scope a 403 named.

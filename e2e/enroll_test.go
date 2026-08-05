@@ -37,6 +37,7 @@ import (
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/db"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/mesh"
 	"github.com/griffithind/orbit/internal/nebulacfg"
@@ -64,12 +65,40 @@ type harness struct {
 	server  *httptest.Server
 	netID   uuid.UUID
 	netName string
-	roleID  uuid.UUID
-	token   string
-	caKey   string
+
+	// netSlug and networkID are this network's two immutable references: the
+	// directory name on every machine, and the verifiable ID a joining machine
+	// can check the control plane against.
+	netSlug   string
+	networkID string
+
+	roleID uuid.UUID
+	token  string
+	caKey  string
+
+	// membershipDevices remembers the device key each test host joined with, so a
+	// test that needs to act AS that machine — claiming, re-reporting — can.
+	membershipDevices map[string]*device.Identity
+
+	// curve is this network's curve, chosen once at bootstrap and permanent
+	// thereafter — nebula refuses a certificate whose curve differs from its
+	// signer's. Defaults to CURVE25519 so tests written before the choice
+	// existed behave identically; setupCurve overrides it.
+	curve cert.Curve
 }
 
 func setup(t *testing.T) *harness {
+	t.Helper()
+	return setupCurve(t, cert.Curve_CURVE25519)
+}
+
+// setupCurve is setup on a network of the given curve.
+//
+// P-256 is what `orbitd bootstrap` now produces by default, because it is the
+// only curve on which a host key can live in a TPM or Secure Enclave. That made
+// it the untested path: every test here bootstrapped 25519 explicitly, so
+// nothing exercised what a new deployment actually gets.
+func setupCurve(t *testing.T, curve cert.Curve) *harness {
 	t.Helper()
 	ctx := context.Background()
 
@@ -95,7 +124,7 @@ func setup(t *testing.T) *harness {
 	}
 	t.Cleanup(st.Close)
 
-	h := &harness{t: t, store: st}
+	h := &harness{t: t, store: st, curve: curve, membershipDevices: map[string]*device.Identity{}}
 	h.bootstrap(t)
 	return h
 }
@@ -107,16 +136,16 @@ func (h *harness) bootstrap(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	caPub, caPriv, err := ca.GenerateCAKey(cert.Curve_CURVE25519)
+	caPub, caPriv, err := ca.GenerateCAKey(h.curve)
 	if err != nil {
 		t.Fatalf("generate ca key: %v", err)
 	}
 	h.caKey = filepath.Join(dir, "ca.key")
-	if err := os.WriteFile(h.caKey, cert.MarshalSigningPrivateKeyToPEM(cert.Curve_CURVE25519, caPriv), 0o600); err != nil {
+	if err := os.WriteFile(h.caKey, cert.MarshalSigningPrivateKeyToPEM(h.curve, caPriv), 0o600); err != nil {
 		t.Fatalf("write ca key: %v", err)
 	}
 
-	signer := ca.NewMemorySigner(cert.Curve_CURVE25519, caPub, caPriv)
+	signer := ca.NewMemorySigner(h.curve, caPub, caPriv)
 	now := time.Now()
 	caCert, err := ca.CreateCA(ctx, signer, ca.CAParams{
 		Name:      "e2e-ca",
@@ -139,22 +168,27 @@ func (h *harness) bootstrap(t *testing.T) {
 	h.netName = "e2e-" + uuid.NewString()[:8]
 
 	err = h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		identityPub, identityRef := h.writeNetworkIdentity(t, dir)
 		net := store.Network{
-			Name:    h.netName,
-			CIDRs:   []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
-			CertVer: int16(cert.Version2),
-			Curve:   cert.Curve_CURVE25519.String(),
-			CertTTL: 24 * time.Hour,
+			Name:              h.netName,
+			CIDRs:             []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
+			CertVer:           int16(cert.Version2),
+			Curve:             h.curve.String(),
+			CertTTL:           24 * time.Hour,
+			IdentityPublicKey: identityPub,
+			IdentitySignerRef: identityRef,
 		}
 		if err := tx.CreateNetwork(ctx, &net); err != nil {
 			return err
 		}
 		h.netID = net.ID
+		h.netSlug = net.Slug
+		h.networkID = net.NetworkID
 
 		caRow := store.CA{
 			NetworkID: net.ID, Name: "e2e-ca", Fingerprint: fingerprint,
 			CertPEM: string(caPEM), SignerRef: "file://" + h.caKey,
-			Curve:     cert.Curve_CURVE25519.String(),
+			Curve:     h.curve.String(),
 			NotBefore: caCert.NotBefore(), NotAfter: caCert.NotAfter(),
 		}
 		if err := tx.CreateCA(ctx, &caRow); err != nil {
@@ -194,19 +228,16 @@ func (h *harness) bootstrap(t *testing.T) {
 func (h *harness) serve(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatalf("hasher: %v", err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
 	})
 
 	srv := api.New(h.store, svc, api.Config{
+		NetworkKeyDir: t.TempDir(),
 		Agent:         &api.AgentListener{NetworkID: h.netID},
 		SignerFactory: ca.FileSignerFactory,
 		// Off by default in the harness: most tests enroll many hosts in a
@@ -233,19 +264,16 @@ func (h *harness) serve(t *testing.T, nebulaPort int) *httptest.Server {
 func (h *harness) serveOverlay(t *testing.T, n *nebulaNode, port, nebulaPort int) string {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
 	})
 	handler := api.New(h.store, svc, api.Config{
-		Agent: &api.AgentListener{NetworkID: h.netID},
+		NetworkKeyDir: t.TempDir(),
+		Agent:         &api.AgentListener{NetworkID: h.netID},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()
 
 	ln, err := n.svc.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -264,21 +292,18 @@ func (h *harness) serveOverlay(t *testing.T, n *nebulaNode, port, nebulaPort int
 func (h *harness) serveOverlayWithPush(t *testing.T, n *nebulaNode, port, nebulaPort int, notifier *notify.Notifier) string {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
 	})
 	handler := api.New(h.store, svc, api.Config{
-		Agent:       &api.AgentListener{NetworkID: h.netID},
-		Notifier:    notifier,
-		MaxWatchers: 1000,
+		NetworkKeyDir: t.TempDir(),
+		Agent:         &api.AgentListener{NetworkID: h.netID},
+		Notifier:      notifier,
+		MaxWatchers:   1000,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()
 
 	ln, err := n.svc.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -305,19 +330,16 @@ func overlayHTTPClient(n *nebulaNode) *http.Client {
 func (h *harness) serveRateLimited(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
 	})
 	srv := api.New(h.store, svc, api.Config{
-		EnrollLimit: api.LimiterConfig{PerMinute: 6, Burst: 6, GlobalPerMinute: 600, GlobalBurst: 200},
+		NetworkKeyDir: t.TempDir(),
+		EnrollLimit:   api.LimiterConfig{PerMinute: 6, Burst: 6, GlobalPerMinute: 600, GlobalBurst: 200},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	mux := http.NewServeMux()
@@ -404,8 +426,8 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 	t.Helper()
 	ctx := context.Background()
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID:    h.netID.String(),
 		Name:         name,
 		OverlayAddr:  addr,
@@ -418,7 +440,7 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 	}
 
 	var codeResp wire.EnrollmentCodeResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, &codeResp); code != http.StatusCreated {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp); code != http.StatusCreated {
 		t.Fatalf("enrollment code for %s: status %d", name, code)
 	}
 	if codeResp.Code == "" {
@@ -426,7 +448,7 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 	}
 
 	// From here on this is exactly what `orbit agent enroll` does.
-	kp, err := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, err := agent.GenerateKeypair(h.curve)
 	if err != nil {
 		t.Fatalf("generate keypair: %v", err)
 	}
@@ -451,7 +473,7 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 	// agent loop need it too.
 	if err := agent.WriteState(dir, agent.State{
 		BaseURL:        ts.URL,
-		HostID:         resp.HostID,
+		MembershipID:   resp.MembershipID,
 		ConfigEpoch:    resp.ConfigEpoch,
 		BlocklistEpoch: resp.BlocklistEpoch,
 	}); err != nil {
@@ -511,7 +533,7 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 	}
 
 	lhCfg := readFile(t, agent.DefaultLayout(lh.dir).ConfigPath())
-	if strings.Contains(lhCfg, "hosts:\n        - ") {
+	if strings.Contains(lhCfg, "memberships:\n        - ") {
 		t.Errorf("lighthouse was told to query a lighthouse:\n%s", lhCfg)
 	}
 
@@ -677,8 +699,8 @@ func TestEnrollmentCodeIsSingleUse(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	ctx := context.Background()
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "single-use", OverlayAddr: "10.42.0.20",
 		RoleID: h.roleID.String(),
 	}, &host); code != http.StatusCreated {
@@ -686,7 +708,7 @@ func TestEnrollmentCodeIsSingleUse(t *testing.T) {
 	}
 
 	var codeResp wire.EnrollmentCodeResponse
-	h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, &codeResp)
+	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp)
 
 	client := agent.NewClient(ts.URL)
 	kp1, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
@@ -715,17 +737,17 @@ func TestBlockedHostCannotEnroll(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	ctx := context.Background()
 
-	var host wire.HostResponse
-	h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "to-block", OverlayAddr: "10.42.0.30",
 		RoleID: h.roleID.String(),
 	}, &host)
 
 	var codeResp wire.EnrollmentCodeResponse
-	h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, &codeResp)
+	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp)
 
 	var blocked wire.BlockResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/block", nil, &blocked); code != http.StatusOK {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/block", nil, &blocked); code != http.StatusOK {
 		t.Fatalf("block: %d", code)
 	}
 	if blocked.BlocklistEpoch == 0 {
@@ -744,13 +766,17 @@ func TestAdminRequiresToken(t *testing.T) {
 	h := setup(t)
 	ts := h.serve(t, freeUDPPort(t))
 
-	resp, err := http.Post(ts.URL+"/v1/hosts", "application/json", strings.NewReader(`{}`))
+	// A route that MUTATES, so a missing token cannot be mistaken for a
+	// harmless read being refused. Reserving is what admits a machine to the
+	// network now, which makes it the one worth proving is closed.
+	resp, err := http.Post(ts.URL+"/v1/networks/"+h.netID.String()+"/reservations",
+		"application/json", strings.NewReader(`{"name":"unauthenticated"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("unauthenticated host creation = %d, want 401", resp.StatusCode)
+		t.Errorf("unauthenticated reservation = %d, want 401", resp.StatusCode)
 	}
 }
 
@@ -866,4 +892,140 @@ func readFile(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// membershipSpec is what a test wants a membership to be.
+//
+// It carries the same fields POST /v1/memberships took, because the tests that use it
+// want the same outcome: a membership that exists, has an address, and has never
+// held a certificate. What changed is how it gets there — see createHost.
+type membershipSpec struct {
+	NetworkID    string
+	Name         string
+	OverlayAddr  string
+	RoleID       string
+	IsLighthouse bool
+	IsRelay      bool
+	StaticAddrs  []string
+	Tags         []string
+}
+
+// createHost produces a membership the way the product now does it: an operator
+// reserves a place, and a machine takes it.
+//
+// This replaced a single POST /v1/memberships, and the reason the replacement is three
+// calls rather than one is the invariant it buys. There is no longer any moment
+// at which a membership exists without a device — the row is created at
+// redemption, already naming the machine that presented the code. That is what
+// makes device_id NOT NULL reachable (docs/model.md §5, invariant 1).
+//
+// The end state is identical to what POST /v1/memberships produced: state `created`,
+// an allocated or pinned address, no certificate. Tests that assert on that
+// state did not need to change.
+//
+// Topology flags are PATCHed afterwards rather than reserved. A reservation
+// carries name, address and role — the things an unattended machine must have
+// decided for it — and a lighthouse is set up by an operator who is present.
+// The signature mirrors adminPost — spec in, response out, status returned —
+// so the call sites that used to POST /v1/memberships read the same as they did.
+func (h *harness) createHost(t *testing.T, baseURL string, spec membershipSpec, out *wire.MembershipResponse) int {
+	t.Helper()
+	ctx := context.Background()
+
+	var code wire.EnrollmentCodeResponse
+	networkRef := spec.NetworkID
+	if networkRef == "" {
+		networkRef = h.netID.String()
+	}
+	if status := h.adminPost(t, baseURL+"/v1/networks/"+networkRef+"/reservations",
+		wire.ReserveRequest{
+			Name:        spec.Name,
+			OverlayAddr: spec.OverlayAddr,
+			RoleID:      spec.RoleID,
+		}, &code); status != http.StatusCreated {
+		return status
+	}
+
+	// A fresh device per host. Real machines each have their own, and sharing
+	// one here would make every test host the same device — which would hide
+	// exactly the bugs the device model exists to prevent.
+	id, err := device.Generate()
+	if err != nil {
+		t.Fatalf("device key: %v", err)
+	}
+	client := agent.NewClient(baseURL)
+	joined, err := client.JoinWithCode(ctx, id, networkRef, spec.Name, "", "", code.Code, time.Now())
+	if err != nil {
+		t.Fatalf("join %s: %v", spec.Name, err)
+	}
+
+	var host wire.MembershipResponse
+	if status := h.adminReq(t, http.MethodGet,
+		baseURL+"/v1/memberships/"+joined.MembershipID, nil, &host); status != http.StatusOK {
+		t.Fatalf("read %s after join: status %d", spec.Name, status)
+	}
+
+	if spec.IsLighthouse || spec.IsRelay || len(spec.StaticAddrs) > 0 || len(spec.Tags) > 0 {
+		req := wire.UpdateHostRequest{
+			IsLighthouse: &spec.IsLighthouse,
+			IsRelay:      &spec.IsRelay,
+		}
+		if len(spec.StaticAddrs) > 0 {
+			req.StaticAddrs = &spec.StaticAddrs
+		}
+		if len(spec.Tags) > 0 {
+			req.Tags = &spec.Tags
+		}
+		if status := h.adminReq(t, http.MethodPatch,
+			baseURL+"/v1/memberships/"+host.ID, req, &host); status != http.StatusOK {
+			t.Fatalf("set topology on %s: status %d", spec.Name, status)
+		}
+	}
+
+	// The device that joined keeps its key: `orbit agent enroll` with a code
+	// still works for a membership created this way, which is what lets the
+	// existing enrollment tests go on testing enrollment.
+	h.membershipDevices[host.ID] = id
+	if out != nil {
+		*out = host
+	}
+	return http.StatusCreated
+}
+
+// testDeviceKey is a control plane's own device identity for a test.
+//
+// The control plane is a machine on its own network like any other, so its
+// membership names a device — there is no "system" exemption, and adding one
+// would mean a nullable column and a nil branch on every read for exactly one
+// row. Each test gets its own, because each spins up its own control plane.
+func testDeviceKey(t *testing.T) []byte {
+	t.Helper()
+	id, err := device.Generate()
+	if err != nil {
+		t.Fatalf("control plane device key: %v", err)
+	}
+	return id.PublicKey()
+}
+
+// writeNetworkIdentity generates a network identity keypair and writes the
+// private half where the control plane will look for it.
+//
+// A real file, unlike the store package's own tests, because these exercise the
+// PROOF: a join signs a challenge with this key, and the agent verifies it
+// against the network ID. Faking the ref would test everything about the scheme
+// except the part that makes it worth having.
+//
+// Mode 0600 because LoadNetworkIdentity refuses anything looser — the same
+// refusal the CA key gets, and one this harness would otherwise trip over.
+func (h *harness) writeNetworkIdentity(t *testing.T, dir string) ([]byte, string) {
+	t.Helper()
+	pub, priv, err := ca.GenerateNetworkIdentity()
+	if err != nil {
+		t.Fatalf("generate network identity: %v", err)
+	}
+	path := filepath.Join(dir, "network-identity.key")
+	if err := os.WriteFile(path, ca.MarshalNetworkIdentityPEM(priv), 0o600); err != nil {
+		t.Fatalf("write network identity: %v", err)
+	}
+	return pub, "file://" + path
 }

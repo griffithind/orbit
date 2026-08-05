@@ -150,7 +150,7 @@ a push is O(N² × entries) bytes. Measured by
 
 **All-to-all — three entries, every host may reach every host:**
 
-| hosts | rules | per-host config | fleet push |
+| memberships | rules | per-membership config | fleet push |
 |------:|------:|----------------:|-----------:|
 | 100   | 594   | 43.3 KiB        | 4.2 MiB    |
 | 500   | 2994  | 216.1 KiB       | 105.5 MiB  |
@@ -159,13 +159,13 @@ a push is O(N² × entries) bytes. Measured by
 
 **Tiered — nine entries, tier-to-tier plus one wildcard:**
 
-| hosts | rules | per-host config | fleet push |
+| memberships | rules | per-membership config | fleet push |
 |------:|------:|----------------:|-----------:|
 | 100   | 38    | 3.7 KiB         | 369.2 KiB  |
 | 1000  | 375   | 27.5 KiB        | 26.8 MiB   |
 | 5000  | 1875  | 134.1 KiB       | 655.0 MiB  |
 
-Realistic policies are tiered and stay cheap to about five thousand hosts. The
+Realistic policies are tiered and stay cheap to about five thousand memberships. The
 all-to-all shape is where address compilation breaks down, and it is exactly the
 shape a group-based rule expresses in one line.
 
@@ -245,13 +245,13 @@ Two mechanisms make `certificate` binding workable, and Orbit already has both:
 **On removal: pull the renewal forward.** The mechanism exists and is already
 used for exactly this shape of problem: an address change stamps
 `addr_changed_at`, which is compared against the active certificate's
-`issued_at` to pull the host's renewal forward
+`issued_at` to pull the membership's renewal forward
 (`internal/store/address.go:372`, `internal/store/network.go:704`). A
 certificate-bound tag change is the same problem with a different column, and
 should reuse the mechanism rather than invent one. That reduces the exposure
 window from a certificate lifetime to a round trip plus a handshake.
 When the removal is a genuine revocation rather than a reorganisation, blocklist
-the outstanding fingerprint as well — which severs the host entirely until it
+the outstanding fingerprint as well — which severs the membership entirely until it
 re-enrols, and is the correct heaviness for that case.
 
 **On addition: a transitional address overlay.** Because the rule set is a
@@ -269,9 +269,9 @@ compiler work changes it.
 
 Certificates are sent in the handshake, and Nebula imposes no size limit below
 `MaxCertificateSize` (65536, `cert/cert_v2.go:43`). The practical limit is path
-MTU: a host in many tags produces a larger handshake packet, and the default tun
+MTU: a membership in many tags produces a larger handshake packet, and the default tun
 MTU is 1300 (`overlay/tun.go:13`). We have not measured where a group list
-starts to fragment handshakes. That measurement gates any per-host tag limit we
+starts to fragment handshakes. That measurement gates any per-membership tag limit we
 advertise, and it should exist before certificate binding is offered.
 
 ---
@@ -280,7 +280,7 @@ advertise, and it should exist before certificate binding is offered.
 
 Nebula cannot express "allow A to B except C". Orbit can, because Orbit resolves
 membership on the server: the exclusion is a set difference computed at compile
-time, and what reaches the host is a plain union of allowances.
+time, and what reaches the membership is a plain union of allowances.
 
 ```
 allow:
@@ -331,7 +331,7 @@ stateful connection tracking and live re-validation on rule change. It is a good
 *enforcement target* and a poor *authoring language*.
 
 Orbit's compiler is the policy engine. Everything expressive — exclusions,
-selector resolution, per-host tailoring, binding choice — happens on the server
+selector resolution, per-membership tailoring, binding choice — happens on the server
 and lands as the simplest artifact Nebula can enforce. The certificate is used
 for what only it can do: bind an address to an identity, and carry the structural
 labels that would otherwise dominate rule count.

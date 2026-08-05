@@ -23,6 +23,7 @@ package ca
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -131,4 +132,29 @@ func SignBytes(curve cert.Curve, key []byte, certBytes []byte) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported curve: %s", curve)
 	}
+}
+
+// SignDigestBytes signs an already-computed digest with a raw private key.
+//
+// P-256 and SHA-256 only, and the refusal is the point rather than a gap.
+// Ed25519 signs the message itself: given only a digest there is no way to
+// produce a signature the verifier would accept, because the preimage is exactly
+// what is missing. Returning an error here is what makes that impossible to get
+// wrong somewhere further away, where it would look like a verification bug.
+func SignDigestBytes(curve cert.Curve, key, digest []byte, hash crypto.Hash) ([]byte, error) {
+	if curve != cert.Curve_P256 {
+		return nil, fmt.Errorf("%w: %s signs the message, not a digest", ErrDigestSigningUnsupported, curve)
+	}
+	if hash != crypto.SHA256 {
+		return nil, fmt.Errorf("%w: want SHA-256, got %s", ErrDigestSigningUnsupported, hash)
+	}
+	if len(digest) != sha256.Size {
+		return nil, fmt.Errorf("%w: digest is %d bytes, want %d",
+			ErrDigestSigningUnsupported, len(digest), sha256.Size)
+	}
+	pk, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), key)
+	if err != nil {
+		return nil, fmt.Errorf("parse p256 private key: %w", err)
+	}
+	return ecdsa.SignASN1(rand.Reader, pk, digest)
 }

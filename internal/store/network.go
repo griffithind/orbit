@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/griffithind/orbit/internal/ca"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -90,13 +92,35 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 	// silently pretending the field was honoured.
 	n.FirewallSource = FirewallSourceRole
 
-	err := t.tx.QueryRow(ctx, `
+	// The network ID is DERIVED here, not accepted from the caller.
+	//
+	// A caller that could supply both a key and an ID could supply a pair that
+	// does not correspond — and every machine that then joined by that ID would
+	// verify against a key the control plane does not hold, failing in a way
+	// whose cause is two fields disagreeing in a row nobody looks at. One
+	// derivation, at the only moment both are in hand.
+	if len(n.IdentityPublicKey) == 0 {
+		return fmt.Errorf("create network: %w", ErrNoNetworkIdentity)
+	}
+	if n.IdentitySignerRef == "" {
+		return fmt.Errorf("create network: the network identity key needs a signer ref; " +
+			"the private half is never stored in the database")
+	}
+	networkID, err := ca.NetworkIDFor(n.IdentityPublicKey)
+	if err != nil {
+		return fmt.Errorf("create network: %w", err)
+	}
+	n.NetworkID = networkID
+
+	err = t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.network (slug, name, cidrs, cert_version, curve, cert_ttl,
-		                           listen_port, config_mode, config_overrides)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		                           listen_port, config_mode, config_overrides,
+		                           identity_public_key, network_id, identity_signer_ref)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, config_epoch, blocklist_epoch, created_at`,
 		n.Slug, n.Name, nonNil(n.CIDRs), n.CertVer, n.Curve, n.CertTTL,
 		n.ListenPort, n.ConfigMode, n.Overrides,
+		n.IdentityPublicKey, n.NetworkID, n.IdentitySignerRef,
 	).Scan(&n.ID, &n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
 	if err != nil {
 		return mapErr(err, "create network")
@@ -106,13 +130,15 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 
 const networkCols = `id, slug, name, cidrs, cert_version, curve, cert_ttl,
 	listen_port, config_mode, config_overrides, firewall_source,
-	config_epoch, blocklist_epoch, created_at`
+	config_epoch, blocklist_epoch, created_at,
+	identity_public_key, network_id, identity_signer_ref`
 
 func scanNetwork(row interface{ Scan(...any) error }) (*Network, error) {
 	var n Network
 	err := row.Scan(&n.ID, &n.Slug, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve, &n.CertTTL,
 		&n.ListenPort, &n.ConfigMode, &n.Overrides, &n.FirewallSource,
-		&n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
+		&n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt,
+		&n.IdentityPublicKey, &n.NetworkID, &n.IdentitySignerRef)
 	if err != nil {
 		return nil, err
 	}
@@ -141,6 +167,25 @@ func (t *Tx) GetNetwork(ctx context.Context, id uuid.UUID) (*Network, error) {
 // characters and a uuid's canonical form is 36, so the two are disjoint by
 // length before a character is compared. That is why the shared
 // /v1/networks/{ref} route needs no constraint to keep them apart.
+// GetNetworkByNetworkID resolves a network by its verifiable ID.
+//
+// The ID is normalised first, because it arrives from a human: Crockford base32
+// is case-insensitive and treats I/L as 1 and O as 0, and people add hyphens to
+// make it readable. Looking up the raw string would turn a correctly-read ID
+// into "no such network".
+func (t *Tx) GetNetworkByNetworkID(ctx context.Context, id string) (*Network, error) {
+	norm, err := ca.ParseNetworkID(id)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, err)
+	}
+	n, err := scanNetwork(t.tx.QueryRow(ctx,
+		`SELECT `+networkCols+` FROM orbit.network WHERE network_id = $1`, norm))
+	if err != nil {
+		return nil, mapErr(err, "get network by id")
+	}
+	return n, nil
+}
+
 func (t *Tx) GetNetworkBySlug(ctx context.Context, slug string) (*Network, error) {
 	n, err := scanNetwork(t.tx.QueryRow(ctx,
 		`SELECT `+networkCols+` FROM orbit.network WHERE slug = $1`, slug))
@@ -232,7 +277,7 @@ func (t *Tx) UpdateNetworkInstanceDefaults(ctx context.Context, id uuid.UUID, li
 		return nil, err
 	}
 	if _, err := t.tx.Exec(ctx, `
-		UPDATE orbit.host SET restart_required_epoch = $2
+		UPDATE orbit.membership SET restart_required_epoch = $2
 		 WHERE network_id = $1 AND state IN ('enrolled', 'active')`, id, epoch); err != nil {
 		return nil, mapErr(err, "mark hosts restart required")
 	}
@@ -323,22 +368,22 @@ func (t *Tx) AddNetworkCIDR(ctx context.Context, id uuid.UUID, p netip.Prefix) (
 
 // AddressHolder is a host holding an address inside some prefix.
 type AddressHolder struct {
-	HostID uuid.UUID
-	Name   string
-	Addr   netip.Addr
+	MembershipID uuid.UUID
+	Name         string
+	Addr         netip.Addr
 }
 
 // CIDRHolders lists the hosts with an address inside a prefix.
 //
 // Answers the only question an operator has when a removal is refused. Deleted
 // hosts are included for the same reason RoleHosts includes them: their
-// host_address rows still exist and still block the removal, so a blocker list
+// membership_address rows still exist and still block the removal, so a blocker list
 // that omitted them would report an empty set for a refusal.
 func (t *Tx) CIDRHolders(ctx context.Context, networkID uuid.UUID, p netip.Prefix) ([]AddressHolder, error) {
 	rows, err := t.tx.Query(ctx, `
-		SELECT a.host_id, h.name, a.addr
-		  FROM orbit.host_address a
-		  JOIN orbit.host h ON (h.network_id, h.id) = (a.network_id, a.host_id)
+		SELECT a.membership_id, h.name, a.addr
+		  FROM orbit.membership_address a
+		  JOIN orbit.membership h ON (h.network_id, h.id) = (a.network_id, a.membership_id)
 		 WHERE a.network_id = $1 AND a.addr <<= $2::cidr
 		 ORDER BY h.name, a.addr`, networkID, p)
 	if err != nil {
@@ -349,7 +394,7 @@ func (t *Tx) CIDRHolders(ctx context.Context, networkID uuid.UUID, p netip.Prefi
 	var out []AddressHolder
 	for rows.Next() {
 		var h AddressHolder
-		if err := rows.Scan(&h.HostID, &h.Name, &h.Addr); err != nil {
+		if err := rows.Scan(&h.MembershipID, &h.Name, &h.Addr); err != nil {
 			return nil, mapErr(err, "scan cidr holder")
 		}
 		out = append(out, h)
@@ -360,7 +405,7 @@ func (t *Tx) CIDRHolders(ctx context.Context, networkID uuid.UUID, p netip.Prefi
 // RemoveNetworkCIDR drops a prefix no host has an address in.
 //
 // Refused while any host holds one, because removing it does not take the
-// address away — the host_address row survives, the host keeps answering on it,
+// address away — the membership_address row survives, the host keeps answering on it,
 // and the damage appears at the host's NEXT RENEWAL, when certNetworks can no
 // longer pair the address with a prefix and issuance fails. That is hours after
 // the request that caused it, on a host nobody is looking at.
@@ -767,11 +812,11 @@ func (t *Tx) RoleHosts(ctx context.Context, roleID uuid.UUID) ([]RoleHost, error
 	// reissued by the same renewal, so the leading one dates the convergence.
 	rows, err := t.tx.Query(ctx, `
 		SELECT h.id, h.name, h.state, c.not_before, c.not_after
-		  FROM orbit.host h
+		  FROM orbit.membership h
 		  LEFT JOIN LATERAL (
 		      SELECT not_before, not_after
 		        FROM orbit.certificate
-		       WHERE host_id = h.id AND state = 'active'
+		       WHERE membership_id = h.id AND state = 'active'
 		       ORDER BY cert_version DESC
 		       LIMIT 1
 		  ) c ON true
@@ -852,9 +897,9 @@ type TopologyHost struct {
 func (t *Tx) NetworkTopology(ctx context.Context, networkID uuid.UUID) ([]TopologyHost, error) {
 	rows, err := t.tx.Query(ctx, `
 		SELECT h.id, h.name, h.static_addrs, h.is_lighthouse, h.is_relay,
-		       coalesce(array(SELECT a.addr FROM orbit.host_address a
-		                       WHERE a.host_id = h.id ORDER BY a.addr), '{}')
-		  FROM orbit.host h
+		       coalesce(array(SELECT a.addr FROM orbit.membership_address a
+		                       WHERE a.membership_id = h.id ORDER BY a.addr), '{}')
+		  FROM orbit.membership h
 		 WHERE h.network_id = $1
 		   AND (h.is_lighthouse OR h.is_relay)
 		   AND h.state IN ('enrolled', 'active')
@@ -912,25 +957,25 @@ func (t *Tx) GetCA(ctx context.Context, id uuid.UUID) (*CA, error) {
 
 // ControlPlane is one replica serving the agent API on a network.
 type ControlPlane struct {
-	HostID     uuid.UUID
-	Addr       netip.Addr
-	AgentPort  int
-	LastSeenAt time.Time
+	MembershipID uuid.UUID
+	Addr         netip.Addr
+	AgentPort    int
+	LastSeenAt   time.Time
 }
 
 // RegisterControlPlane records or refreshes this replica's agent endpoint.
 //
 // Upsert on (network_id, addr): a replica restarting on the same address
 // refreshes its row rather than colliding, and two replicas cannot claim one
-// address because the host_address constraint already stopped them earlier.
-func (t *Tx) RegisterControlPlane(ctx context.Context, networkID, hostID uuid.UUID, addr netip.Addr, agentPort int) error {
+// address because the membership_address constraint already stopped them earlier.
+func (t *Tx) RegisterControlPlane(ctx context.Context, networkID, membershipID uuid.UUID, addr netip.Addr, agentPort int) error {
 	_, err := t.tx.Exec(ctx, `
-		INSERT INTO orbit.control_plane (network_id, host_id, addr, agent_port)
+		INSERT INTO orbit.control_plane (network_id, membership_id, addr, agent_port)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (network_id, addr) DO UPDATE
 		   SET last_seen_at = now(), agent_port = EXCLUDED.agent_port,
-		       host_id = EXCLUDED.host_id`,
-		networkID, hostID, addr, agentPort)
+		       membership_id = EXCLUDED.membership_id`,
+		networkID, membershipID, addr, agentPort)
 	return mapErr(err, "register control plane")
 }
 
@@ -941,7 +986,7 @@ func (t *Tx) RegisterControlPlane(ctx context.Context, networkID, hostID uuid.UU
 // load without the control plane having to coordinate anything.
 func (t *Tx) LiveControlPlanes(ctx context.Context, networkID uuid.UUID, since time.Time) ([]ControlPlane, error) {
 	rows, err := t.tx.Query(ctx, `
-		SELECT host_id, addr, agent_port, last_seen_at
+		SELECT membership_id, addr, agent_port, last_seen_at
 		  FROM orbit.control_plane
 		 WHERE network_id = $1 AND last_seen_at > $2
 		 ORDER BY addr`, networkID, since)
@@ -953,7 +998,7 @@ func (t *Tx) LiveControlPlanes(ctx context.Context, networkID uuid.UUID, since t
 	var out []ControlPlane
 	for rows.Next() {
 		var c ControlPlane
-		if err := rows.Scan(&c.HostID, &c.Addr, &c.AgentPort, &c.LastSeenAt); err != nil {
+		if err := rows.Scan(&c.MembershipID, &c.Addr, &c.AgentPort, &c.LastSeenAt); err != nil {
 			return nil, mapErr(err, "scan control plane")
 		}
 		out = append(out, c)

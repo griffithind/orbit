@@ -20,7 +20,7 @@ import (
 func TestUnitAndEnvAgreeOnTheNetwork(t *testing.T) {
 	const netID = "fe0323f7-cc73-4d2c-aa3f-827eb8684fb3"
 	p := planControlPlane(netID,
-		"postgres://orbit_app:pw@127.0.0.1/orbit", "pepper",
+		"postgres://orbit_app:pw@127.0.0.1/orbit",
 		"https://orbit.example.com/enroll/v1/enroll",
 		"10.42.0.1", "203.0.113.10:4242", "/var/lib/orbit/ca.key")
 
@@ -47,7 +47,7 @@ func TestUnitAndEnvAgreeOnTheNetwork(t *testing.T) {
 // flag is omitted entirely instead — which orbitd reports as "no -mesh
 // configured", a state it names rather than a parse error.
 func TestNoMeshWithoutAnOverlayAddress(t *testing.T) {
-	p := planControlPlane("net-id", "dsn", "pepper", "https://x/enroll/v1/enroll",
+	p := planControlPlane("net-id", "dsn", "https://x/enroll/v1/enroll",
 		"", "", "/var/lib/orbit/ca.key")
 
 	// Directives only. The unit's own header comment explains the -mesh failure
@@ -80,7 +80,7 @@ func directives(unit string) string {
 // starts once, from the shell that ran bootstrap, and never again after a
 // reboot.
 func TestUnitNamesAResolvedBinary(t *testing.T) {
-	p := planControlPlane("n", "dsn", "pepper", "https://x/e", "10.0.0.1", "", "/var/lib/orbit/ca.key")
+	p := planControlPlane("n", "dsn", "https://x/e", "10.0.0.1", "", "/var/lib/orbit/ca.key")
 
 	var exec string
 	for _, line := range strings.Split(p.Unit, "\n") {
@@ -100,18 +100,15 @@ func TestUnitNamesAResolvedBinary(t *testing.T) {
 }
 
 // TestSecretsAreNotInTheUnit. The unit is 0644 so an operator can read the
-// flags; the DSN and the pepper must therefore not be in it.
+// flags; the DSN must therefore not be in it.
 func TestSecretsAreNotInTheUnit(t *testing.T) {
 	const dsn = "postgres://orbit_app:hunter2@127.0.0.1/orbit"
-	p := planControlPlane("n", dsn, "the-pepper", "https://x/e", "10.0.0.1", "", "/var/lib/orbit/ca.key")
+	p := planControlPlane("n", dsn, "https://x/e", "10.0.0.1", "", "/var/lib/orbit/ca.key")
 
 	if strings.Contains(p.Unit, "hunter2") {
 		t.Error("the database password is in the world-readable unit")
 	}
-	if strings.Contains(p.Unit, "the-pepper") {
-		t.Error("the enrollment pepper is in the world-readable unit")
-	}
-	if !strings.Contains(p.Env, dsn) || !strings.Contains(p.Env, "the-pepper") {
+	if !strings.Contains(p.Env, dsn) {
 		t.Error("the env file is missing what the unit expects it to provide")
 	}
 }
@@ -124,7 +121,7 @@ func TestSecretsAreNotInTheUnit(t *testing.T) {
 // nor the missing user. write() now creates it, and this ties the two together
 // so changing one without the other fails here rather than on a fresh host.
 func TestTheUnitRunsAsTheAccountBootstrapCreates(t *testing.T) {
-	c := planControlPlane("net-id", "postgres://x", "pep",
+	c := planControlPlane("net-id", "postgres://x",
 		"https://orbit.example.com/enroll/v1/enroll", "10.42.0.1",
 		"203.0.113.10:4242", "/var/lib/orbit/ca.key")
 
@@ -151,7 +148,7 @@ func TestTheUnitRunsAsTheAccountBootstrapCreates(t *testing.T) {
 // instructions the only thing standing between an operator and a service that
 // cannot read its own CA key.
 func TestDescribeNamesWhatMustBeChowned(t *testing.T) {
-	c := planControlPlane("net-id", "postgres://x", "pep",
+	c := planControlPlane("net-id", "postgres://x",
 		"https://orbit.example.com/enroll/v1/enroll", "10.42.0.1", "",
 		"/var/lib/orbit/ca.key")
 

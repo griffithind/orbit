@@ -46,20 +46,20 @@ var (
 	badgeOverdue = badge{Glyph: "!", Word: "OVERDUE", Tone: "bad"}
 )
 
-// hostStateBadge renders a host's lifecycle state.
-func hostStateBadge(state string) badge {
+// membershipStateBadge renders a host's lifecycle state.
+func membershipStateBadge(state string) badge {
 	switch state {
-	case store.HostActive:
+	case store.MembershipActive:
 		return badgeOK("active")
-	case store.HostEnrolled:
+	case store.MembershipEnrolled:
 		return badgeOK("enrolled")
-	case store.HostCreated:
+	case store.MembershipCreated:
 		// Not a fault, but not a working host either: it holds no certificate and
 		// cannot appear in convergence at all.
 		return badgeMuted("awaiting enrollment")
-	case store.HostSuspended:
+	case store.MembershipSuspended:
 		return badgeBad("blocked")
-	case store.HostDeleted:
+	case store.MembershipDeleted:
 		return badgeMuted("deleted")
 	default:
 		return badgeMuted(state)
@@ -115,10 +115,10 @@ func newNetworkView(n *store.Network) networkView {
 }
 
 //------------------------------------------------------------------------------
-// Hosts
+// Memberships
 //------------------------------------------------------------------------------
 
-type hostView struct {
+type membershipView struct {
 	ID    string
 	Name  string
 	State string
@@ -146,7 +146,7 @@ type hostView struct {
 
 	// ConfigBadge and BlockBadge compare the applied epoch against the network's.
 	// Computed here rather than in the template because "behind" has a definition
-	// — and it is the same one HostFilter.Behind and Convergence use, which is the
+	// — and it is the same one MembershipFilter.Behind and Convergence use, which is the
 	// only reason the number on this page can be trusted to agree with the number
 	// on the overview.
 	ConfigBadge badge
@@ -163,12 +163,12 @@ type hostView struct {
 	ConfigMode      string
 }
 
-func newHostView(h *store.Host, n *store.Network) hostView {
-	v := hostView{
+func newMembershipView(h *store.Membership, n *store.Network) membershipView {
+	v := membershipView{
 		ID:    h.ID.String(),
 		Name:  h.Name,
 		State: h.State,
-		Badge: hostStateBadge(h.State),
+		Badge: membershipStateBadge(h.State),
 
 		OverlayAddrs: addrStrings(h.Addrs),
 		RoleName:     h.RoleName,
@@ -210,7 +210,7 @@ func newHostView(h *store.Host, n *store.Network) hostView {
 		v.RestartPending = h.RestartRequiredEpoch > 0 &&
 			h.AppliedConfigEpoch < h.RestartRequiredEpoch
 
-		// The same inheritance api.hostResponse resolves, and a short obvious
+		// The same inheritance api.membershipResponse resolves, and a short obvious
 		// mirror of it rather than anything cleverer: reimplementing the
 		// precedence differently is how a UI comes to report a value the rendered
 		// configuration does not use.
@@ -241,9 +241,9 @@ func newHostView(h *store.Host, n *store.Network) hostView {
 // A host that has never enrolled is 'awaiting enrollment' rather than 'behind'.
 // It has never held a certificate and can never report an epoch, so calling it
 // behind would make the badge permanently red on a host that is not broken —
-// the same reason HostFilter.Behind scopes itself to enrolled and active.
+// the same reason MembershipFilter.Behind scopes itself to enrolled and active.
 func epochBadge(applied, current int64, state string) badge {
-	if state == store.HostCreated {
+	if state == store.MembershipCreated {
 		return badgeMuted("not enrolled")
 	}
 	if applied >= current {
@@ -353,10 +353,10 @@ type finding struct {
 // one line means the operator fixes the first thing and comes back.
 //
 // Ordered worst first, because the top of the list is what gets read.
-func diagnose(h hostView, certs []certView, now time.Time, activeCAID string, hasActiveCA bool) []finding {
+func diagnose(h membershipView, certs []certView, now time.Time, activeCAID string, hasActiveCA bool) []finding {
 	var out []finding
 
-	if h.State == store.HostSuspended {
+	if h.State == store.MembershipSuspended {
 		out = append(out, finding{
 			Badge:   badgeBad("blocked"),
 			Summary: "this host is blocked",
@@ -384,7 +384,7 @@ func diagnose(h hostView, certs []certView, now time.Time, activeCAID string, ha
 	}
 
 	switch {
-	case h.State == store.HostCreated:
+	case h.State == store.MembershipCreated:
 		out = append(out, finding{
 			Badge:   badgeMuted("never enrolled"),
 			Summary: "this host has never enrolled",
@@ -394,17 +394,21 @@ func diagnose(h hostView, certs []certView, now time.Time, activeCAID string, ha
 	case active == nil:
 		out = append(out, finding{
 			Badge:   badgeBad("no active certificate"),
-			Summary: "this host holds no active certificate",
+			Summary: "this membership holds no active certificate",
 			Detail: "It enrolled at some point but has nothing valid now. It cannot " +
-				"reach the overlay, which means it cannot renew through the agent API — " +
-				"recovery (proof of possession over the public listener) is the way back.",
+				"reach the overlay, so it cannot renew through the agent API. The way " +
+				"back is to re-run `orbit agent join` on the machine: the join is " +
+				"idempotent and returns this same membership, and the device key that " +
+				"authenticates it never expires.",
 		})
 	case active.Expired:
 		out = append(out, finding{
 			Badge:   badgeBad("certificate expired"),
 			Summary: "its certificate expired " + ago(active.NotAfter),
 			Detail: "Nebula rejects an expired certificate before it consults anything " +
-				"else, so this host is off the mesh and cannot renew over it.",
+				"else, so this machine is off the mesh and cannot renew over it. " +
+				"Re-running `orbit agent join` on it reissues one over the public " +
+				"listener, authenticated by a device key that cannot expire.",
 		})
 	case active.Overdue:
 		out = append(out, finding{
@@ -412,8 +416,8 @@ func diagnose(h hostView, certs []certView, now time.Time, activeCAID string, ha
 			Summary: "renewal was due " + ago(active.RenewAt) +
 				" and has not happened; the certificate expires " + ago(active.NotAfter),
 			Detail: "The agent renews at the midpoint of a certificate's lifetime so that " +
-				"the remaining half is recovery time. Past that point, renewal has been " +
-				"failing for a while — check when this host was last seen, and whether its " +
+				"the remaining half is slack. Past that point, renewal has been failing " +
+				"for a while — check when this machine was last seen, and whether its " +
 				"issuing CA is still able to sign.",
 		})
 	}
@@ -429,7 +433,7 @@ func diagnose(h hostView, certs []certView, now time.Time, activeCAID string, ha
 		})
 	}
 
-	if h.State != store.HostCreated {
+	if h.State != store.MembershipCreated {
 		switch {
 		case h.LastSeenAt == nil:
 			out = append(out, finding{
@@ -483,21 +487,21 @@ const staleAfter = 15 * time.Minute
 //------------------------------------------------------------------------------
 
 type convergenceView struct {
-	ConfigEpoch    int64
-	BlocklistEpoch int64
-	HostsTotal     int
-	ConfigApplied  int
-	BlockApplied   int
-	ConfigBadge    badge
-	BlockBadge     badge
-	Lagging        []laggingView
+	ConfigEpoch      int64
+	BlocklistEpoch   int64
+	MembershipsTotal int
+	ConfigApplied    int
+	BlockApplied     int
+	ConfigBadge      badge
+	BlockBadge       badge
+	Lagging          []laggingView
 	// Truncated reports that the lagging list was capped, so a reader does not
 	// take a list of 100 as the whole story.
 	Truncated bool
 }
 
 type laggingView struct {
-	HostID                string
+	MembershipID          string
 	Name                  string
 	AppliedConfigEpoch    int64
 	AppliedBlocklistEpoch int64
@@ -506,18 +510,18 @@ type laggingView struct {
 
 func newConvergenceView(c *store.Convergence, limit int) convergenceView {
 	v := convergenceView{
-		ConfigEpoch:    c.ConfigEpoch,
-		BlocklistEpoch: c.BlocklistEpoch,
-		HostsTotal:     c.HostsTotal,
-		ConfigApplied:  c.ConfigApplied,
-		BlockApplied:   c.BlockApplied,
-		ConfigBadge:    convergedBadge(c.ConfigApplied, c.HostsTotal),
-		BlockBadge:     convergedBadge(c.BlockApplied, c.HostsTotal),
-		Truncated:      len(c.Lagging) >= limit,
+		ConfigEpoch:      c.ConfigEpoch,
+		BlocklistEpoch:   c.BlocklistEpoch,
+		MembershipsTotal: c.MembershipsTotal,
+		ConfigApplied:    c.ConfigApplied,
+		BlockApplied:     c.BlockApplied,
+		ConfigBadge:      convergedBadge(c.ConfigApplied, c.MembershipsTotal),
+		BlockBadge:       convergedBadge(c.BlockApplied, c.MembershipsTotal),
+		Truncated:        len(c.Lagging) >= limit,
 	}
 	for _, l := range c.Lagging {
 		v.Lagging = append(v.Lagging, laggingView{
-			HostID:                l.HostID.String(),
+			MembershipID:          l.MembershipID.String(),
 			Name:                  l.Name,
 			AppliedConfigEpoch:    l.AppliedConfigEpoch,
 			AppliedBlocklistEpoch: l.AppliedBlocklistEpoch,

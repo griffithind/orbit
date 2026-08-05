@@ -1,11 +1,25 @@
 {{- define "content" -}}
 {{- with .Data }}
 <section class="card wide">
-  <h1>Enrollment code for {{ .Host.Name }}</h1>
+  {{- if .Membership }}
+  <h1>Enrollment code for {{ .Name }}</h1>
   <p class="subtitle">
     <a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a> ·
-    {{- range .Host.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
+    {{- range .Membership.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
   </p>
+  {{- else }}
+  {{/*
+    A reservation, so there is no host to link to and no address to show. The
+    page says so rather than rendering placeholders: the membership does not
+    exist yet, and inventing a state and an address for a machine that has not
+    arrived is exactly the confusion reservations were meant to remove.
+  */}}
+  <h1>Reserved {{ .Name }}</h1>
+  <p class="subtitle">
+    <a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a> ·
+    no host yet — one is created when a machine redeems this code
+  </p>
+  {{- end }}
 
   {{/*
     This is the only place the plaintext will ever exist: the control plane
@@ -27,7 +41,11 @@
   <h2>On the new machine</h2>
   <pre class="prose">{{ .Command }}</pre>
 
-  <p><a class="button" href="/ui/hosts/{{ .Host.ID }}">Done — open {{ .Host.Name }}</a></p>
+  {{- if .Membership }}
+  <p><a class="button" href="/ui/memberships/{{ .Membership.ID }}">Done — open {{ .Name }}</a></p>
+  {{- else }}
+  <p><a class="button" href="/ui/networks/{{ .Network.ID }}">Done — back to {{ .Network.Name }}</a></p>
+  {{- end }}
 </section>
 {{- end }}
 {{- end -}}

@@ -45,26 +45,22 @@ import (
 func servePolicy(t *testing.T, h *harness, nebulaPort int, doc []byte) *httptest.Server {
 	t.Helper()
 
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: nebulaPort,
-		Policy: func(ctx context.Context, tx *store.Tx, networkID uuid.UUID) ([]byte, []policy.Host, error) {
-			page, err := tx.ListHosts(ctx, store.HostFilter{
-				NetworkID: networkID, Limit: store.HostPageMax,
+		Policy: func(ctx context.Context, tx *store.Tx, networkID uuid.UUID) ([]byte, []policy.Membership, error) {
+			page, err := tx.ListHosts(ctx, store.MembershipFilter{
+				NetworkID: networkID, Limit: store.MembershipPageMax,
 			})
 			if err != nil {
 				return nil, nil, err
 			}
-			fleet := make([]policy.Host, 0, len(page.Hosts))
-			for _, hh := range page.Hosts {
-				fleet = append(fleet, policy.Host{
+			fleet := make([]policy.Membership, 0, len(page.Memberships))
+			for _, hh := range page.Memberships {
+				fleet = append(fleet, policy.Membership{
 					ID:    hh.ID.String(),
 					Name:  hh.Name,
 					Role:  hh.RoleName,
@@ -77,6 +73,7 @@ func servePolicy(t *testing.T, h *harness, nebulaPort int, doc []byte) *httptest
 	})
 
 	srv := api.New(h.store, svc, api.Config{
+		NetworkKeyDir:      t.TempDir(),
 		Agent:              &api.AgentListener{NetworkID: h.netID},
 		SignerFactory:      ca.FileSignerFactory,
 		DisableEnrollLimit: true,
@@ -93,8 +90,8 @@ func servePolicy(t *testing.T, h *harness, nebulaPort int, doc []byte) *httptest
 // config is compiled against a fleet that is still being built.
 func (h *harness) createTagged(t *testing.T, ts *httptest.Server, name, addr string, tags []string, lighthouse bool, staticAddrs []string) string {
 	t.Helper()
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID:    h.netID.String(),
 		Name:         name,
 		OverlayAddr:  addr,
@@ -109,12 +106,12 @@ func (h *harness) createTagged(t *testing.T, ts *httptest.Server, name, addr str
 
 // enrollExisting is the agent half of createAndEnroll for a host that already
 // exists.
-func (h *harness) enrollExisting(t *testing.T, ts *httptest.Server, hostID, name, addr string) *enrolledHost {
+func (h *harness) enrollExisting(t *testing.T, ts *httptest.Server, membershipID, name, addr string) *enrolledHost {
 	t.Helper()
 	ctx := context.Background()
 
 	var codeResp wire.EnrollmentCodeResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+hostID+"/enrollment-code", nil, &codeResp); code != http.StatusCreated {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+membershipID+"/enrollment-code", nil, &codeResp); code != http.StatusCreated {
 		t.Fatalf("enrollment code for %s: status %d", name, code)
 	}
 	kp, err := agent.GenerateKeypair(cert.Curve_CURVE25519)
@@ -135,7 +132,7 @@ func (h *harness) enrollExisting(t *testing.T, ts *httptest.Server, hostID, name
 	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		t.Fatalf("apply %s: %v", name, err)
 	}
-	return &enrolledHost{name: name, addr: netip.MustParseAddr(addr), dir: dir, id: hostID, respons: resp}
+	return &enrolledHost{name: name, addr: netip.MustParseAddr(addr), dir: dir, id: membershipID, respons: resp}
 }
 
 const twoTierPolicy = `{

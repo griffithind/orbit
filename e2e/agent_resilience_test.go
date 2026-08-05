@@ -1,3 +1,13 @@
+// Agent resilience: what happens when the control plane, one network, or the
+// data plane goes away.
+//
+// Formerly agent_recovery_test.go, which was a misnomer even then — none of
+// these tests exercised `orbit agent recover`. That command is gone (a device
+// identity never expires, so there is nothing to recover from; see
+// TestExpiredCertificateRecoversByRejoining), and these three are about
+// something else entirely: an agent that must not die, discard state, or go
+// quiet when part of the world stops answering.
+
 package e2e
 
 import (
@@ -32,15 +42,15 @@ import (
 func (h *harness) enrollIntoDir(t *testing.T, ts *httptest.Server, name, addr, dir string) {
 	t.Helper()
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var membership wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: name, OverlayAddr: addr, RoleID: h.roleID.String(),
-	}, &host); code != http.StatusCreated {
-		t.Fatalf("create host %s: %d", name, code)
+	}, &membership); code != http.StatusCreated {
+		t.Fatalf("create membership %s: %d", name, code)
 	}
 
 	var code wire.EnrollmentCodeResponse
-	if c := h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, &code); c != http.StatusCreated {
+	if c := h.adminPost(t, ts.URL+"/v1/memberships/"+membership.ID+"/enrollment-code", nil, &code); c != http.StatusCreated {
 		t.Fatalf("mint code for %s: %d", name, c)
 	}
 

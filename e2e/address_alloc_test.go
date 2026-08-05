@@ -2,14 +2,19 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -25,8 +30,8 @@ func TestHostCreationAllocatesAnAddress(t *testing.T) {
 
 	seen := map[string]bool{}
 	for i := range 3 {
-		var host wire.HostResponse
-		if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+		var host wire.MembershipResponse
+		if code := h.createHost(t, ts.URL, membershipSpec{
 			NetworkID: h.netID.String(),
 			Name:      "alloc-" + uuid.NewString()[:8],
 			RoleID:    h.roleID.String(),
@@ -79,20 +84,40 @@ func TestAddressExhaustionIsAClear409(t *testing.T) {
 	}
 
 	for i := range 2 {
-		if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+		if code := h.createHost(t, ts.URL, membershipSpec{
 			NetworkID: net.ID, Name: "fill-" + uuid.NewString()[:8],
 		}, nil); code != http.StatusCreated {
 			t.Fatalf("filling a /30, host %d: %d", i, code)
 		}
 	}
 
-	code, body := h.adminPostExpectingFailure(t, ts.URL+"/v1/hosts",
-		wire.CreateHostRequest{NetworkID: net.ID, Name: "overflow-" + uuid.NewString()[:8]})
-	if code != http.StatusConflict {
-		t.Fatalf("creating a host in a full /30 = %d, want 409", code)
+	// Exhaustion now surfaces at REDEMPTION, not at reservation: a reservation
+	// holds a name and does not allocate, so the /30 only runs out when a
+	// machine actually arrives to take a place. Reserving still succeeds, which
+	// is correct — an operator may legitimately reserve against a prefix they
+	// are about to widen.
+	var code wire.EnrollmentCodeResponse
+	if status := h.adminPost(t, ts.URL+"/v1/networks/"+net.ID+"/reservations",
+		wire.ReserveRequest{Name: "overflow-" + uuid.NewString()[:8]},
+		&code); status != http.StatusCreated {
+		t.Fatalf("reserve against a full /30: %d", status)
 	}
-	if !strings.Contains(body.Error, "10.61.0.0/30") {
-		t.Errorf("the refusal does not name the prefix that ran out: %q", body.Error)
+
+	id, err := device.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = agent.NewClient(ts.URL).JoinWithCode(context.Background(), id,
+		net.ID, "overflow", "", "", code.Code, time.Now())
+	var apiErr *agent.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("joining a full /30 gave %v, want an API error", err)
+	}
+	if apiErr.Status != http.StatusConflict {
+		t.Fatalf("joining a full /30 = %d, want 409", apiErr.Status)
+	}
+	if !strings.Contains(apiErr.Message, "10.61.0.0/30") {
+		t.Errorf("the refusal does not name the prefix that ran out: %q", apiErr.Message)
 	}
 }
 
@@ -135,15 +160,15 @@ func TestHostReportsItsInstanceResources(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	var created wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var created wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: "instance-" + uuid.NewString()[:8],
 	}, &created); code != http.StatusCreated {
 		t.Fatalf("create host: %d", code)
 	}
 
-	var got wire.HostResponse
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts/"+created.ID, nil, &got); code != http.StatusOK {
+	var got wire.MembershipResponse
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+created.ID, nil, &got); code != http.StatusOK {
 		t.Fatalf("get host: %d", code)
 	}
 	if got.ConfigMode == "" {

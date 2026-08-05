@@ -61,7 +61,7 @@ func TestScopelessExceptionsAreStillRegistered(t *testing.T) {
 	}
 }
 
-// TestScopesAreKnown catches a typo. "hosts:raed" registers cleanly, is granted
+// TestScopesAreKnown catches a typo. "memberships:raed" registers cleanly, is granted
 // to nobody, and turns its route into one no token can reach — a 403 with no
 // explanation and nothing to grep for.
 func TestScopesAreKnown(t *testing.T) {

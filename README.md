@@ -13,10 +13,21 @@ CLI, and a web console. It runs Nebula unforked, as a library, so a managed host
 is one binary and one service.
 
 ```bash
-orbit host create -name web-03 -addr 10.42.0.7 -role web  # a record
-orbit host code web-03                                   # → orb_1_…, single use
-sudo orbit agent install -code orb_1_…                   # on the host itself
-orbit host block web-03                                  # off the mesh in ~5s
+orbit membership reserve -name web-03 -role web        # → orb_1_…, single use
+
+sudo orbit agent install                               # once per machine
+sudo orbit agent join -url https://orbit.example.com \
+    -network prod -code orb_1_…                        # once per network
+
+orbit membership block web-03                          # off the mesh in ~5s
+```
+
+Or with nobody holding a code: the machine asks, and you say yes.
+
+```bash
+sudo orbit agent join -url https://orbit.example.com -network prod
+orbit membership pending                          # what is waiting
+orbit membership authorize <id>
 ```
 
 ---
@@ -75,15 +86,28 @@ Or skip the host entirely — `deploy/compose.yml` runs the control plane and
 Postgres as two containers, which removes `pg_hba`, firewalld, SELinux, unit
 files, and the CA key's file mode from the problem.
 
-Every host after that is two commands, one on your laptop and one on the host:
+Every machine after that: reserve a place from your laptop, then set the machine
+up and join it.
 
 ```bash
-orbit host create -name web-01 -addr 10.42.0.7 -role web && orbit host code web-01
-sudo orbit agent install -url https://orbit.example.com -code orb_1_… -network prod
+orbit membership reserve -name web-01 -role web        # prints the code
+
+# On the machine. install is once; join is once per network.
+sudo orbit agent install
+sudo orbit agent join -url https://orbit.example.com -network prod -code orb_1_…
 ```
 
-To see what a host is doing — every network it joined, whether its data plane is
-up, when it last reached the control plane — ask the agent on that host:
+`install` generates the machine's device identity and installs the service;
+`join` adds one network, and the service picks it up without a restart. A
+machine on three meshes is installed once and joined three times.
+
+An address is allocated when the machine arrives; `-addr` on the reservation
+pins one for the cases that need it. Drop the `-code` and the machine waits in
+`orbit membership pending` for you to authorize it — the better shape for a
+laptop handed to somebody, because no secret has to travel to it.
+
+To see what a machine is doing — every network it joined, whether its data plane
+is up, when it last reached the control plane — ask the agent on it:
 
 ```bash
 sudo orbit status                      # every network this host joined
@@ -91,7 +115,7 @@ sudo orbit peers                       # the tunnels it actually holds
 sudo orbit why 10.42.0.9 -port 5432    # and why it can or cannot reach one
 ```
 
-From your laptop, the same question with two hosts is answered by the control
+From your laptop, the same question with two memberships is answered by the control
 plane, in both directions at once:
 
 ```bash
@@ -110,23 +134,42 @@ sealing the CA key to a TPM, backups, alerts, and what survives an outage.
 
 ## What it does
 
-**Enrollment without shared secrets.** The host generates its own keypair and
-sends only the public half. An enrollment code is single-use with a 15-minute
-TTL. Nothing that could sign a certificate is ever on the wire, and there is no
-code path that accepts a private key or a column to store one in.
+**A machine has one identity, and it generates it itself.** At first start the
+agent writes a device key to `/var/lib/orbit/device.key`. Nobody issues it,
+nothing expires it, and it is the same key across every network that machine
+joins and every control plane it talks to. Joining is a signature over that key,
+so **no secret has to travel** — and a machine whose mesh certificate expired can
+still reach the control plane, because reaching it uses something no clock can
+invalidate. There is no recovery command, because there is nothing to recover
+from: re-run `orbit agent join`.
+
+**Enrollment without shared secrets.** The mesh keypair is generated on the
+machine and only the public half is sent. A reservation code, when one is used at
+all, is single-use with a 15-minute TTL. Nothing that could sign a certificate is
+ever on the wire, and there is no code path that accepts a private key or a
+column to store one in.
+
+**Devices and memberships are different things.** A device is a machine; a
+membership is that machine *in* a network. A laptop on three meshes is one device
+with one disk-encryption state and three memberships. `orbit device ls` reports
+posture — disk encryption, secure boot, firewall, TPM presence, read natively
+with no second agent — and each signal is a tri-state where *unknown* never
+collapses into *no*. Blocking a **device** refuses it everywhere on the control
+plane, immediately and with no propagation; suspending a **membership** removes
+it from one network.
 
 **Renewal on a live tunnel.** Agents renew at 50% of certificate lifetime, with
 per-host jitter derived from the host id — deterministic, so a fleet enrolled in
 one batch does not renew in one batch. The swap is atomic and the previous
 generation is kept for rollback.
 
-**Revocation that is measured, not asserted.** Blocking a host advances an epoch,
+**Revocation that is measured, not asserted.** Blocking a membership advances an epoch,
 Postgres `NOTIFY` wakes every agent, and the fingerprint lands in every peer's
 blocklist. End to end: **5.24 seconds** from the API call to tunnel teardown, of
 which 5 s is Nebula's own `connection_alive_interval`. An e2e test fails if that
 regresses.
 
-**No credentials on managed hosts.** The agent API is not on the public
+**No credentials on managed machines.** The agent API is not on the public
 listener — it lives on the overlay itself, and the control plane is a mesh member
 like any other host. A host authenticates by the certificate it is already using
 to send the packet, which Nebula's firewall verifies before any rule match.
@@ -139,8 +182,8 @@ rules are exactly as strong as group-based ones — so the compiler emits
 addresses, and a policy change takes effect without reissuing a certificate.
 
 **Convergence you can see.** Every configuration generation is an epoch, and
-hosts report the epoch they have *applied*, not the one they fetched. CA rotation
-refuses to activate while hosts are behind, because activating past them cuts
+memberships report the epoch they have *applied*, not the one they fetched. CA
+rotation refuses to activate while any are behind, because activating past them cuts
 them off.
 
 **Failure containment.** An agent that applies a generation and cannot verify it
@@ -216,14 +259,19 @@ detail and says plainly what has and has not been measured.
 
 | Document | Contents |
 |---|---|
+| [docs/model.md](docs/model.md) | **Start here.** The three nouns — device, network, membership — and which one owns which fact |
 | [docs/deployment.md](docs/deployment.md) | Running it: bring-up order, CA key protection, break-glass, backups, alerts |
 | [docs/design.md](docs/design.md) | Architecture, data model, API surfaces, CA custody and rotation, threat model |
-| [docs/enrollment.md](docs/enrollment.md) | Enrollment methods, wire protocol, renewal, recovery, attack analysis |
+| [docs/enrollment.md](docs/enrollment.md) | Joining, reservations, the wire protocol, renewal, attack analysis |
+| [docs/design-device-identity.md](docs/design-device-identity.md) | Why a machine generates its own identity, and what that removes |
 | [docs/policy-model.md](docs/policy-model.md) | How Nebula's firewall enforces, what a certificate can carry, and how policy compiles |
 | [docs/revocation.md](docs/revocation.md) | How blocking propagates, and how to measure it |
+| [docs/credential-model.md](docs/credential-model.md) | Device credential vs user credential. The user half is designed, not built |
+| [docs/key-custody.md](docs/key-custody.md) | Where the CA and identity keys live, why a second replica does not work yet, and what to do about it |
 | [docs/diagnostics.md](docs/diagnostics.md) | The agent status socket behind `orbit status`, `peers` and `why` |
 
-Start with `design.md` §1. It documents six properties of Nebula's certificate
+Read `model.md` first — it is short, and every other document assumes its three
+nouns. Then `design.md` §1, which documents six properties of Nebula's certificate
 code that every other decision here follows from, with file references — most
 importantly that **Nebula has no intermediate CAs**, which rules out the
 offline-root pattern most PKI designs assume and makes the CA *be* the network.
@@ -240,9 +288,12 @@ not partitioning inside one.
 - The application connects as `orbit_app`, which holds no `CREATE` and cannot
   `UPDATE` or `DELETE` the audit log. A migration asserts this and fails if the
   grant ever appears.
-- The CA signing key is encrypted at rest and its file mode is enforced at load.
-  `systemd-creds --with-key=host+tpm2` seals the passphrase to the machine, so a
-  stolen disk image or snapshot is useless without that host.
+- The CA signing key and each network's identity key are stored **encrypted in
+  Postgres**, under a key derived from a passphrase the database never sees. A
+  leaked `pg_dump`, a read replica, or an SQL-injection bug yields ciphertext.
+  `systemd-creds --with-key=host+tpm2` seals that passphrase to the machine, so a
+  stolen disk image is useless without that host. Keys on disk remain supported
+  and get the same encryption and a file-mode check at load.
 - Admin credentials are scoped bearer tokens. Revocation takes effect on the next
   request — authentication reads the database every time rather than caching
   identities.
@@ -262,11 +313,19 @@ a control plane can engineer away:
 - **An attacker with code execution in Orbit can mint certificates** within the
   compromised CA's scope until that CA is rotated. Nebula's flat trust model
   offers no way to make an online signing key less than a root. Scoped CAs,
-  short lifetimes, and KMS custody bound the damage; they do not prevent it.
+  short lifetimes, and rehearsed rotation bound the damage; they do not prevent
+  it. An offline root is not available as a mitigation — nebula has no
+  intermediate CAs, so every CA is a root.
 - **A partitioned host cannot learn about revocation.** Certificate lifetime is
   the revocation SLA for a disconnected host. Nothing else bounds it.
-- **Blocking is not instantaneous.** The floor is Nebula's
-  `connection_alive_interval` (~5 s) plus distribution time.
+- **Blocking a membership is not instantaneous.** The floor is Nebula's
+  `connection_alive_interval` (~5 s) plus distribution time. Blocking a *device*
+  is immediate at the control plane and does not touch live tunnels — the two are
+  different actions with different effects, and both are usually wanted.
+- **Posture is asserted, not proven.** The agent reads disk encryption, secure
+  boot, firewall state and TPM presence natively, and reports them over a
+  connection authenticated by a key that also gates network access. That makes a
+  report *attributable*; it does not make it true. Attestation is not built.
 - **Changing a host's overlay address requires a restart**, not a reload — Nebula
   rejects a configuration reload whose certificate networks changed.
 

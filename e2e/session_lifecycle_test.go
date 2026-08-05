@@ -29,7 +29,7 @@ func TestRevokingATokenClosesTheBrowser(t *testing.T) {
 	// credential with it.
 	var tok wire.TokenResponse
 	if code := h.adminPost(t, ts.URL+"/v1/tokens", wire.CreateTokenRequest{
-		Name: "browser-" + t.Name(), Scopes: []string{"networks:read", "hosts:read", "hosts:block"},
+		Name: "browser-" + t.Name(), Scopes: []string{"networks:read", "memberships:read", "memberships:block"},
 	}, &tok); code != http.StatusCreated {
 		t.Fatalf("create token: %d", code)
 	}
@@ -74,29 +74,26 @@ func TestReadOnlySessionCannotBlockAHost(t *testing.T) {
 	readOnly := h.signIn(t, true)
 	full := h.signIn(t, false)
 
-	// Created, not enrolled: this harness mounts no enroll service, and the
-	// block confirmation page only needs a host record to describe.
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
-		NetworkID: h.netID.String(), Name: "narrowed", OverlayAddr: "10.42.14.1",
-		RoleID: h.roleID.String(),
-	}, &host); code != http.StatusCreated {
-		t.Fatalf("create host: %d", code)
-	}
+	// Straight into the store, because this harness mounts no enroll service and
+	// every route that brings a membership into existence now goes through one:
+	// a reservation is minted by it and redeemed by it. The block confirmation
+	// page only needs a host record to describe, and what is under test is the
+	// scope check on that page, not how the row got there.
+	host := h.insertHost(t, "narrowed", "10.42.14.1")
 
 	// The BLOCK CONFIRMATION page, deliberately: it is a GET, so no CSRF token
 	// is involved and the only thing that can refuse it is the scope check —
 	// which is what this test is about. Probing with the POST would conflate
 	// "narrowed" with "no CSRF token", and the two have very different fixes.
-	blockPage := ts.URL + "/ui/hosts/" + host.ID + "/block"
+	blockPage := ts.URL + "/ui/memberships/" + host.ID + "/block"
 
 	// Both sessions come from the same "*" bootstrap token, so any difference
 	// between them is the narrowing and nothing else.
-	if resp := browserReq(t, http.MethodGet, ts.URL+"/ui/hosts/"+host.ID, readOnly); resp.StatusCode != http.StatusOK {
+	if resp := browserReq(t, http.MethodGet, ts.URL+"/ui/memberships/"+host.ID, readOnly); resp.StatusCode != http.StatusOK {
 		t.Errorf("a read-only session cannot read a host: %d", resp.StatusCode)
 	}
 	if resp := browserReq(t, http.MethodGet, blockPage, readOnly); resp.StatusCode != http.StatusForbidden {
-		t.Errorf("a read-only session reached a hosts:block route = %d, want 403.\n"+
+		t.Errorf("a read-only session reached a memberships:block route = %d, want 403.\n"+
 			"Its token holds \"*\"; narrowing is the only thing that should stop it.",
 			resp.StatusCode)
 	}
@@ -131,8 +128,8 @@ func TestSignOutEndsTheSessionAndNotTheToken(t *testing.T) {
 		t.Errorf("GET /ui/networks after sign-out = %d (Location %q), want a redirect to the login page",
 			resp.StatusCode, resp.Header.Get("Location"))
 	}
-	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/hosts?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
-		t.Errorf("signing out of the browser broke the bearer token: /v1/hosts = %d", code)
+	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships?network_id="+h.netID.String(), nil, nil); code != http.StatusOK {
+		t.Errorf("signing out of the browser broke the bearer token: /v1/memberships = %d", code)
 	}
 }
 

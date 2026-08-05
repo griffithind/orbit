@@ -58,7 +58,7 @@ type Rule struct {
 	StartPort int32    `json:"start_port"`
 	EndPort   int32    `json:"end_port"`
 	Groups    []string `json:"groups,omitempty"`
-	Host      string   `json:"host,omitempty"`
+	Host      string   `json:"membership,omitempty"`
 	CIDR      string   `json:"cidr,omitempty"`
 	LocalCIDR string   `json:"local_cidr,omitempty"`
 	CAName    string   `json:"ca_name,omitempty"`

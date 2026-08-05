@@ -75,7 +75,7 @@ See [revocation.md](revocation.md).
 exactly one fragment, `50-orbit.yml`, alongside whatever the operator maintains.
 Firewall rules from both files concatenate. See §7.
 
-### 1.5 Certificate rotation is hot; changing a host's address is not
+### 1.5 Certificate rotation is hot; changing a membership's address is not
 
 `pki.go:reloadCerts` explicitly rejects a reload in which the certificate's
 networks or curve changed:
@@ -83,7 +83,7 @@ networks or curve changed:
 > `"Networks in new cert was different from old"`
 
 **Therefore:** renewal with a stable overlay address is zero-downtime and is the
-common path. Re-addressing a host is a distinct operation requiring a process
+common path. Re-addressing a membership is a distinct operation requiring a process
 restart, and must be modeled and surfaced as such.
 
 ### 1.6 The signing hook Orbit is built on
@@ -116,9 +116,9 @@ key". See §4.3 for what Orbit does instead.
    operators ──token───▶ │  Admin API      /v1/…            │
    CI / IaC ──token────▶ │  (OIDC later — see 4.4)          │
                          ├──────────────────────────────────┤
-   unenrolled hosts ───▶ │  Enroll API     /enroll/v1/…     │  public TLS
+   unenrolled memberships ───▶ │  Enroll API     /enroll/v1/…     │  public TLS
                          ├──────────────────────────────────┤
-   enrolled hosts ─────▶ │  Agent API      /agent/v1/…      │  overlay only
+   enrolled memberships ─────▶ │  Agent API      /agent/v1/…      │  overlay only
                          └───────────────┬──────────────────┘
                                          │
                          ┌───────────────▼──────────────────┐
@@ -151,7 +151,7 @@ One binary and one service per host. The agent:
 2. reloads Nebula, or stops and starts it when §1.5 requires it
 3. reports the applied config epoch and observed tunnel health back to Orbit
 
-It does this for EVERY network the host has joined, in one process: a host can
+It does this for EVERY network the membership has joined, in one process: a membership can
 belong to several networks run by control planes that have never heard of each
 other, and each keeps its own directory, certificate, and Nebula instance. The
 instances are irreducible — two overlays cannot share a UDP port or a tun
@@ -174,13 +174,13 @@ What the isolation bought, stated precisely so the trade is legible:
   restarts it, where two processes under two units failed independently. With
   `Restart=always` that is seconds.
 - **Changed.** A Nebula security fix ships on Orbit's release cadence rather
-  than the host package manager's. That is a real cost and the main argument
+  than the membership package manager's. That is a real cost and the main argument
   for the old arrangement.
 
 The agent recovers from its own failures rather than requiring a visit: a
 network whose directory is not ready is retried with backoff, and a Nebula that
 failed to start or has died is restarted at the top of every poll — before the
-poll, so a host whose data plane is down spends the tick getting it back.
+poll, so a membership whose data plane is down spends the tick getting it back.
 
 ---
 
@@ -190,22 +190,42 @@ poll, so a host whose data plane is down spends the tick getting it back.
 api_token(id, name, token_hash, scopes[], expires_at, last_used_at, revoked_at)
 audit_log(id, actor_type, actor_id, action, target, meta, source_ip, at)
 
-network(id, name, cidrs[], cert_version, curve, cert_ttl,
+device(id, key_fingerprint, public_key, key_backing, hostname,
+       blocked_at, blocked_reason, first_seen_at, last_seen_at,
+       os, os_version, kernel, arch, agent_version, nebula_version,
+       facts_observed_at,
+       disk_encrypted, secure_boot, firewall_enabled, tpm_present,
+       posture_observed_at)
+
+network(id, name, slug, cidrs[], cert_version, curve, cert_ttl,
         config_epoch, blocklist_epoch)
  ├─ ca(id, network_id, name, fingerprint, cert_pem, signer_ref,
  │     curve, not_before, not_after, state)
  ├─ role(id, network_id, name, groups[], firewall_rules jsonb)
- ├─ control_plane(network_id, host_id, addr, agent_port, last_seen_at)
+ ├─ control_plane(network_id, membership_id, addr, agent_port, last_seen_at)
  ├─ blocklist_entry(id, network_id, fingerprint, reason, epoch, not_after)
- └─ host(id, network_id, name, role_id, tags[], is_lighthouse, is_relay,
-         static_addrs[], state, applied_config_epoch,
-         applied_blocklist_epoch, last_seen_at)
-     ├─ host_address(network_id, host_id, addr)
-     ├─ certificate(id, host_id, ca_id, fingerprint, pem, cert_version,
+ └─ membership(id, network_id, device_id, name, role_id, tags[],
+         is_lighthouse, is_relay, static_addrs[], state,
+         applied_config_epoch, applied_blocklist_epoch)
+     ├─ membership_address(network_id, membership_id, addr)
+     ├─ certificate(id, membership_id, ca_id, fingerprint, pem, cert_version,
      │              not_before, not_after, state)
-     └─ enrollment_credential(id, network_id, host_id, method,
+     └─ enrollment_credential(id, network_id, membership_id, method,
+                              reserved_name, reserved_addr, reserved_role_id,
                               secret_hash, expires_at, used_at, used_from)
 ```
+
+**`device` is the only table not under `network`, and that is the point.** A
+machine is one thing across every network it joins, so its posture, its OS and
+the moment it was last heard from are recorded once. A `membership` is that
+machine *in* a network — `device_id` is `NOT NULL`, so the row's definition is
+literally "this device, in that network". See [model.md](model.md), which is the
+shorter document and the one to read first.
+
+An `enrollment_credential` names **either** an existing membership (re-enrolment)
+**or** a reservation — `reserved_name` and friends, redeemed into a membership
+that names its device from the moment it exists. Exactly one, by CHECK
+constraint.
 
 State machines:
 
@@ -214,8 +234,14 @@ ca:          pending → active → retiring → retired
 certificate: pending → active → superseded
                              └→ revoked
                              └→ expired          (derived, not stored)
-host:        created → enrolled → active → suspended → deleted
+membership:  pending → created → enrolled → active → suspended → deleted
 ```
+
+`pending` is a join nobody has authorized: the row exists so an operator can see
+the machine asking, and it holds no address, no certificate and no reach.
+`created` means authorized and addressed but never yet issued a certificate — a
+reservation redemption starts here, because presenting a valid code IS the
+authorization.
 
 ### 3.1 Invariants live in the database
 
@@ -226,10 +252,14 @@ convention:
 | Invariant | Mechanism |
 |---|---|
 | One active CA per network | partial unique index |
-| One active certificate per host **per cert version** | partial unique index — v1 and v2 legitimately coexist during a version migration |
+| One active certificate per membership **per cert version** | partial unique index — v1 and v2 legitimately coexist during a version migration |
+| A membership names a device | `device_id NOT NULL` |
+| One device row per key | unique index on `key_fingerprint` |
+| A reserved name is held while the code is live | partial unique index on `(network_id, reserved_name)` where unspent |
+| The control plane never holds a device private key | tripwire in migrations 0011 and 0013 |
 | Overlay addresses unique within a network | `host_address` primary key |
 | Enrollment credentials are single-use | conditional `UPDATE`, one statement |
-| Cloud instance ids enroll once | primary key on `(provider, instance_id)` |
+
 | Applied epochs never regress | `greatest()` on write |
 | The audit log is append-only | no `UPDATE`/`DELETE` grant to `orbit_app` |
 
@@ -239,7 +269,7 @@ schema and a compromise cannot quietly drop the evidence.
 
 ### 3.2 Networks are the unit of separation
 
-A network is a separate mesh: its own CA, address space, hosts, and epochs.
+A network is a separate mesh: its own CA, address space, memberships, and epochs.
 Nothing crosses between them, and a certificate issued by one network's CA does
 not verify against another's — `internal/ca`'s `TestNetworkIsolation` pins that,
 and it is also what makes CA-rotation overlap safe, since a pool trusting two
@@ -247,7 +277,7 @@ CAs accepts either.
 
 **Two networks may use the same prefix.** Running `prod` and `staging` both on
 `10.42.0.0/16` is legal and reasonably common. It is also why the agent API
-resolves a host by `(network, source address)` rather than by address alone; see
+resolves a membership by `(network, source address)` rather than by address alone; see
 §4.3.
 
 ### 3.3 Scaling limits
@@ -255,7 +285,7 @@ resolves a host by `(network, source address)` rather than by address alone; see
 Measured by `e2e/scale_test.go` (`TestMeshJoinCost`), so these are numbers
 rather than estimates.
 
-**Rows are free.** Networks, hosts, certificates, and audit entries are just
+**Rows are free.** Networks, memberships, certificates, and audit entries are just
 rows; Postgres bounds them, and not at any scale this project will reach soon.
 
 **Joined networks are the binding constraint.** Each network orbitd *joins*
@@ -279,7 +309,7 @@ hundreds of joined networks per process** as the working limit, and note that
 what the heap says.
 
 **A network orbitd has not joined still works.** Enrollment, admin, issuance,
-and blocking are unaffected; the network simply has no agent API, so its hosts
+and blocking are unaffected; the network simply has no agent API, so its memberships
 cannot poll, renew, or receive pushed revocations. Joining is an explicit
 per-instance decision rather than an implicit consequence of creating a network.
 
@@ -297,7 +327,7 @@ heartbeat goes stale, and its row is removed by the maintenance sweep — there 
 no deregistration path to get wrong, and no load balancer in front of the
 control plane.
 
-**Hosts scale independently of networks.** The limit there is watcher
+**Memberships scale independently of networks.** The limit there is watcher
 connections — one HTTP connection and one goroutine per agent long-polling —
 capped by `-max-watchers` (default 5000 per network) and ultimately by the
 process's file descriptors. Agents that cannot get a watcher slot fall back to
@@ -309,8 +339,7 @@ polling, which is why that cap fails soft rather than refusing service.
 
 ### 4.1 Admin API — `/v1`
 
-Scoped bearer tokens, modeled on the incumbent's `hosts:create` /
-`hosts:enroll` style so migration tooling is straightforward.
+Scoped bearer tokens.
 
 ```
 POST   /v1/networks                      networks:write
@@ -327,17 +356,25 @@ POST   /v1/roles                         roles:write
 GET    /v1/roles?network_id=             roles:read
 GET    /v1/roles/:id                     roles:read
 PATCH  /v1/roles/:id                     roles:write    (202 if groups changed)
-DELETE /v1/roles/:id                     roles:write    (409 if any host carries it)
+DELETE /v1/roles/:id                     roles:write    (409 if any membership carries it)
 
-POST   /v1/hosts                         hosts:create
-GET    /v1/hosts?network_id=&…           hosts:read     (filtered, paginated)
-GET    /v1/hosts/:id                     hosts:read
-PATCH  /v1/hosts/:id                     hosts:write
-DELETE /v1/hosts/:id                     hosts:block    (revokes, then removes)
-GET    /v1/hosts/:id/certificates        hosts:read     (paginated, no PEM)
-POST   /v1/hosts/:id/enrollment-code     hosts:enroll
-POST   /v1/hosts/:id/block               hosts:block
-POST   /v1/hosts/:id/unblock             hosts:block
+POST   /v1/networks/:ref/reservations    memberships:create   (hold a place; returns a code)
+GET    /v1/networks/:ref/pending         memberships:read     (the authorization queue)
+POST   /v1/memberships/:id/authorize     memberships:create   (admit a pending join)
+
+GET    /v1/memberships?network_id=&…           memberships:read     (filtered, paginated)
+GET    /v1/memberships/:id                     memberships:read
+PATCH  /v1/memberships/:id                     memberships:write
+DELETE /v1/memberships/:id                     memberships:block    (revokes, then removes)
+GET    /v1/memberships/:id/certificates        memberships:read     (paginated, no PEM)
+POST   /v1/memberships/:id/enrollment-code     memberships:enroll
+POST   /v1/memberships/:id/block               memberships:block
+POST   /v1/memberships/:id/unblock             memberships:block
+
+GET    /v1/devices                       devices:read   (every machine; NOT network-scoped)
+GET    /v1/devices/:id                   devices:read   (posture, and the networks it is on)
+POST   /v1/devices/:id/block             devices:block  (refuse it everywhere, immediately)
+POST   /v1/devices/:id/unblock           devices:block
 
 GET    /v1/networks/:id/convergence      networks:read
 POST   /v1/tokens                        tokens:write
@@ -347,6 +384,19 @@ GET    /v1/audit-logs                    audit:read     (action, target, since, 
 GET    /v1/whoami                        —              (authenticated; no scope)
 ```
 
+**There is no `POST /v1/memberships`.** A membership exists because a device
+joined, so creating one that names no machine is creating a row that means
+nothing — and it is what kept `device_id` nullable. What that endpoint was *for*
+is now a reservation: the same intent (a name, optionally an address and a role)
+recorded on a credential, redeemed into a membership that names its device from
+the moment it exists.
+
+**`devices:*` is deliberately not `memberships:*`.** A device is not scoped to a
+network, so `devices:read` reveals every machine on the control plane — strictly
+more than `memberships:read` on any one network — and `devices:block` cuts a
+machine off everywhere at once. Granting either through a network-scoped name
+would be a quiet escalation.
+
 Two status codes on that list are not decoration.
 
 `PATCH /v1/roles/:id` answers **202, not 200, when `groups` changed**. Firewall
@@ -354,9 +404,9 @@ rules are configuration and converge in seconds; groups are inside the signed
 certificate, so every host carrying the role presents the old set until it
 reissues. "Accepted, processing not complete" is literally the state of the
 system, and it is the one signal a caller that ignores the body cannot miss. The
-response carries the affected host count and the instant the last one converges,
+response carries the affected membership count and the instant the last one converges,
 computed from live certificate rows rather than estimated — the renewal jitter
-is a SHA-256 of the host id, so the true time is derivable.
+is a SHA-256 of the membership id, so the true time is derivable.
 
 A group change also stamps `role.groups_changed_at`, and `enroll.Service.State`
 pulls renewal forward for any host whose certificate predates it (§7). Without
@@ -364,11 +414,11 @@ that the 202's deadline would be half a certificate lifetime away; with it, abou
 a minute. The agent has always been able to honour such a hint — what was
 missing was any reason for the server to send one.
 
-`DELETE /v1/roles/:id` answers **409 naming the hosts** that carry the role.
+`DELETE /v1/roles/:id` answers **409 naming the memberships** that carry the role.
 `ON DELETE RESTRICT` means the database refuses regardless, but `mapErr` renders
 a foreign-key violation as `ErrNotFound` — so without the pre-check an operator
-would be told the role does not exist when the truth is that fourteen hosts use
-it.
+would be told the role does not exist when the truth is that fourteen
+memberships use it.
 
 Three checks live here rather than downstream, because each one otherwise fails
 much later and much less legibly:
@@ -396,19 +446,40 @@ mutation. If the audit write fails, the mutation fails.
 Public. Detailed in [enrollment.md](enrollment.md).
 
 ```
-POST /enroll/v1/enroll     { credential, public_key, curve, attestation? }
+POST /enroll/v1/join       { network, name, public_key, key_backing, hostname,
+                             signed_at, signature, credential? }
+                        →  { membership_id, device_id, name, state }
+
+POST /enroll/v1/claim      { membership_id, public_key, curve,
+                             signed_at, signature }
                         →  { certificate, ca_bundle, config, epochs,
                              agent_endpoints, renew_after }
 
-GET  /enroll/v1/recover/challenge?host_id=…
-POST /enroll/v1/recover    proof-of-possession for a host whose certificate
-                           expired while it was offline (enrollment.md §7.1)
+POST /enroll/v1/enroll     { credential, public_key, curve }
+                        →  same as claim; re-issues to a membership that exists
 ```
+
+**Unauthenticated is the wrong word for `join` and `claim`.** Neither takes a
+bearer secret because neither needs one: `join` proves possession of the key it
+presents, and `claim` proves possession of the key already recorded for the
+membership — supplied by the database, never by the request, which is what makes
+the check non-vacuous. Both signatures are over a length-prefixed canonical
+statement (`internal/device`), so no two field sets can encode identically.
+
+`claim` answers **409 while a membership is pending**, which is the normal case:
+a machine polls while a human has not looked yet. That status is the one an agent
+loops on, and the state is checked *after* the signature so an unauthenticated
+caller cannot use the endpoint to learn which memberships an operator approved.
+
+There is no recovery endpoint. A machine whose certificate expired re-runs
+`join`, which is idempotent and returns the membership it already holds; the
+device key that authenticates it never expires. See
+[enrollment.md](enrollment.md) §7.1.
 
 ### 4.3 Agent API — `/agent/v1`, bound to the overlay
 
-Once enrolled, a host has a Nebula tunnel. Orbit runs **as a Nebula host** and
-binds the agent API only to its overlay address.
+Once it has claimed a certificate, a machine has a Nebula tunnel. Orbit runs
+**as a Nebula host** and binds the agent API only to its overlay address.
 
 The identity assertion is the source address, and it is cryptographically sound
 because `firewall.go:Drop` verifies on **every single packet** that the peer's
@@ -433,12 +504,16 @@ POST /agent/v1/report         → applied epochs, nebula version, tunnel health
 
 Three consequences to design for:
 
-- **Bootstrap.** A host with no certificate cannot reach the overlay. Enrollment
-  therefore happens on the public Enroll API, once. See
+- **Bootstrap.** A machine with no certificate cannot reach the overlay. Joining
+  therefore happens on the public Enroll API. See
   [enrollment.md](enrollment.md).
-- **Expiry deadlock.** A host whose certificate expires while offline cannot
-  reach the overlay to renew. Mitigated by renewing at 50% of lifetime and by a
-  public recovery endpoint that requires proof of possession of the existing key.
+- **Expiry deadlock — dissolved, not mitigated.** A machine whose certificate
+  expires while offline cannot reach the overlay to renew. This used to need a
+  recovery protocol; it no longer needs anything, because the credential that
+  authenticates a join is a key the machine generated itself and nobody issued.
+  Renewing at 50% of lifetime still avoids the round trip; failing that, the
+  machine re-runs `join` and is back. See
+  [design-device-identity.md](design-device-identity.md) §2.
 - **One nebula interface per network.** Easy to miss and expensive to discover
   late. Two networks may legitimately use the same prefix — `prod` and `staging`
   both on `10.42.0.0/16` is common — so a source address like `10.42.0.7` is
@@ -482,7 +557,7 @@ scope check, and audit entry is unchanged.
 
 `Display` is not scaffolding for that future. It is why the audit log reads
 `deploy-bot` instead of a uuid **today**, and it is captured at write time
-rather than joined, because tokens are revoked and hosts are hard-deleted:
+rather than joined, because tokens are revoked and memberships are hard-deleted:
 attribution that depends on a join degrades over exactly the period an audit
 cares about.
 
@@ -511,7 +586,7 @@ keeps `orbit_app` from being able to `ALTER` the schema.
 ### 4.5 The control plane cannot dial the overlay
 
 `internal/mesh.Node` exposes `Listen` and no `Dial`. orbitd runs nebula on a
-userspace gVisor netstack with no tun device, so the host kernel has **no route
+userspace gVisor netstack with no tun device, so the membership kernel has **no route
 to the overlay**: `http.DefaultClient` inside orbitd cannot reach any address in
 the mesh. The control plane accepts agent connections and initiates nothing.
 
@@ -555,14 +630,22 @@ depend on a service that needs the control plane to exist.
 
 | Implementation | Use |
 |---|---|
-| `FileSigner` | **the supported path** — key on local disk, encrypted at rest |
+| vault (`db://`) | **the default** — key sealed in Postgres under a passphrase-derived KEK that is not in Postgres. See [key-custody.md](key-custody.md) |
+| `FileSigner` (`file://`) | supported — key on local disk, encrypted at rest. `orbitd bootstrap -ca-key` chooses it |
 | `KMSSigner` + `RemoteSigner` | interface only; no backend ships today |
 | `NewMemorySigner` | tests and `--dev` only |
 
-Orbit targets a self-hosted deployment on an ordinary VM, so the CA key lives on
-that VM's disk. Be clear-eyed about what that means: nebula has no intermediate
-CAs (§1.1), so this key is a root of trust for the entire mesh, and anyone who
-reads it can mint any identity the CA's constraints allow.
+Orbit targets a self-hosted deployment on an ordinary VM, so the CA key lives
+either in that VM's database or on its disk — and in both cases the thing that
+decrypts it is on the host, not in Postgres. Be clear-eyed about what that means:
+nebula has no intermediate CAs (§1.1), so this key is a root of trust for the
+entire mesh, and anyone who reads it can mint any identity the CA's constraints
+allow.
+
+What the vault changes is the *operational* shape, not the trust boundary. An
+attacker needed (database read) + (file on the host); they now need (database
+read) + (the KEK, on the host). What it buys is that a second replica needs one
+secret instead of a copy of every key file.
 
 Three things bound that, and all of them are free:
 
@@ -622,10 +705,10 @@ Build and rehearse it before you need it.
 ```
 1. POST /v1/cas                     create CA₂ — inserted 'pending' AND
                                     published to every trust bundle
-2. GET  /v1/networks/:id/convergence  wait for hosts to apply it
+2. GET  /v1/networks/:id/convergence  wait for memberships to apply it
 3. POST /v1/cas/:id/activate        CA₂ → active, CA₁ → retiring.
-                                    Refused with 409 while hosts are behind.
-4. (hosts renew onto CA₂)
+                                    Refused with 409 while memberships are behind.
+4. (memberships renew onto CA₂)
 5. POST /v1/cas/:id/retire          CA₁ → retired, dropped from the bundle.
                                     Refused while it has live certificates.
 ```
@@ -640,18 +723,18 @@ promotes it and partitions the entire fleet. The pending state only means
 anything if pending CAs are actually distributed.
 `TestNewCAIsPublishedImmediately` pins it.
 
-**Activation is gated on convergence.** A 409 naming the lagging hosts, because
+**Activation is gated on convergence.** A 409 naming the lagging memberships, because
 "not converged" without saying who is not actionable. The gate lives at the API
 layer rather than in the store, so the emergency path can override it.
 
 **Retirement is gated on usage.** `GET /v1/cas` reports `active_certificates`
 per CA, which is how an operator knows a rotation has finished. Retiring drops
-the CA from every trust bundle; doing that while hosts still present its
-certificates invalidates exactly the hosts that had not renewed.
+the CA from every trust bundle; doing that while memberships still present its
+certificates invalidates exactly the memberships that had not renewed.
 
 ### Emergency rotation
 
-After a key compromise, cutting off unconverged hosts is the lesser harm:
+After a key compromise, cutting off unconverged memberships is the lesser harm:
 
 ```json
 POST /v1/cas/:id/activate
@@ -659,7 +742,7 @@ POST /v1/cas/:id/activate
 ```
 
 A typed field rather than a query flag, so it cannot be taken by accident, and
-audited as `ca.force_activated` — a distinct action carrying how many hosts were
+audited as `ca.force_activated` — a distinct action carrying how many memberships were
 cut off. An auditor should not have to infer that from a timestamp.
 
 ### Automatic retirement
@@ -671,7 +754,7 @@ CA has expired nothing it ever signed can still verify. Keeping it in the bundle
 costs bytes in every host's configuration and can never accept anything.
 
 This is the *only* automatic CA state change. Retiring a live CA stays manual,
-because that decision can strand hosts that have not renewed.
+because that decision can strand memberships that have not renewed.
 
 ---
 
@@ -718,7 +801,7 @@ pki:
 static_host_map: { … }                  # lighthouses
 lighthouse:
   am_lighthouse: false
-  hosts: [ … ]
+  memberships: [ … ]
 relay:
   relays: [ … ]
 firewall:
@@ -806,19 +889,19 @@ server-side for free.
 
 ### Scale, measured
 
-Rendered size is the constraint, not compile time (25 ms at 5000 hosts).
+Rendered size is the constraint, not compile time (25 ms at 5000 memberships).
 All-to-all with 3 allowances:
 
-| hosts | per-host config | fleet push per epoch |
+| memberships | per-membership config | fleet push per epoch |
 |---|---|---|
 | 100 | 43 KiB | 4.2 MiB |
 | 1000 | 432 KiB | 421 MiB |
 | 2000 | 863 KiB | 1.6 GiB |
 
-Tiered policy stays cheap — 1000 hosts at 27 KiB each, 27 MiB fleet-wide. The
-limit is roughly **1000 hosts on an all-to-all shape**.
+Tiered policy stays cheap — 1000 memberships at 27 KiB each, 27 MiB fleet-wide. The
+limit is roughly **1000 memberships on an all-to-all shape**.
 
-Caching the resolved document is *not* the fix: compiling all hosts at once is
+Caching the resolved document is *not* the fix: compiling all memberships at once is
 only 27% faster than compiling each separately, because emission is quadratic
 while resolution is linear. The structural fix is to **allocate addresses by
 tag** — if a tag is a prefix, every tag selector compiles to one rule and the
@@ -834,14 +917,14 @@ Orbit layers four mechanisms; details and the measurement harness are in
 [revocation.md](revocation.md).
 
 1. **Long-poll / SSE** on `/agent/v1/watch` — sub-second when connected
-2. **Poll fallback** with jitter — for hosts behind proxies that break long-poll
-3. **Epoch piggyback** — every agent response carries the current epochs; a host
+2. **Poll fallback** with jitter — for memberships behind proxies that break long-poll
+3. **Epoch piggyback** — every agent response carries the current epochs; a membership
    seeing a newer epoch pulls immediately
 4. **Short certificate lifetimes** — the only mechanism that works under
    partition, and therefore the real backstop
 
 Fan-out between replicas uses Postgres `LISTEN`/`NOTIFY`. It is sufficient to
-five figures of hosts and avoids operating a message broker on day one; revisit
+five figures of memberships and avoids operating a message broker on day one; revisit
 if a single Postgres cannot hold the connection count.
 
 ---
@@ -849,7 +932,7 @@ if a single Postgres cannot hold the connection count.
 ## 9. Failure behaviour (non-negotiable)
 
 **Orbit being down must never break the data plane.** Existing tunnels keep
-working; hosts keep their certificates until expiry; the mesh is unaffected.
+working; memberships keep their certificates until expiry; the mesh is unaffected.
 
 Make this a test, not an intention:
 
@@ -875,7 +958,6 @@ The agent's failure rules:
   `internal/agent` (`GuardPolicy`), with `ConfirmWithin` (10m default),
   `MinConfirm` (60s — a request completing milliseconds after SIGHUP proves
   nothing, since nebula reloads asynchronously), and `Quarantine` (30m).
-- Provide `orbit agent freeze` as an operator escape hatch.
 
 ---
 
@@ -883,11 +965,12 @@ The agent's failure rules:
 
 | Threat | Mitigation |
 |---|---|
-| Stolen enrollment credential | Single-use, short TTL, bound to one host record, rate-limited, audited, optionally attestation-bound ([enrollment.md](enrollment.md)) |
-| Compromised host | Block → blocklist epoch → push; short cert TTL bounds worst case. Host key never leaves the host, so theft requires host compromise |
-| Read access to Orbit's database | No host private keys exist in it. CA private keys are in KMS. Enrollment credentials are stored hashed |
-| Code execution in Orbit | **Worst case.** Attacker can sign anything the CA constraints allow. Mitigated by narrow per-network CAs (§1.2), KMS-side rate limits, and signing-operation alerting. Not fully mitigable — §1.1 |
-| Compromised CA key | Full mesh compromise for that CA's scope. Requires CA rotation (§6). This is why keys live in KMS/HSM and CAs are scoped and short-lived |
+| Stolen reservation code | Single-use, short TTL, holds one name in one network, rate-limited, audited. It pre-authorizes a join; it does not by itself yield a certificate, because the claim that follows is bound to the device key that redeemed it |
+| Forged join | The join is signed over a canonical statement by the key it presents, so lodging one on another machine's behalf is not possible. A claim is verified against the key already stored for the membership — supplied by the database, never the request |
+| Compromised machine | Block the **membership** → blocklist epoch → push, or block the **device** to refuse it on every network immediately. Short cert TTL bounds the worst case; the mesh key never leaves the machine, so theft requires compromising it |
+| Read access to Orbit's database | No usable private key is in it. Mesh and device keys never reach the control plane at all; CA and identity keys are there only as ciphertext, sealed under a KEK the database never sees. Tripwires in migrations 0011, 0013, 0017 and 0018 fail if a plaintext column is added. Credentials are hashed. An attacker needs the database AND the host; see [key-custody.md](key-custody.md) |
+| Code execution in Orbit | **Worst case.** The attacker has the KEK (or the key file) and can sign anything the CA's constraints allow. Bounded by narrow per-network CAs (§1.2) and short certificate lifetimes; not fully mitigable — §1.1. A remote signer would reduce this to "can request signatures while resident", and none ships |
+| Compromised CA key | Full mesh compromise for that CA's scope until rotation (§6). This is why CAs are scoped and short-lived — and why an offline root is NOT available as a mitigation: nebula has no intermediate CAs, so every CA is a root (§1.1) |
 | A network's CA minting identities in another | Immutable Issuer↔CA binding: an `Issuer` is bound to one CA and one signer at construction, and there is deliberately no method that selects a CA at signing time. Tested by `TestNetworkIsolation` |
 | Resource exhaustion from one network | Watcher caps per network, enrollment rate limits, signing bounded by CA constraints |
 | Network attacker | Agent API is overlay-only; Enroll API is TLS with credential binding |
@@ -939,4 +1022,4 @@ enrollment.md §4–5.
   proprietary. Orbit's agent is its own thing.
 - **Being a general-purpose CA.** Nebula certificates only.
 - **Proxying data traffic.** Orbit is control plane exclusively. Lighthouses and
-  relays are Nebula hosts that Orbit configures, not services it implements.
+  relays are Nebula memberships that Orbit configures, not services it implements.

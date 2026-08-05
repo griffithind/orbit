@@ -40,8 +40,8 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 	ctx := context.Background()
 
-	var host wire.HostResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts", wire.CreateHostRequest{
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(),
 		Name:      "authoritative-" + uuid.NewString()[:8],
 		RoleID:    h.roleID.String(),
@@ -50,7 +50,7 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	}
 
 	var codeResp wire.EnrollmentCodeResponse
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+host.ID+"/enrollment-code", nil, &codeResp); code != http.StatusCreated {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp); code != http.StatusCreated {
 		t.Fatalf("enrollment code: %d", code)
 	}
 

@@ -320,7 +320,7 @@ func (s *Server) handleCheckPolicy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		out.Host = host
+		out.Membership = host
 
 		// The dry run. Same compiler, same fleet, same management floor as the
 		// render path — a preview built from anything else is a preview of a
@@ -333,7 +333,7 @@ func (s *Server) handleCheckPolicy(w http.ResponseWriter, r *http.Request) {
 			Fleet:      policy.Snapshot{Members: fleet, CIDRs: net.CIDRs},
 			Management: s.managementFloor(ctx, tx, net.ID),
 		}
-		rs, cerr := c.Host(doc, host.ID)
+		rs, cerr := c.Membership(doc, host.ID)
 		if cerr != nil {
 			// A document that validates and then fails to compile is the failure
 			// this endpoint exists to catch: a selector naming a host that was
@@ -407,15 +407,15 @@ var errPolicyCheckHostNotFound = errors.New("no such host in this network")
 // By name as well as by uuid because the operator asking "will web-01 still reach
 // the database" has the name, and making them look up a uuid first is the friction
 // that stops the check from being run at all. Names are unique within a network
-// (orbit.host UNIQUE (network_id, name)), so the lookup is unambiguous — which is
+// (orbit.membership UNIQUE (network_id, name)), so the lookup is unambiguous — which is
 // not true across networks, and is why this takes a network id.
 func resolveCheckHost(ctx context.Context, tx *store.Tx, networkID uuid.UUID, ref string) (*wire.PolicyCheckHost, error) {
 	var (
-		host *store.Host
+		host *store.Membership
 		err  error
 	)
-	if hostID, perr := uuid.Parse(ref); perr == nil {
-		host, err = tx.GetHost(ctx, hostID)
+	if membershipID, perr := uuid.Parse(ref); perr == nil {
+		host, err = tx.GetHost(ctx, membershipID)
 		if err == nil && host.NetworkID != networkID {
 			// A real host, in a different network. Reported as absent rather than
 			// as a mismatch, for the reason notFoundOr conflates absent and

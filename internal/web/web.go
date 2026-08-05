@@ -110,7 +110,7 @@ type Sessions interface {
 type Config struct {
 	// BaseURL is the external URL the UI is reached at (-ui-url), used to build
 	// absolute links and to check the Origin header on state-changing requests.
-	// Empty means same-origin checks fall back to the request's Host, which is
+	// Empty means same-origin checks fall back to the request's Membership, which is
 	// correct for the loopback default and wrong behind a proxy that rewrites it
 	// — which is why binding non-loopback without this is refused at startup.
 	BaseURL string
@@ -214,16 +214,16 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	get("/ui/networks", "networks:read", s.handleNetworks)
 	get("/ui/networks/{id}", "networks:read", s.handleOverview)
 	get("/ui/networks/{id}/convergence", "networks:read", s.handleConvergence)
-	get("/ui/networks/{id}/hosts", "hosts:read", s.handleHostList)
-	get("/ui/networks/{id}/hosts/new", "hosts:create", s.handleNewHostForm)
-	post("/ui/networks/{id}/hosts", "hosts:create", s.handleCreateHost)
+	get("/ui/networks/{id}/hosts", "memberships:read", s.handleHostList)
+	get("/ui/networks/{id}/hosts/new", "memberships:create", s.handleNewHostForm)
+	post("/ui/networks/{id}/hosts", "memberships:create", s.handleReserveHost)
 	get("/ui/networks/{id}/rotation", "cas:read", s.handleRotation)
 
-	get("/ui/hosts/{id}", "hosts:read", s.handleHostDetail)
-	get("/ui/hosts/{id}/block", "hosts:block", s.handleBlockConfirm)
-	post("/ui/hosts/{id}/block", "hosts:block", s.handleBlock)
-	post("/ui/hosts/{id}/unblock", "hosts:block", s.handleUnblock)
-	post("/ui/hosts/{id}/enrollment-code", "hosts:enroll", s.handleEnrollmentCode)
+	get("/ui/memberships/{id}", "memberships:read", s.handleHostDetail)
+	get("/ui/memberships/{id}/block", "memberships:block", s.handleBlockConfirm)
+	post("/ui/memberships/{id}/block", "memberships:block", s.handleBlock)
+	post("/ui/memberships/{id}/unblock", "memberships:block", s.handleUnblock)
+	post("/ui/memberships/{id}/enrollment-code", "memberships:enroll", s.handleEnrollmentCode)
 
 	post("/ui/cas/{id}/activate", "cas:write", s.handleActivateCA)
 	post("/ui/cas/{id}/retire", "cas:write", s.handleRetireCA)

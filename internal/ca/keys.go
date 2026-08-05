@@ -2,6 +2,7 @@ package ca
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -205,4 +206,32 @@ func DeriveHostKey(curve cert.Curve, material []byte) (priv, pub []byte, err err
 	default:
 		return nil, nil, fmt.Errorf("unsupported curve: %s", curve)
 	}
+}
+
+// ParseCurve reads a curve name.
+//
+// One function so the CLI, the enrollment wire, and the bootstrap flag cannot
+// disagree about what "P256" means. The wire's own default — empty meaning
+// CURVE25519, for agents predating the flag — is applied by the caller, because
+// it is a compatibility rule about one protocol rather than a property of the
+// name.
+func ParseCurve(name string) (cert.Curve, error) {
+	switch name {
+	case "CURVE25519", "25519", "X25519", "Curve25519":
+		return cert.Curve_CURVE25519, nil
+	case "P256":
+		return cert.Curve_P256, nil
+	default:
+		return 0, fmt.Errorf("unknown curve %q (want CURVE25519 or P256)", name)
+	}
+}
+
+// SignDigest lets a memory-held key sign an already-hashed message.
+//
+// The optional interface internal/ca's X.509 issuer looks for. Ed25519 signs the
+// MESSAGE and ECDSA signs a DIGEST, so a signer that only exposes "sign these
+// bytes" cannot be used for X.509 by forwarding — the preimage is gone. This is
+// the seam that bridges them, and SignDigestBytes refuses the curve that cannot.
+func (s *memorySigner) SignDigest(_ context.Context, digest []byte, hash crypto.Hash) ([]byte, error) {
+	return SignDigestBytes(s.curve, s.priv, digest, hash)
 }

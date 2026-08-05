@@ -3,7 +3,7 @@
 Running Orbit on one ordinary VM.
 
 Service files are **generated**, not copied: `orbitd bootstrap -write-unit`
-writes the control plane's, and `orbit agent install` writes each host's. A unit
+writes the control plane's, and `orbit agent install` writes each machine's. A unit
 file kept in a docs directory drifts — the flags change, the example does not,
 and somebody pastes something that stopped working two releases ago.
 [`deploy/`](../deploy) holds only what cannot be generated: the compose file and
@@ -18,10 +18,10 @@ an environment template.
 | Postgres 15+ | local is fine; the control plane is the only client. 15 is the floor: the schema uses `ON DELETE SET NULL (column)`, which 14 cannot parse |
 | `orbitd` | a public TLS endpoint for enrollment; an overlay address on each network it serves |
 | A lighthouse | **a stable public IP and an open UDP port** — the one hard requirement, and `orbitd` can be it |
-| Managed hosts | outbound UDP; no inbound, no public address |
+| Managed memberships | outbound UDP; no inbound, no public address |
 
 The lighthouse is the only component that must be publicly reachable, because
-it is how hosts find each other. It can be the same VM as everything else, which
+it is how memberships find each other. It can be the same VM as everything else, which
 is the cheapest working topology:
 
 ```
@@ -32,13 +32,13 @@ is the cheapest working topology:
         │            10.42.0.1:8443 overlay      │  ← agent API
         └────────────────────────────────────────┘
                             ▲
-                  UDP 4242  │  hosts punch to here, then talk directly
+                  UDP 4242  │  memberships punch to here, then talk directly
 ```
 
 `orbitd` runs nebula in-process on a userspace stack, so there is no tun device,
-no root, and no separate nebula service on this machine. Managed hosts run
+no root, and no separate nebula service on this machine. Managed memberships run
 nebula in-process too, inside `orbit agent run` — one binary and one service,
-serving every network the host has joined.
+serving every network the membership has joined.
 
 Put a reverse proxy in front of `:8080` for TLS. The agent API is **not** on
 that listener — it lives only on the overlay — so nothing an unauthenticated
@@ -50,7 +50,7 @@ stranger can reach is exposed by it beyond enrollment.
 
 | Port | Proto | Open to | Why |
 |---|---|---|---|
-| **4242** | udp | the internet | Nebula. The one hard requirement — hosts cannot find each other without it |
+| **4242** | udp | the internet | Nebula. The one hard requirement — memberships cannot find each other without it |
 | **8080** | tcp | the internet | Enrollment and admin. Put TLS in front and use 443 once you have a name |
 | 22 | tcp | your addresses | ssh |
 | 8443 | — | **nothing** | The agent API listens on `orbitd`'s in-process userspace stack. The kernel never sees it, so there is nothing to open and no way to expose it by accident |
@@ -212,29 +212,43 @@ shred -u /etc/orbit/ca-pass.plain
 # 4. Mint the break-glass token now, while everything works. See section 5.
 orbitd token create -name break-glass -scopes '*'
 
-# 5. Every host from here is the same two commands.
-orbit host create -name web-01 -addr 10.42.0.7 -role web && orbit host code web-01
-orbit agent enroll -url https://orbit.example.com -code orb_1_…
+# 5. Every machine from here. Reserve a place; it prints a single-use code.
+orbit membership reserve -name web-01 -role web
+
+# On the machine: install once, join once per network.
+sudo orbit agent install
+sudo orbit agent join -url https://orbit.example.com -network prod -code orb_1_…
 ```
 
+`install` is a MACHINE-level action — it generates the device identity at
+`/var/lib/orbit/device.key` and installs the service — and `join` is per
+network. A machine on three meshes is installed once and joined three times; the
+service rescans its root, so each join lands without a restart and without
+dropping the tunnels of the networks it already serves.
+
+Omit `-code` and the machine lands in `orbit membership pending` for an operator
+to authorize. That is the better shape for anything handed to a person, because
+no secret has to travel to it — and it is the only shape available when the
+machine is provisioned before anyone knows what it will be called.
+
 `-lighthouse` is a **seed**, not a setting. It applies only when the control
-plane's host record is first created; after that the record is the source of
-truth, exactly as it is for every other host. That is why there is no
+plane's own membership is first created; after that the membership is the source
+of truth, exactly as it is for every other machine. That is why there is no
 `-lighthouse=true`: a public address cannot be discovered from behind NAT, so
 the operator states it once, and a lighthouse nobody can reach is worse than
 none because every host keeps dialling it.
 
 A control plane that is its own lighthouse needs a **fixed** UDP port —
-`-nebula-port`, which defaults to 4242 and is what the `static_addrs` on its host
-record advertise. Nebula refuses `am_lighthouse` with no port rather than
+`-nebula-port`, which defaults to 4242 and is what the `static_addrs` on its own
+membership advertise. Nebula refuses `am_lighthouse` with no port rather than
 starting into a state where every host is told to reach it somewhere it is not
 listening, and Orbit checks the same thing first so the error names the flag and
-the host record rather than a nebula config field.
+the membership rather than a nebula config field.
 
 Roles thereafter change through the API and take effect without a restart:
 
 ```bash
-orbit host set lh-01 -lighthouse -static-addrs 203.0.113.20:4242
+orbit membership set lh-01 -lighthouse -static-addrs 203.0.113.20:4242
 ```
 
 `orbitd` logs the roles actually in force at startup, read from the record — and
@@ -246,11 +260,11 @@ took.
 `-relay` exists and is off by default, and that asymmetry is deliberate.
 
 A **lighthouse** answers queries and coordinates hole punching. It is not in the
-data path. Restarting the control plane briefly interrupts discovery for hosts
+data path. Restarting the control plane briefly interrupts discovery for memberships
 that do not already have a tunnel; established tunnels carry on. That is a
 seconds-long blip, and worth it to run one thing instead of three.
 
-A **relay** forwards other hosts' traffic — on the machine holding the mesh's
+A **relay** forwards other memberships' traffic — on the machine holding the mesh's
 root CA key, spending its bandwidth and CPU, and a restart drops that traffic
 rather than delaying a handshake. Run a separate relay when you need one.
 
@@ -261,7 +275,7 @@ Handing the role to a dedicated host is a normal change, not a migration:
 ```bash
 # 1. Enroll the new lighthouse with its public address.
 # 2. Stand the control plane down. No restart, no flag.
-curl -XPATCH .../v1/hosts/$CONTROL_PLANE_HOST_ID \
+curl -XPATCH .../v1/memberships/$CONTROL_PLANE_HOST_ID \
      -d '{"is_lighthouse":false,"static_addrs":[]}'
 ```
 
@@ -283,6 +297,30 @@ needs a lighthouse, which has to be enrolled by a running `orbitd`.
 ---
 
 ## 5. The break-glass token
+
+### What it is not for
+
+Break-glass is about **an operator locked out of the admin API**. It has nothing
+to do with a machine locked out of the mesh, and the two are worth keeping
+apart because they have different causes and different answers:
+
+| Locked out | Cause | Way back |
+|---|---|---|
+| A **machine** | its certificate expired while it was offline | re-run `orbit agent join` — the device key never expires |
+| A **person** | every admin token expired, revoked, or lost | `orbitd token create`, which authenticates with the database |
+
+The device key removed the first entirely (`enrollment.md` §7.1), and removed
+nothing from the second. A fleet can be perfectly healthy — every tunnel up,
+every machine renewing on schedule — while no human can add a machine, rotate a
+CA, or block a stolen laptop. That is precisely the situation this section
+exists for.
+
+One caveat on "the device key never expires": it removes *credential expiry* as
+a cause of lockout, not *control-plane availability*. A machine still needs the
+control plane to be up and its database reachable, and a blocked device or a
+suspended membership is still refused — which is the point of both.
+
+### Why it needs its own credential
 
 `POST /v1/tokens` requires a token. So the one failure it cannot help with is
 losing every admin credential — a token revoked in error, an expiry nobody
@@ -322,7 +360,21 @@ failure you will have.
 scoped tokens minted through the API; this exists to get you back to the point
 where you can do that.
 
-**4. Test it on a schedule** — quarterly is enough. An untested recovery path is
+**4. Escrow the KEK beside it, once there is one.** [key-custody.md](key-custody.md)
+§4.1 moves the CA and identity keys into Postgres under a single key-encryption
+key. That is the right trade for HA and it changes what a lost secret costs:
+today losing a CA key file costs one network's CA, and afterwards losing the KEK
+costs **every CA key and every identity key at once**.
+
+The network identity key is the worst case, because it is the one key that can
+never be rotated — its hash is the network ID every machine stores. Losing it
+does not just require re-issuing certificates; it retires the network's identity.
+
+So the KEK belongs wherever the break-glass token is, and **not** wherever the
+database backups are. A backup and a KEK in the same place is a backup that is
+sufficient on its own, which is the property §7 relies on not being true.
+
+**5. Test it on a schedule** — quarterly is enough. An untested recovery path is
 a belief, not a capability:
 
 ```bash
@@ -347,7 +399,7 @@ would fail only at the moment it was needed. The check compares the scopes it
 gets back:
 
 ```
-FAIL  token no longer holds '*' (has: hosts:read)
+FAIL  token no longer holds '*' (has: memberships:read)
 ```
 
 Each failure is distinguished, because they need different responses: `401`
@@ -412,7 +464,7 @@ The single most important number, and it is a trade-off with no free side.
 - the **revocation SLA for a partitioned host** — one that cannot reach the
   control plane keeps trusting its peers until its certificate expires, and
   nothing shortens that; and
-- the **time you have to fix a broken control plane** before hosts start
+- the **time you have to fix a broken control plane** before memberships start
   failing to renew and drop off the mesh.
 
 | `cert_ttl` | Partitioned host loses access within | You have this long to restore |
@@ -426,7 +478,7 @@ bring-up above uses. Twelve hours of slack is not enough time to notice an
 outage, get to a computer, and restore a database. Take 24h only when you have a
 second replica and a tested restore.
 
-Note that this is a bound on *silent* failure only: a host that can still reach
+Note that this is a bound on *silent* failure only: a membership that can still reach
 the control plane gets revocations in about five seconds.
 
 ---
@@ -437,26 +489,44 @@ Three things, with very different consequences.
 
 | Lose | Consequence | Recovery |
 |---|---|---|
-| **Database** | Host records, certificates, blocklist, audit trail | Restore. Without a backup: every host re-enrols by hand |
+| **Database** | Devices, memberships, certificates, blocklist, audit trail | Restore. Without a backup: every machine joins again and is authorized by hand |
 | **CA key** | Cannot issue or renew anything | Recoverable *if you notice in time* — see below |
-| **Enrollment pepper** | Outstanding enrollment codes stop working | Nothing to do; they expire in 15 minutes anyway |
+| **KEK passphrase** | Every CA key and identity key becomes unreadable | **Nothing.** The database holds only ciphertext. Escrow it — see §5 |
+| **Control plane device key** | The control plane's own membership no longer names a device it holds | Restore, or delete that membership and let it rejoin — see below |
 
 ```bash
-# Nightly is enough; certificates are re-issuable, the host inventory is not.
+# Nightly is enough; certificates are re-issuable, the membership inventory is not.
 pg_dump orbit | age -r "$BACKUP_KEY" > orbit-$(date +%F).sql.age
 # The CA key is already encrypted at rest. Copy it as-is, and store the
 # passphrase somewhere the TPM-sealed copy is not — a sealed credential does
 # not survive the machine it is sealed to.
-cp /var/lib/orbit/ca.key ca.key.backup
+# With keys in the database (the default), the dump above already contains them
+# — as ciphertext. What it does NOT contain, and must not, is the passphrase.
+# Escrow that separately; see section 5.
+#
+# With -ca-key / -identity-key, copy those files as-is instead. They are already
+# encrypted at rest.
+cp /var/lib/orbit/ca.key ca.key.backup 2>/dev/null || true
+# The control plane is a machine on its own network, so it has a device key too.
+# Small, never rotated, and not secret in the way the CA key is — it cannot mint
+# anything — but losing it makes this control plane a different machine.
+cp /var/lib/orbit/device.key device.key.backup
 ```
 
 **Losing the CA key is survivable, and the window is one certificate lifetime.**
 Nothing about a lost key stops the existing mesh working. Create a new CA with a
-new key, publish it (creating a CA pushes it to every trust bundle), let hosts
-converge, then activate it — hosts renew onto it. That is the ordinary rotation
-in [design.md §6](design.md#6-ca-rotation), and it works as long as hosts are
+new key, publish it (creating a CA pushes it to every trust bundle), let memberships
+converge, then activate it — memberships renew onto it. That is the ordinary rotation
+in [design.md §6](design.md#6-ca-rotation), and it works as long as memberships are
 still up and still renewing, which is true until their current certificates
 expire. Miss that window and every host must re-enrol.
+
+**Losing the control plane's device key is a nuisance, not an outage.** It is
+the machine's identity, not an authority: nothing it holds can issue anything.
+On the next start `orbitd` generates a new one, and the membership it recorded
+for itself still names the old device. Delete that membership and let it be
+recreated, or restore the file. Nothing else in the fleet is affected, because
+no other machine ever verified it.
 
 **The data plane survives the control plane's death.** Orbit is not in the
 traffic path. If this VM burns down, every existing tunnel keeps carrying
@@ -484,7 +554,7 @@ reset convergence to zero and page you during every deploy.
 
 | Metric | Alert when |
 |---|---|
-| `orbit_convergence_lag_seconds` | `> 300` — a host has been behind for 5 minutes |
+| `orbit_convergence_lag_seconds` | `> 300` — a membership has been behind for 5 minutes |
 | `orbit_certificates_expiring_soon` | `> 0` — renewal is failing for someone, well before they drop off |
 | `orbit_epoch_listener_up` | `== 0` — push is down, every agent has fallen back to polling |
 | `orbit_db_scrape_up` | `== 0` — serving, but cannot reach Postgres |
@@ -499,7 +569,7 @@ Also exported: `orbit_config_epoch`, `orbit_blocklist_epoch`,
 
 Everything is labelled by network only. Per-host labels would grow a time series
 per machine and make Prometheus the most expensive part of a deployment that
-otherwise runs on one small VM; per-host detail is in the convergence endpoint,
+otherwise runs on one small VM; per-membership detail is in the convergence endpoint,
 which is queried when someone is actually looking.
 
 ### Convergence
@@ -516,14 +586,14 @@ blocklist  epoch 18        1204/1204 100.0%
   HOST                         CONFIG   BLOCKLIST  LAST SEEN
   edge-07                      41       18         14m22s ago
 
-rotating a CA past these hosts will cut them off
+rotating a CA past these memberships will cut them off
 ```
 
 ### The web console
 
 `orbitd -ui-addr 8081` serves an operator console. Off unless you ask for it, and
 a bare port binds **loopback** — the listener carries every host name, every
-overlay address, and a control that cuts a host off the mesh, on the machine
+overlay address, and a control that cuts a membership off the mesh, on the machine
 holding the mesh's root CA key.
 
 ```bash
@@ -588,15 +658,15 @@ something happened, the log line tells you to which host.
 |---|---|
 | `host deleted and its certificates revoked` | a decommission; check it was intended |
 | `token revoked itself; this request was its last` | end of a credential rotation, or someone locked themselves out |
-| `certificate is overdue for renewal` | a host has stopped rotating; it will drop off at expiry |
+| `certificate is overdue for renewal` | a membership has stopped rotating; it will drop off at expiry |
 | `host recovered after certificate expiry` | renewal is broken for that host — recovery is not routine |
-| `CA activated before convergence` | someone forced a rotation; hosts were cut off |
+| `CA activated before convergence` | someone forced a rotation; memberships were cut off |
 | `active certificate authority has expired` | the network's signer outlived itself; enrollment and renewal fail until a replacement CA is created and activated. The sweep deliberately does not retire it — retiring is a rotation step and cannot be undone through the API |
 | `host reverted a pushed generation` | that host applied a config and then could not reach the control plane, so its guard rolled back. More than one means the push severed the fleet |
-| `reverted to the previous generation` | a pushed config broke a host and it rolled back |
+| `reverted to the previous generation` | a pushed config broke a membership and it rolled back |
 | `CA key written UNENCRYPTED` | fix before anything else |
 | `epoch listener dropped` | push is down; agents fell back to polling |
-| `agent API disabled` / `no -mesh configured` | hosts cannot poll, renew, or receive revocations |
+| `agent API disabled` / `no -mesh configured` | memberships cannot poll, renew, or receive revocations |
 
 The maintenance sweep logs a summary every 15 minutes when it does anything.
 
@@ -606,7 +676,7 @@ The maintenance sweep logs a summary every 15 minutes when it does anything.
 
 Measured, in `e2e/scale_test.go`:
 
-- Rows are free. Hosts, certificates, and audit entries cost Postgres and
+- Rows are free. Memberships, certificates, and audit entries cost Postgres and
   nothing else.
 - Each network `orbitd` **joins** costs ~28 goroutines and ~0.33 MB idle — it is
   a full nebula instance. Low hundreds of joined networks per process.
@@ -628,7 +698,7 @@ Steady-state memory is not yet characterised — the deployment that produced th
 2 GB figure was crash-looping on a bug, so that is a startup peak and may settle.
 Watch it on your own fleet rather than trusting this paragraph.
 
-The lighthouse's bandwidth is what to watch if hosts cannot punch and fall back
+The lighthouse's bandwidth is what to watch if memberships cannot punch and fall back
 to relaying through it.
 
 ---
@@ -669,3 +739,27 @@ uncoordinated.
 
 The database is then the single point of failure, which is a normal problem with
 normal answers.
+
+**Each replica needs one secret: the KEK passphrase.**
+
+```bash
+ORBIT_KEK_PASSPHRASE_FILE=/run/credentials/orbit.service/kek
+```
+
+That is the whole of it. The CA keys and network identity keys live encrypted in
+Postgres, so a replica reads them from the database it is already connected to —
+there are no key files to copy and nothing to keep in step through a CA rotation.
+
+A replica with the **wrong** passphrase fails at startup, not at signing time.
+That is what the verifier in `orbit.kek` is for: without it a mistyped passphrase
+would produce a control plane that starts cleanly, serves reads, and fails the
+first time somebody adds a machine — days after the mistake, with nothing
+connecting the two.
+
+A deployment that keeps its keys on disk (`orbitd bootstrap -ca-key … `) still
+has to copy those files, and `orbitd` says which mode it is in at startup:
+
+```
+key vault open; private keys are stored encrypted in the database
+no key vault for this deployment; keys are read from disk
+```

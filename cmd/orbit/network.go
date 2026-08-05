@@ -49,12 +49,16 @@ func networkLs(ctx context.Context, args []string) error {
 		column{name: "CERT TTL"},
 		column{name: "CONFIG", right: true},
 		column{name: "BLOCK", right: true},
-		column{name: "ID", optional: true},
+		// The network ID before the uuid, and not optional: it is what an
+		// operator hands to a machine, and the uuid is what a script that
+		// already has one uses.
+		column{name: "NETWORK ID"},
+		column{name: "UUID", optional: true},
 	)
 	for _, n := range res.Value {
 		t.add(n.Name, strings.Join(n.CIDRs, ","), n.Curve, n.CertTTL,
 			strconv.FormatInt(n.ConfigEpoch, 10),
-			strconv.FormatInt(n.BlocklistEpoch, 10), n.ID)
+			strconv.FormatInt(n.BlocklistEpoch, 10), n.NetworkID, n.ID)
 	}
 	if t.empty() {
 		fmt.Fprintln(errOut, "no networks; run `orbitd bootstrap` on the control plane host")
@@ -150,7 +154,7 @@ func convergeCmd(ctx context.Context, args []string) error {
 			// above, which is a local judgement rather than another API call.
 			return fail(exitFailure,
 				"gave up after %s: %d of %d hosts have applied config epoch %d",
-				*wait, res.Value.ConfigApplied, res.Value.HostsTotal, res.Value.ConfigEpoch)
+				*wait, res.Value.ConfigApplied, res.Value.MembershipsTotal, res.Value.ConfigEpoch)
 		}
 
 		if !o.json {
@@ -160,8 +164,8 @@ func convergeCmd(ctx context.Context, args []string) error {
 			}
 			fmt.Fprintf(errOut, "%sconfig %d/%d, blocklist %d/%d — waiting (%s left)%s",
 				lead,
-				res.Value.ConfigApplied, res.Value.HostsTotal,
-				res.Value.BlockApplied, res.Value.HostsTotal,
+				res.Value.ConfigApplied, res.Value.MembershipsTotal,
+				res.Value.BlockApplied, res.Value.MembershipsTotal,
 				shortDuration(time.Until(deadline).Round(time.Second)), trail)
 		}
 
@@ -179,7 +183,7 @@ func convergeCmd(ctx context.Context, args []string) error {
 }
 
 func converged(c wire.ConvergenceResponse) bool {
-	return c.HostsTotal > 0 && c.ConfigApplied >= c.HostsTotal && c.BlockApplied >= c.HostsTotal
+	return c.MembershipsTotal > 0 && c.ConfigApplied >= c.MembershipsTotal && c.BlockApplied >= c.MembershipsTotal
 }
 
 // renderConvergence lays out the same facts internal/api's renderer does, and
@@ -190,20 +194,20 @@ func converged(c wire.ConvergenceResponse) bool {
 // like the same kind of fact, and they are opposite diagnoses.
 func renderConvergence(r renderer, network *wire.NetworkResponse, c wire.ConvergenceResponse) {
 	pct := func(n int) string {
-		if c.HostsTotal == 0 {
+		if c.MembershipsTotal == 0 {
 			return "  n/a"
 		}
-		return fmt.Sprintf("%5.1f%%", 100*float64(n)/float64(c.HostsTotal))
+		return fmt.Sprintf("%5.1f%%", 100*float64(n)/float64(c.MembershipsTotal))
 	}
 
 	fmt.Fprintf(out, "network    %s\n", network.Name)
 	fmt.Fprintf(out, "config     epoch %-8d %4d/%-4d %s\n",
-		c.ConfigEpoch, c.ConfigApplied, c.HostsTotal, pct(c.ConfigApplied))
+		c.ConfigEpoch, c.ConfigApplied, c.MembershipsTotal, pct(c.ConfigApplied))
 	fmt.Fprintf(out, "blocklist  epoch %-8d %4d/%-4d %s\n",
-		c.BlocklistEpoch, c.BlockApplied, c.HostsTotal, pct(c.BlockApplied))
+		c.BlocklistEpoch, c.BlockApplied, c.MembershipsTotal, pct(c.BlockApplied))
 
 	if len(c.Lagging) == 0 {
-		if c.HostsTotal > 0 {
+		if c.MembershipsTotal > 0 {
 			fmt.Fprintln(out, "\nall hosts converged")
 		}
 		return

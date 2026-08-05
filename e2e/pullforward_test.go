@@ -101,7 +101,7 @@ func TestPullForwardStopsOnceReissued(t *testing.T) {
 	ctx := context.Background()
 
 	host := h.createAndEnroll(t, ts, "reissued", "10.42.12.3", false, false, nil)
-	hostID := uuid.MustParse(host.id)
+	membershipID := uuid.MustParse(host.id)
 	client := xffClient(t, ts.URL, host.addr)
 
 	if code := h.adminReq(t, http.MethodPatch, ts.URL+"/v1/roles/"+h.roleID.String(),
@@ -115,7 +115,7 @@ func TestPullForwardStopsOnceReissued(t *testing.T) {
 	}
 
 	// Reissue, standing in for the renewal the agent would now perform.
-	h.reissue(t, ctx, hostID)
+	h.reissue(t, ctx, membershipID)
 
 	settled := renewAfter(t, ctx, client)
 	if !settled.After(time.Now().Add(time.Hour)) {
@@ -137,10 +137,10 @@ func renewAfter(t *testing.T, ctx context.Context, c *agent.Client) time.Time {
 	return resp.RenewAfter
 }
 
-func (h *harness) reissue(t *testing.T, ctx context.Context, hostID uuid.UUID) {
+func (h *harness) reissue(t *testing.T, ctx context.Context, membershipID uuid.UUID) {
 	t.Helper()
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		cur, err := tx.LatestCertificate(ctx, hostID)
+		cur, err := tx.LatestCertificate(ctx, membershipID)
 		if err != nil {
 			return err
 		}

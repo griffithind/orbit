@@ -22,7 +22,7 @@ import (
 
 // policyHosts puts the network on the policy document, stores doc, and returns
 // two hosts to ask about.
-func (h *harness) policyHosts(t *testing.T, ts *httptest.Server, doc, srcName, srcAddr, dstName, dstAddr string) (src, dst wire.HostResponse) {
+func (h *harness) policyHosts(t *testing.T, ts *httptest.Server, doc, srcName, srcAddr, dstName, dstAddr string) (src, dst wire.MembershipResponse) {
 	t.Helper()
 	src = h.createTaggedHost(t, ts.URL, srcName, srcAddr, nil)
 	dst = h.createTaggedHost(t, ts.URL, dstName, dstAddr, nil)
@@ -54,15 +54,15 @@ func (h *harness) policyHosts(t *testing.T, ts *httptest.Server, doc, srcName, s
 // enrollIntoDir creates the host as well, and enrollExisting writes to a
 // directory of its own choosing; this test needs an existing host in a
 // directory an agent will later be pointed at.
-func (h *harness) enrollIntoDirForHost(t *testing.T, ts *httptest.Server, hostID, dir string) {
+func (h *harness) enrollIntoDirForHost(t *testing.T, ts *httptest.Server, membershipID, dir string) {
 	t.Helper()
 	var code wire.EnrollmentCodeResponse
-	if c := h.adminPost(t, ts.URL+"/v1/hosts/"+hostID+"/enrollment-code", nil, &code); c != http.StatusCreated {
-		t.Fatalf("mint code for %s: %d", hostID, c)
+	if c := h.adminPost(t, ts.URL+"/v1/memberships/"+membershipID+"/enrollment-code", nil, &code); c != http.StatusCreated {
+		t.Fatalf("mint code for %s: %d", membershipID, c)
 	}
 	res := h.cli(t, ts, "agent", "enroll", "-url", ts.URL, "-code", code.Code, "-dir", dir)
 	if res.code != 0 {
-		t.Fatalf("enroll %s: exit %d\n%s", hostID, res.code, res.stderr)
+		t.Fatalf("enroll %s: exit %d\n%s", membershipID, res.code, res.stderr)
 	}
 }
 

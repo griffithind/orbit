@@ -116,21 +116,34 @@ const (
 	ActionCAActivated    = "ca.activated"
 	// Distinct from ca.activated: a promotion that knowingly cut off hosts is
 	// a different event, and an auditor should not have to infer it.
-	ActionCAForceActivated  = "ca.force_activated"
-	ActionCARetired         = "ca.retired"
-	ActionHostCreated       = "host.created"
-	ActionHostBlocked       = "host.blocked"
-	ActionHostUnblocked     = "host.unblocked"
-	ActionHostDeleted       = "host.deleted"
-	ActionCertificateIssued = "certificate.issued"
-	ActionEnrollCodeCreated = "enrollment_code.created"
-	ActionEnrolled          = "host.enrolled"
-	ActionEnrollFailed      = "host.enroll_failed"
-	ActionRecovered         = "host.recovered"
-	ActionHostUpdated       = "host.updated"
-	ActionRoleCreated       = "role.created"
-	ActionTokenCreated      = "token.created"
-	ActionTokenRevoked      = "token.revoked"
+	ActionCAForceActivated    = "ca.force_activated"
+	ActionCARetired           = "ca.retired"
+	ActionMembershipCreated   = "membership.created"
+	ActionMembershipBlocked   = "membership.blocked"
+	ActionMembershipUnblocked = "membership.unblocked"
+	ActionMembershipDeleted   = "membership.deleted"
+	ActionCertificateIssued   = "certificate.issued"
+	ActionEnrollCodeCreated   = "enrollment_code.created"
+	ActionEnrolled            = "membership.enrolled"
+	ActionEnrollFailed        = "membership.enroll_failed"
+
+	// The join path. A device asks (device.join), an operator says yes
+	// (membership.authorized), the device collects what that entitles it to
+	// (membership.claimed).
+	//
+	// Three actions rather than reusing membership.created and membership.enrolled, because
+	// the questions an auditor asks about a join are different ones: WHO
+	// authorized this machine, and how long did it sit in the queue. Folding
+	// them into the enrollment actions would make both unanswerable.
+	ActionDeviceJoin           = "device.join"
+	ActionMembershipAuthorized = "membership.authorized"
+	ActionMembershipClaimed    = "membership.claimed"
+	ActionDeviceBlocked        = "device.blocked"
+	ActionDeviceUnblocked      = "device.unblocked"
+	ActionMembershipUpdated    = "membership.updated"
+	ActionRoleCreated          = "role.created"
+	ActionTokenCreated         = "token.created"
+	ActionTokenRevoked         = "token.revoked"
 )
 
 // AuditTarget is a small helper for the common "target is a UUID" case.

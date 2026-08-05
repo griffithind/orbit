@@ -3,6 +3,7 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -222,4 +223,17 @@ func publicFromSigningKey(curve cert.Curve, key []byte) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported curve: %s", curve)
 	}
+}
+
+// SignDigest lets a file-backed key sign an already-hashed message, which is
+// what X.509 issuance needs. See SignDigestBytes for why only P-256 can.
+func (s *FileSigner) SignDigest(_ context.Context, digest []byte, hash crypto.Hash) ([]byte, error) {
+	// Under the read lock, like Sign: Close zeroes the key, and a signature over
+	// a half-zeroed key would verify against nothing and look like corruption.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, errors.New("signer is closed")
+	}
+	return SignDigestBytes(s.curve, s.key, digest, hash)
 }

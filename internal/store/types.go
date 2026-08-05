@@ -15,11 +15,16 @@ const (
 	CARetiring = "retiring"
 	CARetired  = "retired"
 
-	HostCreated   = "created"
-	HostEnrolled  = "enrolled"
-	HostActive    = "active"
-	HostSuspended = "suspended"
-	HostDeleted   = "deleted"
+	// MembershipPending is a membership a device has joined but nobody has
+	// authorized yet. It holds no address, no certificate and no reach — it
+	// exists so an operator can see the machine asking and decide.
+	MembershipPending = "pending"
+
+	MembershipCreated   = "created"
+	MembershipEnrolled  = "enrolled"
+	MembershipActive    = "active"
+	MembershipSuspended = "suspended"
+	MembershipDeleted   = "deleted"
 
 	CertPending    = "pending"
 	CertActive     = "active"
@@ -67,6 +72,24 @@ type Network struct {
 	// addressing key — resolving by a mutable string is how a rename silently
 	// retargets a script.
 	Name string
+
+	// NetworkID is the verifiable identifier: 80 bits of SHA-256 over
+	// IdentityPublicKey, in Crockford base32 — `p8k3zj9x2mq4wr7t`.
+	//
+	// Beside Slug rather than replacing it, because they do different jobs. The
+	// slug is the memorable name and the directory on every machine; this is the
+	// one a joining machine can CHECK. Derived by CreateNetwork, never supplied.
+	NetworkID string
+
+	// IdentityPublicKey is the raw Ed25519 public key the ID commits to. Handed
+	// to a joining machine so it can verify both the ID and the proof.
+	IdentityPublicKey []byte
+
+	// IdentitySignerRef locates the private half — file://…, and never the key
+	// itself. Someone holding that key can convince a JOINING machine that their
+	// control plane is this network, so it gets the CA key's custody. A tripwire
+	// in migration 0017 fails if a column that could hold it is ever added.
+	IdentitySignerRef string
 
 	CIDRs   []netip.Prefix
 	CertVer int16
@@ -132,7 +155,19 @@ type Role struct {
 	CreatedAt     time.Time
 }
 
-type Host struct {
+// Membership is a device IN a network.
+//
+// Not a machine — that is Device — and the distinction is the reason this type
+// was renamed. The row's definition is literally "this device, in that network"
+// (device_id is NOT NULL as of migration 0015), and the old name claimed
+// something the row never was, which every reader had to correct for.
+//
+// What lives here is what depends on BOTH: an overlay address is meaningless
+// without a network, a role is a network's concept, and instance settings are
+// per membership because a machine on two networks runs two nebula processes
+// that cannot share a UDP port or a tun device. What depends only on the
+// machine — posture, OS, liveness — lives on Device. See docs/model.md §2.
+type Membership struct {
 	ID           uuid.UUID
 	NetworkID    uuid.UUID
 	Name         string
@@ -156,7 +191,7 @@ type Host struct {
 	// value inherits the control plane's default — one rule at three levels, so
 	// a deployment that sets none behaves exactly as it did before they existed.
 	//
-	// They are per (host, network) because orbit.host already is: a machine on
+	// They are per membership because orbit.membership already is: a machine on
 	// two networks holds two rows, and two nebula processes on one kernel cannot
 	// share a UDP port or a tun device.
 	ListenPort *int
@@ -164,48 +199,71 @@ type Host struct {
 	ConfigMode string
 	Overrides  []byte
 
-	// RestartRequiredEpoch names a generation this host must RESTART for rather
+	// RestartRequiredEpoch names a generation this membership must RESTART for rather
 	// than reload, and 0 means none ever has been.
 	//
 	// Nebula refuses a certificate reload whose networks changed (pki.go
-	// reloadCert), so after an address change the host installs the new
+	// reloadCert), so after an address change the machine installs the new
 	// certificate, nebula declines it, and the old one keeps running until the
 	// process restarts. Waiting does not help; that is what makes this different
 	// from every other thing an agent is told to catch up on.
 	RestartRequiredEpoch int64
 
-	// AddrChangedAt is when this host's address set last changed, or nil if it
+	// AddrChangedAt is when this membership's address set last changed, or nil if it
 	// never has. Compared against the active certificate's issued_at to pull
 	// renewal forward, exactly as role.groups_changed_at is — the addresses are
-	// inside the signed certificate, and a host whose address moved is holding
+	// inside the signed certificate, and a membership whose address moved is holding
 	// one that no longer authorises the packets it is sending.
 	AddrChangedAt *time.Time
 
+	// LastSeenAt, NebulaVersion and AgentVersion are read from the DEVICE, not
+	// stored on this row — the columns were dropped in migration 0015.
+	//
+	// They are properties of a machine, and a machine on three networks has one
+	// agent version and one moment it was last heard from. Kept on this struct
+	// because everything that renders a membership wants them and resolving the
+	// device per membership would be a query per row; the join that reads one
+	// supplies them for free.
+	//
+	// LastSeenAt therefore means "this DEVICE was last heard from", not "this
+	// membership's tunnel is up". Those are different facts and the old column
+	// conflated them; see migration 0015. A per-membership liveness signal has
+	// to come from something that can actually observe one.
 	LastSeenAt    *time.Time
 	NebulaVersion string
 	AgentVersion  string
 	CreatedAt     time.Time
 
+	// DeviceID is the machine this membership belongs to.
+	//
+	// NOT NULL in the database as of migration 0015: a membership is "this
+	// device, in that network", so a row naming no machine means nothing.
+	//
+	// Still a pointer on this struct, and only because CreateHost reads it as
+	// one — a Membership value under construction does not have an id to point at
+	// until its device row exists. Every value returned by a read has it set.
+	DeviceID *uuid.UUID
+
 	// RoleName is the assigned role's name, resolved by the same query that
-	// reads the host. Empty when the host carries no role.
+	// reads the membership. Empty when it carries no role.
 	//
 	// Denormalized into the read path rather than left to the caller: a client
-	// rendering a host shows the name, and resolving RoleID one request per
-	// host is what turns a 500-host listing into 501 queries.
+	// rendering a membership shows the name, and resolving RoleID one request per
+	// membership is what turns a 500-machine listing into 501 queries.
 	RoleName string
 }
 
 type Certificate struct {
-	ID          uuid.UUID
-	HostID      uuid.UUID
-	CAID        uuid.UUID
-	Fingerprint string
-	PEM         string
-	CertVer     int16
-	NotBefore   time.Time
-	NotAfter    time.Time
-	State       string
-	IssuedAt    time.Time
+	ID           uuid.UUID
+	MembershipID uuid.UUID
+	CAID         uuid.UUID
+	Fingerprint  string
+	PEM          string
+	CertVer      int16
+	NotBefore    time.Time
+	NotAfter     time.Time
+	State        string
+	IssuedAt     time.Time
 }
 
 // RenewAt reports when the agent should attempt renewal: the midpoint of the
@@ -218,12 +276,16 @@ func (c Certificate) RenewAt() time.Time {
 type EnrollmentCredential struct {
 	ID        uuid.UUID
 	NetworkID uuid.UUID
-	HostID    *uuid.UUID
-	Method    string
-	ExpiresAt time.Time
-	UsedAt    *time.Time
-	CreatedBy string
-	CreatedAt time.Time
+
+	// MembershipID names an existing membership; Reserved describes one to create.
+	// Exactly one, enforced by the database — see migration 0014.
+	MembershipID *uuid.UUID
+	Reserved     *Reservation
+	Method       string
+	ExpiresAt    time.Time
+	UsedAt       *time.Time
+	CreatedBy    string
+	CreatedAt    time.Time
 }
 
 type BlocklistEntry struct {
@@ -320,33 +382,59 @@ func (i Identity) Audit(action, targetType, targetID string) AuditEntry {
 
 // AgentIdentity is what a source overlay address resolves to on the agent API.
 type AgentIdentity struct {
-	HostID uuid.UUID
-	State  string
+	MembershipID uuid.UUID
+	State        string
 }
 
 // RedeemedCredential is the result of atomically consuming an enrollment
-// credential. HostID is nil for methods that create the host on redemption.
+// credential.
+//
+// Exactly one of MembershipID and Reserved is set, which the database enforces
+// (migration 0014). MembershipID names an existing membership — re-enrolling a machine
+// already on the network. Reserved describes a membership that does not exist
+// yet and is created at redemption, which is what keeps unattended provisioning
+// working now that nothing may pre-create a device-less membership.
 type RedeemedCredential struct {
 	CredentialID uuid.UUID
 	NetworkID    uuid.UUID
-	HostID       *uuid.UUID
+	MembershipID *uuid.UUID
 	Method       string
+
+	// Reserved is nil unless this credential is a reservation.
+	Reserved *Reservation
+}
+
+// Reservation is a place held in a network for a machine that has not arrived.
+//
+// It carries the intent an operator would previously have expressed by
+// pre-creating a host: what to call it, where to put it, what it may do. The
+// membership is created when a device presents the code, so it names a machine
+// from the moment it exists.
+type Reservation struct {
+	Name string
+
+	// Addr is a specific overlay address, or the zero value to allocate.
+	// Naming one is for machines whose address is written into something Orbit
+	// does not manage — a static_host_map, a DNS record, someone's firewall.
+	Addr netip.Addr
+
+	RoleID *uuid.UUID
 }
 
 // Convergence summarizes how much of a network has applied the current epochs.
 // It gates CA rotation (docs/design.md 6) and is the metric behind the
 // revocation SLO (docs/revocation.md 5).
 type Convergence struct {
-	ConfigEpoch    int64
-	BlocklistEpoch int64
-	HostsTotal     int
-	ConfigApplied  int
-	BlockApplied   int
-	Lagging        []LaggingHost
+	ConfigEpoch      int64
+	BlocklistEpoch   int64
+	MembershipsTotal int
+	ConfigApplied    int
+	BlockApplied     int
+	Lagging          []LaggingHost
 }
 
 type LaggingHost struct {
-	HostID                uuid.UUID
+	MembershipID          uuid.UUID
 	Name                  string
 	AppliedConfigEpoch    int64
 	AppliedBlocklistEpoch int64

@@ -171,7 +171,7 @@ func TestRenderLighthouse(t *testing.T) {
 	if !strings.Contains(string(fragment), "am_lighthouse: true") {
 		t.Error("lighthouse fragment does not set am_lighthouse")
 	}
-	if strings.Contains(string(fragment), "hosts:\n        - ") {
+	if strings.Contains(string(fragment), "memberships:\n        - ") {
 		t.Error("lighthouse was told to query other lighthouses")
 	}
 }

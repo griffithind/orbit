@@ -14,14 +14,16 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-const hostVerbs = "ls, show, create, set, code, block, unblock, rm"
+const membershipVerbs = "ls, show, pending, authorize, reserve, set, code, block, unblock, rm"
 
-func hostCmd(ctx context.Context, args []string) error {
+func membershipCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return subUsage("host",
+		return subUsage("membership",
 			"ls        list the fleet, filtered and paginated",
 			"show      one host, its certificate, and whether it has converged",
-			"create    add a host record",
+			"pending   list machines waiting to be authorized onto the network",
+			"authorize admit a pending machine: allocate its address",
+			"reserve   hold a place for a machine that has not arrived; prints a code",
 			"set       change a host's role, tags, or lighthouse/relay flags",
 			"code      mint a single-use enrollment code",
 			"block     suspend a host (reversible)",
@@ -30,23 +32,27 @@ func hostCmd(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "ls":
-		return hostLs(ctx, args[1:])
+		return membershipLs(ctx, args[1:])
 	case "show":
-		return hostShow(ctx, args[1:])
-	case "create":
-		return hostCreate(ctx, args[1:])
+		return membershipShow(ctx, args[1:])
+	case "pending":
+		return membershipPending(ctx, args[1:])
+	case "authorize":
+		return membershipAuthorize(ctx, args[1:])
+	case "reserve":
+		return membershipReserve(ctx, args[1:])
 	case "set":
-		return hostSet(ctx, args[1:])
+		return membershipSet(ctx, args[1:])
 	case "code":
-		return hostCode(ctx, args[1:])
+		return membershipCode(ctx, args[1:])
 	case "block":
-		return hostBlock(ctx, args[1:], false)
+		return membershipBlock(ctx, args[1:], false)
 	case "unblock":
-		return hostBlock(ctx, args[1:], true)
+		return membershipBlock(ctx, args[1:], true)
 	case "rm":
-		return hostRm(ctx, args[1:])
+		return membershipRm(ctx, args[1:])
 	default:
-		return unknownSub("host", args[0], hostVerbs)
+		return unknownSub("membership", args[0], membershipVerbs)
 	}
 }
 
@@ -54,7 +60,7 @@ func hostCmd(ctx context.Context, args []string) error {
 // ls
 //------------------------------------------------------------------------------
 
-func hostLs(ctx context.Context, args []string) error {
+func membershipLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("host ls", flag.ExitOnError)
 	var o options
 	o.bind(fs)
@@ -97,7 +103,7 @@ func hostLs(ctx context.Context, args []string) error {
 		return err
 	}
 
-	f := adminclient.HostFilter{
+	f := adminclient.MembershipFilter{
 		NetworkID:    networkID,
 		State:        *state,
 		Tag:          *tag,
@@ -128,7 +134,7 @@ func hostLs(ctx context.Context, args []string) error {
 	}
 
 	page := res.Value
-	hosts := page.Hosts
+	hosts := page.Memberships
 	// -all follows the cursor the server issued rather than guessing at offsets.
 	// The cursor is opaque and is passed back unmodified, which is the only
 	// contract the endpoint offers and the only one that survives a concurrent
@@ -140,14 +146,14 @@ func hostLs(ctx context.Context, args []string) error {
 			return err
 		}
 		page = next.Value
-		hosts = append(hosts, page.Hosts...)
+		hosts = append(hosts, page.Memberships...)
 	}
 
 	renderHostTable(o.r, network, hosts)
 
 	if page.NextCursor != "" {
 		// stderr, always — even when stdout is a pipe. A truncated listing that
-		// says nothing is the failure wire.HostListResponse exists to prevent,
+		// says nothing is the failure wire.MembershipListResponse exists to prevent,
 		// and suppressing the notice for pipelines would reintroduce it exactly
 		// where nobody is watching.
 		fmt.Fprintf(errOut, "\nmore hosts match; next page:\n  orbit host ls -cursor %s\n", page.NextCursor)
@@ -155,7 +161,7 @@ func hostLs(ctx context.Context, args []string) error {
 	return nil
 }
 
-func renderHostTable(r renderer, network *wire.NetworkResponse, hosts []wire.HostResponse) {
+func renderHostTable(r renderer, network *wire.NetworkResponse, hosts []wire.MembershipResponse) {
 	t := newTable(r,
 		column{name: "NAME", elastic: true},
 		column{name: "STATE"},
@@ -197,15 +203,15 @@ func renderHostTable(r renderer, network *wire.NetworkResponse, hosts []wire.Hos
 // show
 //------------------------------------------------------------------------------
 
-// hostShow is the command the CLI exists to earn.
+// membershipShow is the command the CLI exists to earn.
 //
-// Host, current certificate, and convergence on one screen, because "why is this
+// Membership, current certificate, and convergence on one screen, because "why is this
 // host not renewing" is answered by all three at once and by no one of them
-// alone. The three sources are GET /v1/hosts/{id} (which carries its active
+// alone. The three sources are GET /v1/memberships/{id} (which carries its active
 // certificates), the network's current epochs, and — with -history — the
 // certificate list. Behind curl that is three requests, three JSON blobs, and
 // arithmetic on RFC3339 strings.
-func hostShow(ctx context.Context, args []string) error {
+func membershipShow(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("host show", flag.ExitOnError)
 	var o options
 	o.bind(fs)
@@ -228,18 +234,18 @@ func hostShow(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	membershipID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
 	if err != nil {
 		return err
 	}
 
-	res, err := o.client.GetHost(ctx, hostID)
+	res, err := o.client.GetHost(ctx, membershipID)
 	if err != nil {
 		return err
 	}
 	if o.json {
 		// The host response verbatim, not a document this command assembled from
-		// three. `orbit host show -json` and `curl /v1/hosts/{id}` have to be the
+		// three. `orbit host show -json` and `curl /v1/memberships/{id}` have to be the
 		// same bytes; the layout below is the value this command adds, and it is
 		// a human's, not a script's.
 		return emitJSON(res.Raw)
@@ -290,7 +296,7 @@ func hostShow(ctx context.Context, args []string) error {
 	renderHostConvergence(o.r, network, h)
 
 	if *history > 0 {
-		hist, err := o.client.HostCertificates(ctx, hostID, adminclient.CertFilter{Limit: *history})
+		hist, err := o.client.MembershipCertificates(ctx, membershipID, adminclient.CertFilter{Limit: *history})
 		if err != nil {
 			return err
 		}
@@ -315,7 +321,7 @@ func hostShow(ctx context.Context, args []string) error {
 	return nil
 }
 
-func renderCertificates(r renderer, h wire.HostResponse) {
+func renderCertificates(r renderer, h wire.MembershipResponse) {
 	fmt.Fprintf(out, "\n%s\n", r.bold("certificate"))
 	if len(h.ActiveCertificates) == 0 {
 		// Two very different causes, and the state field distinguishes them, so
@@ -326,7 +332,7 @@ func renderCertificates(r renderer, h wire.HostResponse) {
 		case "suspended":
 			fmt.Fprintln(out, "  none — this host is blocked and its certificates were revoked")
 		default:
-			fmt.Fprintln(out, "  none — no active certificate; the host may need `orbit agent recover`")
+			fmt.Fprintln(out, "  none — no active certificate; re-run `orbit agent join` on the machine")
 		}
 		return
 	}
@@ -353,13 +359,13 @@ func renderCertificates(r renderer, h wire.HostResponse) {
 
 		expires := fmt.Sprintf("  %-13s %s (%s)", "expires", c.NotAfter.Format(time.RFC3339), until(c.NotAfter))
 		if c.NotAfter.Before(now) {
-			expires += "   EXPIRED — this host is off the mesh until it recovers"
+			expires += "   EXPIRED — off the mesh until the machine re-joins"
 		}
 		fmt.Fprintln(out, expires)
 	}
 }
 
-func renderHostConvergence(r renderer, network *wire.NetworkResponse, h wire.HostResponse) {
+func renderHostConvergence(r renderer, network *wire.NetworkResponse, h wire.MembershipResponse) {
 	fmt.Fprintf(out, "\n%s\n", r.bold("convergence"))
 	line := func(label string, applied, current int64) {
 		status := "up to date"
@@ -393,24 +399,29 @@ func shortFingerprint(s string) string {
 // create / set
 //------------------------------------------------------------------------------
 
-func hostCreate(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host create", flag.ExitOnError)
+// membershipReserve holds a place in a network for a machine that has not arrived.
+//
+// This replaced `orbit host create` followed by `orbit host code`. Two commands
+// became one because they were always one intention: an operator decides what a
+// machine will be called, where it goes and what it may do, and hands over a
+// code. What changed underneath is that nothing exists until the code is
+// redeemed — so there is no half-provisioned row to clean up if the machine
+// never arrives, and no membership that names no machine.
+func membershipReserve(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host reserve", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	var (
-		name       = fs.String("name", "", "host name, unique within the network (required)")
-		addr       = fs.String("addr", "", "overlay address, inside the network's cidr (required)")
-		role       = fs.String("role", "", "role name or uuid")
-		tags       = fs.String("tags", "", "comma separated tags")
-		lighthouse = fs.Bool("lighthouse", false, "act as a lighthouse; requires -static-addrs")
-		relay      = fs.Bool("relay", false, "act as a relay")
-		static     = fs.String("static-addrs", "", "comma separated public host:port entries")
+		name = fs.String("name", "", "membership name, unique within the network (required)")
+		addr = fs.String("addr", "", "pin a specific overlay address; omit to allocate one")
+		role = fs.String("role", "", "role name or uuid")
+		ttl  = fs.Duration("ttl", 0, "how long the code stays valid; the server's default when unset")
 	)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if *name == "" || *addr == "" {
-		return usageErrorf("-name and -addr are required")
+	if *name == "" {
+		return usageErrorf("-name is required")
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -425,14 +436,10 @@ func hostCreate(ctx context.Context, args []string) error {
 		return err
 	}
 
-	req := wire.CreateHostRequest{
-		NetworkID:    network.ID,
-		Name:         *name,
-		OverlayAddr:  *addr,
-		Tags:         splitCSV(*tags),
-		IsLighthouse: *lighthouse,
-		IsRelay:      *relay,
-		StaticAddrs:  splitCSV(*static),
+	req := wire.ReserveRequest{
+		Name:        *name,
+		OverlayAddr: *addr,
+		TTLSeconds:  int(ttl.Seconds()),
 	}
 	if *role != "" {
 		id, err := o.client.ResolveRole(ctx, networkID, *role)
@@ -442,16 +449,14 @@ func hostCreate(ctx context.Context, args []string) error {
 		req.RoleID = id.String()
 	}
 
-	o.announce(fmt.Sprintf("Creating host %q in network %s", *name, network.Name))
-
-	res, err := o.client.CreateHost(ctx, req)
+	res, err := o.client.Reserve(ctx, network.Slug, req)
 	if err != nil {
 		if api, ok := isConflict(err); ok {
 			return fail(exitConflict,
-				"a host named %q already exists in network %s (%s)\n\n"+
-					"Names are unique per network. Inspect it with `orbit host show %s`, "+
-					"or decommission it with `orbit host rm %s` if it is stale.",
-				*name, network.Name, api.Message, *name, *name)
+				"the name %q is already taken in network %s (%s)\n\n"+
+					"Names are unique per network, and an unspent reservation holds one. "+
+					"Inspect an existing host with `orbit host show %s`, or pick another name.",
+				*name, network.Name, api.Message, *name)
 		}
 		return err
 	}
@@ -459,12 +464,16 @@ func hostCreate(ctx context.Context, args []string) error {
 		return emitJSON(res.Raw)
 	}
 
-	fmt.Fprintf(out, "created %s (%s)\n", res.Value.Name, res.Value.ID)
-	fmt.Fprintf(errOut, "\nNext: mint an enrollment code for it.\n\n  orbit host code %s\n", res.Value.Name)
+	fmt.Fprintf(out, "%s\n", res.Value.Code)
+	fmt.Fprintf(errOut, "\nReserved %q in %s. The code is single-use, expires %s, and is shown\n"+
+		"here and nowhere else — it is not recoverable.\n\nOn the machine:\n\n"+
+		"  orbit agent join -url %s -network %s -code %s\n",
+		*name, network.Name, res.Value.ExpiresAt.Format(time.RFC3339),
+		orDash(res.Value.EnrollURL), network.Slug, res.Value.Code)
 	return nil
 }
 
-func hostSet(ctx context.Context, args []string) error {
+func membershipSet(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("host set", flag.ExitOnError)
 	var o options
 	o.bind(fs)
@@ -504,7 +513,7 @@ func hostSet(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	membershipID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -535,7 +544,7 @@ func hostSet(ctx context.Context, args []string) error {
 
 	o.announce(fmt.Sprintf("Updating host %q in network %s", fs.Arg(0), network.Name))
 
-	res, err := o.client.UpdateHost(ctx, hostID, req)
+	res, err := o.client.UpdateHost(ctx, membershipID, req)
 	if err != nil {
 		return err
 	}
@@ -566,13 +575,13 @@ func onlyGlobals(supplied map[string]bool) bool {
 // code
 //------------------------------------------------------------------------------
 
-// hostCode mints an enrollment credential.
+// membershipCode mints an enrollment credential.
 //
 // The plaintext goes alone on stdout and every word of prose to stderr — the
 // property `orbitd token create` established and a test there asserts. It is what
 // makes `orbit host code web-01 | op create item` work without the code passing
 // through a shell history or a scrollback buffer.
-func hostCode(ctx context.Context, args []string) error {
+func membershipCode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("host code", flag.ExitOnError)
 	var o options
 	o.bind(fs)
@@ -590,14 +599,14 @@ func hostCode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	membershipID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
 	if err != nil {
 		return err
 	}
 
 	o.announce(fmt.Sprintf("Minting an enrollment code for %q", fs.Arg(0)))
 
-	res, err := o.client.EnrollmentCode(ctx, hostID)
+	res, err := o.client.EnrollmentCode(ctx, membershipID)
 	if err != nil {
 		return err
 	}
@@ -623,7 +632,7 @@ Single use, and shown once. On the host:
 // block / unblock / rm
 //------------------------------------------------------------------------------
 
-func hostBlock(ctx context.Context, args []string, unblock bool) error {
+func membershipBlock(ctx context.Context, args []string, unblock bool) error {
 	verb := "block"
 	if unblock {
 		verb = "unblock"
@@ -645,7 +654,7 @@ func hostBlock(ctx context.Context, args []string, unblock bool) error {
 	if err != nil {
 		return err
 	}
-	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	membershipID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -658,9 +667,9 @@ func hostBlock(ctx context.Context, args []string, unblock bool) error {
 
 	var res adminclient.Result[wire.BlockResponse]
 	if unblock {
-		res, err = o.client.UnblockHost(ctx, hostID)
+		res, err = o.client.UnblockHost(ctx, membershipID)
 	} else {
-		res, err = o.client.BlockHost(ctx, hostID)
+		res, err = o.client.BlockHost(ctx, membershipID)
 	}
 	if err != nil {
 		return err
@@ -677,7 +686,7 @@ func hostBlock(ctx context.Context, args []string, unblock bool) error {
 	return nil
 }
 
-func hostRm(ctx context.Context, args []string) error {
+func membershipRm(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("host rm", flag.ExitOnError)
 	var o options
 	o.bind(fs)
@@ -700,7 +709,7 @@ func hostRm(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	hostID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
+	membershipID, err := o.client.ResolveHost(ctx, networkID, fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -712,7 +721,7 @@ func hostRm(ctx context.Context, args []string) error {
 		return err
 	}
 
-	res, err := o.client.DeleteHost(ctx, hostID, *reason)
+	res, err := o.client.DeleteHost(ctx, membershipID, *reason)
 	if err != nil {
 		return err
 	}
@@ -749,4 +758,116 @@ func csvList(s string) []string {
 		return v
 	}
 	return []string{}
+}
+
+//------------------------------------------------------------------------------
+// pending, authorize
+//------------------------------------------------------------------------------
+
+// membershipPending lists the join queue.
+//
+// The queue exists because `orbit agent join` moved the gate from "holds a
+// credential" to "an operator says yes". That trade only works if the queue is
+// easy to look at, so this is deliberately the shortest command in the CLI: a
+// network, and what is waiting in it.
+func membershipPending(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host pending", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	network, err := o.resolveNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	res, err := o.client.PendingJoins(ctx, network.Slug)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	if len(res.Value.Pending) == 0 {
+		fmt.Fprintf(out, "nothing waiting in %s\n", network.Slug)
+		return nil
+	}
+
+	t := newTable(o.r,
+		column{name: "NAME", elastic: true},
+		column{name: "MEMBERSHIP"},
+		column{name: "DEVICE"},
+		column{name: "WAITING"},
+	)
+	for _, p := range res.Value.Pending {
+		requested := p.RequestedAt
+		t.add(p.Name, p.MembershipID, shortFingerprint(p.DeviceID), ago(&requested))
+	}
+	t.render(out)
+	fmt.Fprintf(errOut, "\nAuthorize one with:\n\n  orbit host authorize <membership>\n")
+	return nil
+}
+
+// membershipAuthorize admits a pending membership.
+func membershipAuthorize(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("host authorize", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	role := fs.String("role", "", "assign this role while authorizing (name or uuid)")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: orbit host authorize <membership uuid>")
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+
+	// A uuid and nothing else, unlike every other host verb.
+	//
+	// Resolution by name is what makes the other commands pleasant, and it is
+	// exactly wrong here: a pending row's name is a string the JOINING MACHINE
+	// chose, and resolving by it would let a machine that joined asking to be
+	// called "lighthouse" be authorized by an operator who typed the name of
+	// the host they meant. The membership id comes from `orbit host pending`,
+	// which is where the operator is looking anyway.
+	membershipID, err := uuid.Parse(fs.Arg(0))
+	if err != nil {
+		return usageErrorf("authorize takes a membership uuid, as printed by "+
+			"`orbit host pending`, not a name: %q", fs.Arg(0))
+	}
+
+	var roleID string
+	if *role != "" {
+		networkID, err := o.networkID(ctx)
+		if err != nil {
+			return err
+		}
+		id, err := o.client.ResolveRole(ctx, networkID, *role)
+		if err != nil {
+			return err
+		}
+		roleID = id.String()
+	}
+
+	res, err := o.client.Authorize(ctx, membershipID, roleID)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	fmt.Fprintf(out, "authorized %s (%s)\n  addresses %s\n",
+		res.Value.Name, res.Value.ID, strings.Join(res.Value.OverlayAddrs, ", "))
+	fmt.Fprintf(errOut,
+		"\nNo certificate has been issued. The machine collects one by proving it holds\n"+
+			"the device key it joined with, which `orbit agent join` does automatically.\n")
+	return nil
 }

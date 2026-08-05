@@ -63,8 +63,11 @@ services:
     environment:
       ORBIT_DSN: postgres://orbit_app:${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}@127.0.0.1:5432/orbit?sslmode=disable
       ORBIT_ADMIN_DSN: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD}@127.0.0.1:5432/orbit?sslmode=disable
-      ORBIT_ENROLL_PEPPER: ${ORBIT_ENROLL_PEPPER:?set ORBIT_ENROLL_PEPPER in .env}
       ORBIT_NETWORK: ${ORBIT_NETWORK:-}
+      # Encrypts the CA and identity keys at rest in Postgres. The database
+      # never sees it, which is the entire point: a leaked dump is useless
+      # without it, and losing it makes every stored key unreadable.
+      ORBIT_KEK_PASSPHRASE: ${ORBIT_KEK_PASSPHRASE:?set ORBIT_KEK_PASSPHRASE in .env}
       # A path, never the value. The passphrase stays out of the environment,
       # out of `docker inspect`, and out of anything that dumps a container's
       # config.
@@ -113,6 +116,10 @@ services:
       # than the database password already there.
       ORBIT_TOKEN: ${ORBIT_TOKEN:-}
       ORBIT_NETWORK: ${ORBIT_NETWORK:-}
+      # Encrypts the CA and identity keys at rest in Postgres. The database
+      # never sees it, which is the entire point: a leaked dump is useless
+      # without it, and losing it makes every stored key unreadable.
+      ORBIT_KEK_PASSPHRASE: ${ORBIT_KEK_PASSPHRASE:?set ORBIT_KEK_PASSPHRASE in .env}
 
 secrets:
   ca-pass:

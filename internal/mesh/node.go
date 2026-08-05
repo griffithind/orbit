@@ -40,12 +40,20 @@ type Config struct {
 	NetworkID uuid.UUID
 
 	// Addr is this instance's overlay address on the network. Each replica
-	// needs its own; the host_address uniqueness constraint enforces that
+	// needs its own; the membership_address uniqueness constraint enforces that
 	// rather than letting two silently collide.
 	Addr netip.Addr
 
 	// Name is the host record's name. Defaults to "orbit-control-<addr>".
 	Name string
+
+	// DeviceKey is this control plane's own device public key, DER SPKI.
+	//
+	// The same bytes for every network this instance joins, because it is one
+	// machine — a device outlives every network it joins. Supplied rather than
+	// read here so the process loads its key once and every node shares it;
+	// reading per node would be one machine presenting several identities.
+	DeviceKey []byte
 
 	// ListenPort is the UDP port nebula binds for this node. Zero lets the
 	// kernel choose, which is usually right: the control plane dials out to
@@ -87,11 +95,11 @@ type Config struct {
 
 // Node is the control plane's membership of one network.
 type Node struct {
-	cfg    Config
-	ctrl   *nebula.Control
-	svc    *service.Service
-	log    *slog.Logger
-	hostID uuid.UUID
+	cfg          Config
+	ctrl         *nebula.Control
+	svc          *service.Service
+	log          *slog.Logger
+	membershipID uuid.UUID
 	// seeded records whether this start created the host record, and therefore
 	// whether the seed flags took effect.
 	seeded bool
@@ -126,7 +134,7 @@ func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger)
 		cfg.Name = "orbit-control-" + cfg.Addr.String()
 	}
 
-	issued, err := es.SelfIssue(ctx, cfg.NetworkID, cfg.Addr, cfg.Name, enroll.SelfIssueRoles{
+	issued, err := es.SelfIssue(ctx, cfg.NetworkID, cfg.Addr, cfg.Name, cfg.DeviceKey, enroll.SelfIssueRoles{
 		IsLighthouse: len(cfg.LighthouseAddrs) > 0,
 		IsRelay:      cfg.Relay,
 		StaticAddrs:  cfg.LighthouseAddrs,
@@ -161,24 +169,24 @@ func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger)
 
 	log.Info("control plane joined the overlay",
 		"network", cfg.NetworkID, "addr", cfg.Addr,
-		"host", issued.HostID, "certNotAfter", issued.NotAfter)
+		"host", issued.MembershipID, "certNotAfter", issued.NotAfter)
 
 	n := &Node{
 		cfg: cfg, ctrl: ctrl, svc: svc, log: log, c: c, es: es,
-		hostID:   issued.HostID,
-		seeded:   issued.Created,
-		certPEM:  issued.Certificate,
-		keyPEM:   issued.PrivateKey,
-		NotAfter: issued.NotAfter,
+		membershipID: issued.MembershipID,
+		seeded:       issued.Created,
+		certPEM:      issued.Certificate,
+		keyPEM:       issued.PrivateKey,
+		NotAfter:     issued.NotAfter,
 	}
 
 	// Report immediately, not at the first maintenance tick. The node is
 	// running a generation from the moment it joins, and until it says so its
 	// host record reads "never seen" — the machine serving the request, shown
 	// in `orbit host ls` as though it were offline.
-	cfgEpoch, blockEpoch, err := es.ControlPlaneEpochs(ctx, issued.HostID)
+	cfgEpoch, blockEpoch, err := es.ControlPlaneEpochs(ctx, issued.MembershipID)
 	if err == nil {
-		err = es.ReportControlPlaneApplied(ctx, issued.HostID, cfgEpoch, blockEpoch)
+		err = es.ReportControlPlaneApplied(ctx, issued.MembershipID, cfgEpoch, blockEpoch)
 	}
 	if err != nil {
 		log.Warn("could not report the joined configuration", "error", err)
@@ -194,7 +202,7 @@ func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger)
 // networks and curve), while the trust bundle, blocklist, and static host map
 // are all replaced.
 func (n *Node) Refresh(ctx context.Context) error {
-	cfgYAML, caBundle, err := n.es.ControlPlaneMaterial(ctx, n.hostID)
+	cfgYAML, caBundle, err := n.es.ControlPlaneMaterial(ctx, n.membershipID)
 	if err != nil {
 		return fmt.Errorf("render control plane config: %w", err)
 	}
@@ -223,12 +231,12 @@ func (n *Node) Refresh(ctx context.Context) error {
 	// A failure here is logged and not returned. The configuration IS applied
 	// by this point, and turning a bookkeeping problem into a refresh failure
 	// would leave the node reporting nothing at all while also looking broken.
-	cfgEpoch, blockEpoch, err := n.es.ControlPlaneEpochs(ctx, n.hostID)
+	cfgEpoch, blockEpoch, err := n.es.ControlPlaneEpochs(ctx, n.membershipID)
 	if err != nil {
 		n.log.Warn("could not read the applied epochs to report", "error", err)
 		return nil
 	}
-	if err := n.es.ReportControlPlaneApplied(ctx, n.hostID, cfgEpoch, blockEpoch); err != nil {
+	if err := n.es.ReportControlPlaneApplied(ctx, n.membershipID, cfgEpoch, blockEpoch); err != nil {
 		n.log.Warn("could not report the applied configuration", "error", err,
 			"consequence", "this host counts as behind, and CA activation refuses while it is")
 	}
@@ -242,7 +250,7 @@ func (n *Node) Refresh(ctx context.Context) error {
 // the agent's renewal loop exists to prevent on every other host, and easy to
 // forget because this host is not managed by an agent.
 func (n *Node) renewIfDue(ctx context.Context) error {
-	notBefore, notAfter, err := n.es.ControlPlaneCertificate(ctx, n.hostID)
+	notBefore, notAfter, err := n.es.ControlPlaneCertificate(ctx, n.membershipID)
 	if err != nil {
 		return err
 	}
@@ -252,7 +260,7 @@ func (n *Node) renewIfDue(ctx context.Context) error {
 		return nil
 	}
 
-	issued, err := n.es.SelfIssue(ctx, n.cfg.NetworkID, n.cfg.Addr, n.cfg.Name, enroll.SelfIssueRoles{
+	issued, err := n.es.SelfIssue(ctx, n.cfg.NetworkID, n.cfg.Addr, n.cfg.Name, n.cfg.DeviceKey, enroll.SelfIssueRoles{
 		IsLighthouse: len(n.cfg.LighthouseAddrs) > 0,
 		IsRelay:      n.cfg.Relay,
 		StaticAddrs:  n.cfg.LighthouseAddrs,
@@ -321,7 +329,7 @@ func (n *Node) Maintain(ctx context.Context, changes <-chan struct{}, tick time.
 	}
 }
 
-// HostID is the host record this replica self-issued against.
+// MembershipID is the host record this replica self-issued against.
 // Roles reports the data-plane roles actually in force, read from the host
 // record rather than from this process's flags. Once someone has changed a role
 // through the API those are no longer the same thing, and reporting the flags
@@ -335,14 +343,14 @@ type Roles struct {
 }
 
 func (n *Node) Roles(ctx context.Context) (Roles, error) {
-	h, err := n.es.HostRoles(ctx, n.hostID)
+	h, err := n.es.HostRoles(ctx, n.membershipID)
 	if err != nil {
 		return Roles{}, err
 	}
 	return Roles{IsLighthouse: h.IsLighthouse, IsRelay: h.IsRelay, SeededThisStart: n.seeded}, nil
 }
 
-func (n *Node) HostID() uuid.UUID { return n.hostID }
+func (n *Node) MembershipID() uuid.UUID { return n.membershipID }
 
 // Announce registers this replica and keeps the registration fresh until ctx
 // ends.
@@ -356,7 +364,7 @@ func (n *Node) Announce(ctx context.Context, reg Registrar) error {
 		hb = DefaultHeartbeat
 	}
 
-	if err := reg.Register(ctx, n.cfg.NetworkID, n.hostID, n.cfg.Addr, n.cfg.AgentPort); err != nil {
+	if err := reg.Register(ctx, n.cfg.NetworkID, n.membershipID, n.cfg.Addr, n.cfg.AgentPort); err != nil {
 		return fmt.Errorf("mesh: announce on network %s: %w", n.cfg.NetworkID, err)
 	}
 
@@ -372,7 +380,7 @@ func (n *Node) Announce(ctx context.Context, reg Registrar) error {
 				// it just stops being advertised if the failure persists, which
 				// is the correct outcome for a replica that cannot reach the
 				// database anyway.
-				if err := reg.Register(ctx, n.cfg.NetworkID, n.hostID, n.cfg.Addr, n.cfg.AgentPort); err != nil {
+				if err := reg.Register(ctx, n.cfg.NetworkID, n.membershipID, n.cfg.Addr, n.cfg.AgentPort); err != nil {
 					n.log.Warn("control plane heartbeat failed", "error", err)
 				}
 			}
@@ -384,7 +392,7 @@ func (n *Node) Announce(ctx context.Context, reg Registrar) error {
 // Registrar records a replica's agent endpoint. Satisfied by the store; an
 // interface so mesh does not depend on it directly.
 type Registrar interface {
-	Register(ctx context.Context, networkID, hostID uuid.UUID, addr netip.Addr, agentPort int) error
+	Register(ctx context.Context, networkID, membershipID uuid.UUID, addr netip.Addr, agentPort int) error
 }
 
 // NetworkID reports which network this node serves. The agent API needs it to

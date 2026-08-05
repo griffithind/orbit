@@ -340,7 +340,7 @@ func (t *Tx) SetFirewallSource(ctx context.Context, networkID uuid.UUID, source 
 
 // PolicyFleet reads the hosts a policy document's selectors resolve against.
 //
-// Returns policy.Host directly rather than a store-native struct a caller then
+// Returns policy.Membership directly rather than a store-native struct a caller then
 // translates. The translation layer was considered and rejected: it would be a
 // field-by-field copy whose only failure mode is a field NOT copied, and the
 // field most likely to be forgotten is Tags — at which point every tag:
@@ -365,12 +365,12 @@ func (t *Tx) SetFirewallSource(ctx context.Context, networkID uuid.UUID, source 
 // Deleted hosts are excluded. Their addresses are released and their
 // certificates revoked, so a rule naming one would authorise a prefix the next
 // host to be allocated will hold.
-func (t *Tx) PolicyFleet(ctx context.Context, networkID uuid.UUID) ([]policy.Host, error) {
+func (t *Tx) PolicyFleet(ctx context.Context, networkID uuid.UUID) ([]policy.Membership, error) {
 	rows, err := t.tx.Query(ctx, `
 		SELECT h.id, h.name, coalesce(r.name, ''), h.tags,
-		       coalesce(array(SELECT a.addr FROM orbit.host_address a
-		                       WHERE a.host_id = h.id ORDER BY a.addr), '{}')
-		  FROM orbit.host h
+		       coalesce(array(SELECT a.addr FROM orbit.membership_address a
+		                       WHERE a.membership_id = h.id ORDER BY a.addr), '{}')
+		  FROM orbit.membership h
 		  LEFT JOIN orbit.role r ON (r.network_id, r.id) = (h.network_id, h.role_id)
 		 WHERE h.network_id = $1 AND h.state <> 'deleted'
 		 ORDER BY h.name`, networkID)
@@ -379,11 +379,11 @@ func (t *Tx) PolicyFleet(ctx context.Context, networkID uuid.UUID) ([]policy.Hos
 	}
 	defer rows.Close()
 
-	var out []policy.Host
+	var out []policy.Membership
 	for rows.Next() {
 		var (
 			id uuid.UUID
-			h  policy.Host
+			h  policy.Membership
 		)
 		if err := rows.Scan(&id, &h.Name, &h.Role, &h.Tags, &h.Addrs); err != nil {
 			return nil, mapErr(err, "scan policy fleet host")
@@ -413,7 +413,7 @@ func (t *Tx) PolicyFleet(ctx context.Context, networkID uuid.UUID) ([]policy.Hos
 // tx is threaded through rather than a Store: a fleet from one snapshot compiled
 // against a document from another produces rules for a network that never
 // existed.
-func NetworkPolicy(ctx context.Context, tx *Tx, networkID uuid.UUID) ([]byte, []policy.Host, error) {
+func NetworkPolicy(ctx context.Context, tx *Tx, networkID uuid.UUID) ([]byte, []policy.Membership, error) {
 	net, err := tx.GetNetwork(ctx, networkID)
 	if err != nil {
 		return nil, nil, err
@@ -456,7 +456,7 @@ func NetworkPolicy(ctx context.Context, tx *Tx, networkID uuid.UUID) ([]byte, []
 func (t *Tx) LiveHostCount(ctx context.Context, networkID uuid.UUID) (int, error) {
 	var n int
 	err := t.tx.QueryRow(ctx, `
-		SELECT count(*) FROM orbit.host
+		SELECT count(*) FROM orbit.membership
 		 WHERE network_id = $1 AND state IN ('enrolled', 'active')`, networkID).Scan(&n)
 	if err != nil {
 		return 0, mapErr(err, "live host count")

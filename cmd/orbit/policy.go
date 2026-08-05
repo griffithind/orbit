@@ -168,13 +168,13 @@ func policyCheck(ctx context.Context, args []string) error {
 // is not on the host, a role that is not the one assumed — and putting it after
 // the rules means it is read second, if at all.
 func renderCompiled(o options, v wire.PolicyCheckResponse) {
-	if v.Host == nil {
+	if v.Membership == nil {
 		fmt.Fprintf(errOut,
 			"\nTo see what a specific host would get:  orbit policy check <file> -host <name>\n")
 		return
 	}
 
-	h := v.Host
+	h := v.Membership
 	fmt.Fprintf(out, "\n%s\n", o.r.bold("compiled for "+h.Name))
 	fmt.Fprintf(out, "%-14s %s\n", "addresses", orDash(strings.Join(h.OverlayAddrs, ", ")))
 	fmt.Fprintf(out, "%-14s %s\n", "tags", orDash(strings.Join(h.Tags, ", ")))
@@ -348,7 +348,7 @@ func policyUse(ctx context.Context, args []string) error {
 			g := api.FirewallSourceChange()
 			return fail(exitConflict,
 				"%s\n\n  from            %s\n  to              %s\n  hosts affected  %d\n\n  %s",
-				api.Message, orDash(g.From), orDash(g.To), g.HostsAffected, g.Detail)
+				api.Message, orDash(g.From), orDash(g.To), g.MembershipsAffected, g.Detail)
 		}
 		return err
 	}

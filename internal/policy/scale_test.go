@@ -17,10 +17,10 @@ import (
 // groups plus a tag every host carries.
 func scaleFleet(n, tiers int) policy.Snapshot {
 	s := policy.Snapshot{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}
-	s.Members = make([]policy.Host, 0, n)
+	s.Members = make([]policy.Membership, 0, n)
 	for i := 0; i < n; i++ {
 		a := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
-		s.Members = append(s.Members, policy.Host{
+		s.Members = append(s.Members, policy.Membership{
 			ID:    fmt.Sprintf("h-%05d", i),
 			Name:  fmt.Sprintf("host-%05d", i),
 			Role:  fmt.Sprintf("tier-%d", i%tiers),
@@ -96,7 +96,7 @@ func TestRenderedSizeAtScale(t *testing.T) {
 		c := policy.Compiler{Fleet: fleet}
 		doc := allToAll(3)
 
-		rs, err := c.Host(doc, fleet.Members[0].ID)
+		rs, err := c.Membership(doc, fleet.Members[0].ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +114,7 @@ func TestRenderedSizeAtScale(t *testing.T) {
 		c := policy.Compiler{Fleet: fleet}
 		doc := tiered(8)
 
-		rs, err := c.Host(doc, fleet.Members[0].ID)
+		rs, err := c.Membership(doc, fleet.Members[0].ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +149,7 @@ func TestRenderedPolicyIsByteIdentical(t *testing.T) {
 	doc := allToAll(3)
 	doc.Allow = append(doc.Allow, tiered(5).Allow...)
 
-	rs, err := c.Host(doc, fleet.Members[7].ID)
+	rs, err := c.Membership(doc, fleet.Members[7].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestRenderedPolicyIsByteIdentical(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 20; i++ {
-		again, err := c.Host(doc, fleet.Members[7].ID)
+		again, err := c.Membership(doc, fleet.Members[7].ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -188,7 +188,7 @@ func BenchmarkCompileHost(b *testing.B) {
 		id := fleet.Members[0].ID
 		b.Run(fmt.Sprintf("hosts=%d", n), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				if _, err := c.Host(doc, id); err != nil {
+				if _, err := c.Membership(doc, id); err != nil {
 					b.Fatal(err)
 				}
 			}

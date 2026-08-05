@@ -1,11 +1,11 @@
 {{- define "content" -}}
 {{- with .Data }}
 <section class="card wide danger-zone">
-  <h1>Block {{ .Host.Name }}?</h1>
+  <h1>Block {{ .Membership.Name }}?</h1>
   <p class="subtitle">
     <a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a> ·
-    {{- range .Host.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
-    · {{ template "badge" .Host.Badge }}
+    {{- range .Membership.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
+    · {{ template "badge" .Membership.Badge }}
   </p>
 
   {{/*
@@ -19,11 +19,11 @@
     {{- end }}
   </ul>
 
-  <form method="post" action="/ui/hosts/{{ .Host.ID }}/block">
+  <form method="post" action="/ui/memberships/{{ .Membership.ID }}/block">
     <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
     <button type="submit" class="button danger"
-            data-confirm="Block {{ .Host.Name }}? It loses the overlay within one blocklist convergence.">Block {{ .Host.Name }}</button>
-    <a class="button" href="/ui/hosts/{{ .Host.ID }}">Cancel</a>
+            data-confirm="Block {{ .Membership.Name }}? It loses the overlay within one blocklist convergence.">Block {{ .Membership.Name }}</button>
+    <a class="button" href="/ui/memberships/{{ .Membership.ID }}">Cancel</a>
   </form>
 </section>
 {{- end }}

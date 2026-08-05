@@ -140,7 +140,7 @@ func roleShow(ctx context.Context, args []string) error {
 	// Which hosts carry it, because that is the number that decides whether an
 	// edit is cheap: a firewall change converges in seconds, a group change costs
 	// every one of these hosts a certificate lifetime.
-	hosts, err := o.client.ListHosts(ctx, adminclient.HostFilter{
+	hosts, err := o.client.ListHosts(ctx, adminclient.MembershipFilter{
 		NetworkID: networkID, RoleID: &roleID, Count: true, Limit: 1,
 	})
 	if err == nil {
@@ -252,7 +252,7 @@ func roleEdit(ctx context.Context, args []string) error {
   Watch the configuration half land:               orbit converge -wait 5m
 `,
 		o.r.bold("ACCEPTED, NOT YET IN FORCE"),
-		v.HostsAwaitingCertificate,
+		v.MembershipsAwaitingCertificate,
 		orDash(v.CertificatesConvergeBy),
 		v.Detail)
 	return nil

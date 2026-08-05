@@ -2,10 +2,12 @@ package store_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/db"
 	"github.com/griffithind/orbit/internal/store"
 )
@@ -108,6 +111,7 @@ func newNetwork(t *testing.T, s *store.Store, cidr string) *store.Network {
 			Name:  "net-" + uuid.NewString()[:8],
 			CIDRs: []netip.Prefix{netip.MustParsePrefix(cidr)},
 		}
+		withIdentity(t, &net)
 		return tx.CreateNetwork(ctx, &net)
 	})
 	if err != nil {
@@ -116,17 +120,17 @@ func newNetwork(t *testing.T, s *store.Store, cidr string) *store.Network {
 	return &net
 }
 
-func newHost(t *testing.T, s *store.Store, net *store.Network, name, addr string) *store.Host {
+func newHost(t *testing.T, s *store.Store, net *store.Network, name, addr string) *store.Membership {
 	t.Helper()
-	var h store.Host
+	var h store.Membership
 	err := s.Tx(context.Background(), func(ctx context.Context, tx *store.Tx) error {
-		h = store.Host{
+		h = store.Membership{
 			NetworkID: net.ID,
 			Name:      name,
 			Addrs:     []netip.Addr{netip.MustParseAddr(addr)},
-			State:     store.HostActive,
+			State:     store.MembershipActive,
 		}
-		return tx.CreateHost(ctx, &h)
+		return insertHost(ctx, tx, &h)
 	})
 	if err != nil {
 		t.Fatalf("CreateHost: %v", err)
@@ -155,7 +159,7 @@ func TestOverlappingNetworkCIDRs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveAgentHost(A): %v", err)
 	}
-	if gotA.HostID != hostA.ID {
+	if gotA.MembershipID != hostA.ID {
 		t.Errorf("resolved to the wrong host for network A")
 	}
 
@@ -163,7 +167,7 @@ func TestOverlappingNetworkCIDRs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveAgentHost(B): %v", err)
 	}
-	if gotB.HostID != hostB.ID {
+	if gotB.MembershipID != hostB.ID {
 		t.Errorf("resolved to the wrong host for network B")
 	}
 }
@@ -182,12 +186,12 @@ func TestOverlayAddressUniqueness(t *testing.T) {
 	newHost(t, s, net, "first", "10.42.0.7")
 
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		h := store.Host{
+		h := store.Membership{
 			NetworkID: net.ID,
 			Name:      "second",
 			Addrs:     []netip.Addr{netip.MustParseAddr("10.42.0.7")},
 		}
-		return tx.CreateHost(ctx, &h)
+		return insertHost(ctx, tx, &h)
 	})
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("duplicate address error = %v, want ErrConflict", err)
@@ -283,10 +287,10 @@ func TestEnrollmentCredentialSingleUse(t *testing.T) {
 	secretHash := []byte("argon2id-hash-stand-in-" + uuid.NewString())
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		c := store.EnrollmentCredential{
-			NetworkID: net.ID,
-			HostID:    &host.ID,
-			Method:    store.MethodCode,
-			ExpiresAt: time.Now().Add(15 * time.Minute),
+			NetworkID:    net.ID,
+			MembershipID: &host.ID,
+			Method:       store.MethodCode,
+			ExpiresAt:    time.Now().Add(15 * time.Minute),
 		}
 		return tx.CreateEnrollmentCredential(ctx, &c, secretHash)
 	})
@@ -341,7 +345,7 @@ func TestExpiredCredentialCannotBeRedeemed(t *testing.T) {
 	secretHash := []byte("expired-" + uuid.NewString())
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		c := store.EnrollmentCredential{
-			NetworkID: net.ID, HostID: &host.ID, Method: store.MethodCode,
+			NetworkID: net.ID, MembershipID: &host.ID, Method: store.MethodCode,
 			ExpiresAt: time.Now().Add(-time.Minute),
 		}
 		return tx.CreateEnrollmentCredential(ctx, &c, secretHash)
@@ -370,7 +374,7 @@ func TestAuditLogIsAppendOnly(t *testing.T) {
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		return tx.AppendAudit(ctx, store.AuditEntry{
 			ActorType: "user", ActorID: "alice",
-			Action: store.ActionHostCreated, TargetType: "host", TargetID: target,
+			Action: store.ActionMembershipCreated, TargetType: "host", TargetID: target,
 		})
 	})
 	if err != nil {
@@ -441,17 +445,17 @@ func TestHostRoleIsScopedToNetwork(t *testing.T) {
 	// network, both insert. The constraint is composite and MATCH SIMPLE, so a
 	// NULL role_id skips it entirely — "a host may have no role" must survive.
 	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		h := store.Host{NetworkID: netA.ID, Name: "no-role"}
-		return tx.CreateHost(ctx, &h)
+		h := store.Membership{NetworkID: netA.ID, Name: "no-role"}
+		return insertHost(ctx, tx, &h)
 	})
 	if err != nil {
 		t.Fatalf("CreateHost without a role: %v", err)
 	}
 
-	var hostA store.Host
+	var hostA store.Membership
 	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		hostA = store.Host{NetworkID: netA.ID, Name: "same-network", RoleID: &roleA.ID}
-		return tx.CreateHost(ctx, &hostA)
+		hostA = store.Membership{NetworkID: netA.ID, Name: "same-network", RoleID: &roleA.ID}
+		return insertHost(ctx, tx, &hostA)
 	})
 	if err != nil {
 		t.Fatalf("CreateHost with a role from its own network: %v", err)
@@ -459,14 +463,14 @@ func TestHostRoleIsScopedToNetwork(t *testing.T) {
 
 	// Creation with another network's role.
 	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		h := store.Host{NetworkID: netA.ID, Name: "cross-network", RoleID: &roleB.ID}
-		return tx.CreateHost(ctx, &h)
+		h := store.Membership{NetworkID: netA.ID, Name: "cross-network", RoleID: &roleB.ID}
+		return insertHost(ctx, tx, &h)
 	})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("CreateHost with network B's role = %v, want ErrNotFound", err)
 	}
 
-	// And the update path, which is what PATCH /v1/hosts/:id reaches through
+	// And the update path, which is what PATCH /v1/memberships/:id reaches through
 	// UpdateHostMeta. Closing only the insert would leave the hole open to any
 	// host that was created correctly and re-roled afterwards.
 	crossRole := roleB.ID.String()
@@ -559,7 +563,7 @@ func TestFutureTablesAreGrantedToAppRole(t *testing.T) {
 // Revocation and convergence
 //------------------------------------------------------------------------------
 
-// TestBlockHostFlow exercises the transaction behind POST /v1/hosts/:id/block:
+// TestBlockHostFlow exercises the transaction behind POST /v1/memberships/:id/block:
 // revoke certificates, add blocklist entries, suspend the host, advance the
 // epoch, all atomically.
 func TestBlockHostFlow(t *testing.T) {
@@ -588,7 +592,7 @@ func TestBlockHostFlow(t *testing.T) {
 
 		fingerprint = uuid.NewString()
 		cert := store.Certificate{
-			HostID: host.ID, CAID: caID, Fingerprint: fingerprint, PEM: "pem",
+			MembershipID: host.ID, CAID: caID, Fingerprint: fingerprint, PEM: "pem",
 			CertVer: 2, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour),
 		}
 		return tx.InsertCertificate(ctx, &cert)
@@ -629,7 +633,7 @@ func TestBlockHostFlow(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if h.State != store.HostSuspended {
+		if h.State != store.MembershipSuspended {
 			t.Errorf("host state = %q, want suspended", h.State)
 		}
 
@@ -675,14 +679,14 @@ func TestLiveBlocklistExcludesExpired(t *testing.T) {
 
 		liveFP, staleFP = uuid.NewString(), uuid.NewString()
 		c1 := store.Certificate{
-			HostID: live.ID, CAID: ca.ID, Fingerprint: liveFP, PEM: "p", CertVer: 2,
+			MembershipID: live.ID, CAID: ca.ID, Fingerprint: liveFP, PEM: "p", CertVer: 2,
 			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour),
 		}
 		if err := tx.InsertCertificate(ctx, &c1); err != nil {
 			return err
 		}
 		c2 := store.Certificate{
-			HostID: stale.ID, CAID: ca.ID, Fingerprint: staleFP, PEM: "p", CertVer: 2,
+			MembershipID: stale.ID, CAID: ca.ID, Fingerprint: staleFP, PEM: "p", CertVer: 2,
 			NotBefore: now.Add(-48 * time.Hour), NotAfter: now.Add(-time.Hour),
 		}
 		return tx.InsertCertificate(ctx, &c2)
@@ -785,13 +789,13 @@ func TestConvergence(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if c.HostsTotal != 2 {
-			t.Errorf("hosts total = %d, want 2", c.HostsTotal)
+		if c.MembershipsTotal != 2 {
+			t.Errorf("hosts total = %d, want 2", c.MembershipsTotal)
 		}
 		if c.BlockApplied != 1 {
 			t.Errorf("blocklist converged = %d, want 1", c.BlockApplied)
 		}
-		if len(c.Lagging) != 1 || c.Lagging[0].HostID != h2.ID {
+		if len(c.Lagging) != 1 || c.Lagging[0].MembershipID != h2.ID {
 			t.Errorf("lagging = %+v, want just %s", c.Lagging, h2.Name)
 		}
 		return nil
@@ -825,7 +829,7 @@ func TestCertificateSupersedesPerVersion(t *testing.T) {
 
 		mk := func(ver int16) store.Certificate {
 			return store.Certificate{
-				HostID: host.ID, CAID: ca.ID, Fingerprint: uuid.NewString(), PEM: "p",
+				MembershipID: host.ID, CAID: ca.ID, Fingerprint: uuid.NewString(), PEM: "p",
 				CertVer: ver, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour),
 			}
 		}
@@ -874,13 +878,13 @@ func TestCertificateSupersedesPerVersion(t *testing.T) {
 }
 
 //------------------------------------------------------------------------------
-// Host listing: filters, keyset pagination, count
+// Membership listing: filters, keyset pagination, count
 //------------------------------------------------------------------------------
 
 // listHosts is the common "one page, no filters beyond these" call.
-func listHosts(t *testing.T, s *store.Store, f store.HostFilter) store.HostPage {
+func listHosts(t *testing.T, s *store.Store, f store.MembershipFilter) store.MembershipPage {
 	t.Helper()
-	var page store.HostPage
+	var page store.MembershipPage
 	err := s.Read(context.Background(), func(ctx context.Context, tx *store.Tx) error {
 		var err error
 		page, err = tx.ListHosts(ctx, f)
@@ -892,9 +896,9 @@ func listHosts(t *testing.T, s *store.Store, f store.HostFilter) store.HostPage 
 	return page
 }
 
-func hostNames(page store.HostPage) []string {
-	out := make([]string, 0, len(page.Hosts))
-	for _, h := range page.Hosts {
+func membershipNames(page store.MembershipPage) []string {
+	out := make([]string, 0, len(page.Memberships))
+	for _, h := range page.Memberships {
 		out = append(out, h.Name)
 	}
 	return out
@@ -927,21 +931,21 @@ func TestListHostsFiltersInSQL(t *testing.T) {
 	}
 
 	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		hosts := []store.Host{
+		hosts := []store.Membership{
 			{NetworkID: net.ID, Name: "web-01", RoleID: &web.ID,
-				Tags: []string{"prod", "eu"}, State: store.HostActive,
+				Tags: []string{"prod", "eu"}, State: store.MembershipActive,
 				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.1")}},
 			{NetworkID: net.ID, Name: "web-02", RoleID: &web.ID,
-				Tags: []string{"staging"}, State: store.HostSuspended,
+				Tags: []string{"staging"}, State: store.MembershipSuspended,
 				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.2")}},
 			{NetworkID: net.ID, Name: "db-01", RoleID: &db.ID,
-				Tags: []string{"prod"}, State: store.HostActive,
+				Tags: []string{"prod"}, State: store.MembershipActive,
 				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.3")}},
-			{NetworkID: net.ID, Name: "unroled", State: store.HostCreated,
+			{NetworkID: net.ID, Name: "unroled", State: store.MembershipCreated,
 				Addrs: []netip.Addr{netip.MustParseAddr("10.42.0.4")}},
 		}
 		for i := range hosts {
-			if err := tx.CreateHost(ctx, &hosts[i]); err != nil {
+			if err := insertHost(ctx, tx, &hosts[i]); err != nil {
 				return err
 			}
 		}
@@ -951,29 +955,29 @@ func TestListHostsFiltersInSQL(t *testing.T) {
 		t.Fatalf("CreateHost: %v", err)
 	}
 
-	base := store.HostFilter{NetworkID: net.ID}
+	base := store.MembershipFilter{NetworkID: net.ID}
 
 	cases := []struct {
 		name   string
-		filter store.HostFilter
+		filter store.MembershipFilter
 		want   []string
 	}{
 		{"unfiltered", base, []string{"db-01", "unroled", "web-01", "web-02"}},
-		{"state", store.HostFilter{NetworkID: net.ID, State: store.HostSuspended}, []string{"web-02"}},
-		{"tag", store.HostFilter{NetworkID: net.ID, Tag: "prod"}, []string{"db-01", "web-01"}},
-		{"role", store.HostFilter{NetworkID: net.ID, RoleID: &web.ID}, []string{"web-01", "web-02"}},
-		{"name substring", store.HostFilter{NetworkID: net.ID, NameContains: "eb-0"}, []string{"web-01", "web-02"}},
+		{"state", store.MembershipFilter{NetworkID: net.ID, State: store.MembershipSuspended}, []string{"web-02"}},
+		{"tag", store.MembershipFilter{NetworkID: net.ID, Tag: "prod"}, []string{"db-01", "web-01"}},
+		{"role", store.MembershipFilter{NetworkID: net.ID, RoleID: &web.ID}, []string{"web-01", "web-02"}},
+		{"name substring", store.MembershipFilter{NetworkID: net.ID, NameContains: "eb-0"}, []string{"web-01", "web-02"}},
 		// Case-insensitive: an operator typing a hostname does not think about case.
-		{"name case", store.HostFilter{NetworkID: net.ID, NameContains: "WEB"}, []string{"web-01", "web-02"}},
+		{"name case", store.MembershipFilter{NetworkID: net.ID, NameContains: "WEB"}, []string{"web-01", "web-02"}},
 		// A name containing a LIKE metacharacter must be matched literally. With
 		// LIKE, "_01" would match "web-01" too and the filter would quietly
 		// answer a different question than the one asked.
-		{"name metacharacter", store.HostFilter{NetworkID: net.ID, NameContains: "b_01"}, nil},
-		{"combined", store.HostFilter{NetworkID: net.ID, RoleID: &web.ID, Tag: "prod"}, []string{"web-01"}},
+		{"name metacharacter", store.MembershipFilter{NetworkID: net.ID, NameContains: "b_01"}, nil},
+		{"combined", store.MembershipFilter{NetworkID: net.ID, RoleID: &web.ID, Tag: "prod"}, []string{"web-01"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hostNames(listHosts(t, s, tc.filter))
+			got := membershipNames(listHosts(t, s, tc.filter))
 			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
 				t.Errorf("names = %v, want %v", got, tc.want)
 			}
@@ -982,7 +986,7 @@ func TestListHostsFiltersInSQL(t *testing.T) {
 
 	// The role name has to arrive with the host, or a client rendering a list
 	// makes one lookup per row.
-	for _, h := range listHosts(t, s, base).Hosts {
+	for _, h := range listHosts(t, s, base).Memberships {
 		switch h.Name {
 		case "web-01", "web-02":
 			if h.RoleName != "web" {
@@ -1010,9 +1014,9 @@ func TestListHostsBehindFilter(t *testing.T) {
 
 	// A host that never enrolled: behind by the numbers, excluded on purpose.
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		h := store.Host{NetworkID: net.ID, Name: "never-enrolled", State: store.HostCreated,
+		h := store.Membership{NetworkID: net.ID, Name: "never-enrolled", State: store.MembershipCreated,
 			Addrs: []netip.Addr{netip.MustParseAddr("10.42.1.3")}}
-		return tx.CreateHost(ctx, &h)
+		return insertHost(ctx, tx, &h)
 	})
 	if err != nil {
 		t.Fatalf("CreateHost: %v", err)
@@ -1036,17 +1040,17 @@ func TestListHostsBehindFilter(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	page := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Behind: true})
-	got := hostNames(page)
+	page := listHosts(t, s, store.MembershipFilter{NetworkID: net.ID, Behind: true})
+	got := membershipNames(page)
 	if fmt.Sprint(got) != fmt.Sprint([]string{"behind"}) {
 		t.Errorf("behind = %v, want [behind]", got)
 	}
 	// The filter and the convergence endpoint must not disagree about who is
 	// behind; two numbers for one question is how an operator loses trust in
 	// both.
-	if len(got) != conv.HostsTotal-conv.ConfigApplied {
+	if len(got) != conv.MembershipsTotal-conv.ConfigApplied {
 		t.Errorf("behind filter returned %d hosts, convergence says %d are lagging",
-			len(got), conv.HostsTotal-conv.ConfigApplied)
+			len(got), conv.MembershipsTotal-conv.ConfigApplied)
 	}
 }
 
@@ -1071,24 +1075,24 @@ func TestListHostsKeysetPagination(t *testing.T) {
 	// the last one.
 	var (
 		seen   []string
-		cursor *store.HostCursor
+		cursor *store.MembershipCursor
 		pages  int
 	)
 	for {
-		page := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2, After: cursor})
+		page := listHosts(t, s, store.MembershipFilter{NetworkID: net.ID, Limit: 2, After: cursor})
 		pages++
-		seen = append(seen, hostNames(page)...)
+		seen = append(seen, membershipNames(page)...)
 		if !page.More {
-			if len(page.Hosts) != 2 {
-				t.Errorf("final page had %d hosts, want 2 (an exactly-full last page)", len(page.Hosts))
+			if len(page.Memberships) != 2 {
+				t.Errorf("final page had %d hosts, want 2 (an exactly-full last page)", len(page.Memberships))
 			}
 			break
 		}
-		if len(page.Hosts) == 0 {
+		if len(page.Memberships) == 0 {
 			t.Fatal("a page reported More with no rows to build a cursor from")
 		}
-		last := page.Hosts[len(page.Hosts)-1]
-		cursor = &store.HostCursor{Name: last.Name, ID: last.ID}
+		last := page.Memberships[len(page.Memberships)-1]
+		cursor = &store.MembershipCursor{Name: last.Name, ID: last.ID}
 		if pages > 5 {
 			t.Fatal("pagination did not terminate")
 		}
@@ -1102,15 +1106,15 @@ func TestListHostsKeysetPagination(t *testing.T) {
 
 	// Now the concurrent insert. Take the first page, create a host that sorts
 	// before the cursor and one that sorts after, then take the second page.
-	first := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2})
-	last := first.Hosts[len(first.Hosts)-1]
-	after := &store.HostCursor{Name: last.Name, ID: last.ID}
+	first := listHosts(t, s, store.MembershipFilter{NetworkID: net.ID, Limit: 2})
+	last := first.Memberships[len(first.Memberships)-1]
+	after := &store.MembershipCursor{Name: last.Name, ID: last.ID}
 
 	newHost(t, s, net, "a-inserted", "10.42.2.20") // before the cursor
 	newHost(t, s, net, "c-inserted", "10.42.2.21") // after it
 
-	second := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2, After: after})
-	got := hostNames(second)
+	second := listHosts(t, s, store.MembershipFilter{NetworkID: net.ID, Limit: 2, After: after})
+	got := membershipNames(second)
 	// "c" is still the row after the cursor: the insert before it did not shift
 	// the window, which is exactly what OFFSET would have got wrong.
 	if fmt.Sprint(got) != fmt.Sprint([]string{"c", "c-inserted"}) {
@@ -1121,12 +1125,12 @@ func TestListHostsKeysetPagination(t *testing.T) {
 	}
 
 	// A cursor past the end is an empty page, not an error.
-	end := listHosts(t, s, store.HostFilter{
+	end := listHosts(t, s, store.MembershipFilter{
 		NetworkID: net.ID,
-		After:     &store.HostCursor{Name: "zzz", ID: uuid.Nil},
+		After:     &store.MembershipCursor{Name: "zzz", ID: uuid.Nil},
 	})
-	if len(end.Hosts) != 0 || end.More {
-		t.Errorf("cursor past the end returned %d hosts (more=%v)", len(end.Hosts), end.More)
+	if len(end.Memberships) != 0 || end.More {
+		t.Errorf("cursor past the end returned %d hosts (more=%v)", len(end.Memberships), end.More)
 	}
 }
 
@@ -1139,24 +1143,24 @@ func TestListHostsCountIsOptIn(t *testing.T) {
 		newHost(t, s, net, name, fmt.Sprintf("10.42.3.%d", i+1))
 	}
 
-	page := listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2})
+	page := listHosts(t, s, store.MembershipFilter{NetworkID: net.ID, Limit: 2})
 	if page.Total != nil {
 		t.Errorf("count was returned without being asked for: %d", *page.Total)
 	}
 
-	page = listHosts(t, s, store.HostFilter{NetworkID: net.ID, Limit: 2, WithCount: true})
+	page = listHosts(t, s, store.MembershipFilter{NetworkID: net.ID, Limit: 2, WithCount: true})
 	if page.Total == nil {
 		t.Fatal("WithCount returned no total")
 	}
 	if *page.Total != 3 {
 		t.Errorf("total = %d, want 3 (the filter, not the page)", *page.Total)
 	}
-	if len(page.Hosts) != 2 {
-		t.Errorf("page = %d hosts, want 2", len(page.Hosts))
+	if len(page.Memberships) != 2 {
+		t.Errorf("page = %d hosts, want 2", len(page.Memberships))
 	}
 
 	// And it narrows with the filter, or it is not a count of anything useful.
-	page = listHosts(t, s, store.HostFilter{
+	page = listHosts(t, s, store.MembershipFilter{
 		NetworkID: net.ID, NameContains: "t", WithCount: true,
 	})
 	if page.Total == nil || *page.Total != 2 {
@@ -1169,7 +1173,7 @@ func TestListHostsCountIsOptIn(t *testing.T) {
 //------------------------------------------------------------------------------
 
 // TestHostCertificateHistory covers the listing behind
-// GET /v1/hosts/{id}/certificates: newest first, the issuing CA by name, and a
+// GET /v1/memberships/{id}/certificates: newest first, the issuing CA by name, and a
 // cursor that works when every row shares a timestamp.
 //
 // Sharing a timestamp is the normal case, not a contrived one: issued_at
@@ -1199,7 +1203,7 @@ func TestHostCertificateHistory(t *testing.T) {
 		// transaction and therefore all with the same issued_at.
 		for i := 0; i < 4; i++ {
 			c := store.Certificate{
-				HostID: host.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+				MembershipID: host.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
 				CertVer: 2, NotBefore: now.Add(-time.Duration(i+1) * time.Hour),
 				NotAfter: now.Add(time.Duration(i) * time.Hour), State: store.CertSuperseded,
 			}
@@ -1208,7 +1212,7 @@ func TestHostCertificateHistory(t *testing.T) {
 			}
 		}
 		current := store.Certificate{
-			HostID: host.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+			MembershipID: host.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
 			CertVer: 2, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour),
 		}
 		if err := tx.InsertCertificate(ctx, &current); err != nil {
@@ -1216,7 +1220,7 @@ func TestHostCertificateHistory(t *testing.T) {
 		}
 		// A certificate belonging to another host must never appear below.
 		stray := store.Certificate{
-			HostID: other.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
+			MembershipID: other.ID, CAID: caRow.ID, Fingerprint: uuid.NewString(), PEM: "p",
 			CertVer: 2, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour),
 		}
 		return tx.InsertCertificate(ctx, &stray)
@@ -1230,11 +1234,11 @@ func TestHostCertificateHistory(t *testing.T) {
 		var page store.CertPage
 		err := s.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 			var err error
-			page, err = tx.HostCertificates(ctx, host.ID, f)
+			page, err = tx.MembershipCertificates(ctx, host.ID, f)
 			return err
 		})
 		if err != nil {
-			t.Fatalf("HostCertificates: %v", err)
+			t.Fatalf("MembershipCertificates: %v", err)
 		}
 		return page
 	}
@@ -1244,7 +1248,7 @@ func TestHostCertificateHistory(t *testing.T) {
 		t.Fatalf("history = %d rows, want 5", len(all.Certificates))
 	}
 	for _, c := range all.Certificates {
-		if c.HostID != host.ID {
+		if c.MembershipID != host.ID {
 			t.Errorf("history contains another host's certificate: %s", c.ID)
 		}
 		if c.CAName != "history-ca" {
@@ -1415,14 +1419,14 @@ func TestDeleteRoleIsRefusedWhileHostsCarryIt(t *testing.T) {
 		t.Fatalf("CreateRole: %v", err)
 	}
 
-	var host store.Host
+	var host store.Membership
 	err = s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		host = store.Host{
+		host = store.Membership{
 			NetworkID: net.ID, Name: "carrier", RoleID: &role.ID,
 			Addrs: []netip.Addr{netip.MustParseAddr("10.62.0.1")},
-			State: store.HostActive,
+			State: store.MembershipActive,
 		}
-		return tx.CreateHost(ctx, &host)
+		return insertHost(ctx, tx, &host)
 	})
 	if err != nil {
 		t.Fatalf("CreateHost: %v", err)
@@ -1441,7 +1445,7 @@ func TestDeleteRoleIsRefusedWhileHostsCarryIt(t *testing.T) {
 	// A blocker list that filtered it out would report an empty set for a
 	// delete the database then refuses.
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		return tx.SetHostState(ctx, host.ID, store.HostDeleted)
+		return tx.SetHostState(ctx, host.ID, store.MembershipDeleted)
 	}); err != nil {
 		t.Fatalf("SetHostState: %v", err)
 	}
@@ -1487,7 +1491,7 @@ func ptrStr(s string) *string { return &s }
 // A host that has reported is active. "Enrolled" means it holds a certificate;
 // "active" means it is using it, which nothing but a report can observe.
 //
-// Before this, the only assignment of HostActive anywhere was in UnblockHost —
+// Before this, the only assignment of MembershipActive anywhere was in UnblockHost —
 // so a host reached active solely by being blocked and then unblocked, and a
 // normally enrolled fleet read as permanently mid-setup in `orbit host ls`.
 func TestReportingMakesAHostActive(t *testing.T) {
@@ -1497,7 +1501,7 @@ func TestReportingMakesAHostActive(t *testing.T) {
 	host := newHost(t, s, net, "reporter", "10.90.0.7")
 
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		return tx.SetHostState(ctx, host.ID, store.HostEnrolled)
+		return tx.SetHostState(ctx, host.ID, store.MembershipEnrolled)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1510,8 +1514,8 @@ func TestReportingMakesAHostActive(t *testing.T) {
 		t.Fatalf("RecordAgentReport: %v", err)
 	}
 
-	if got := readHostState(t, s, host.ID); got != store.HostActive {
-		t.Errorf("state = %q after reporting, want %q", got, store.HostActive)
+	if got := readHostState(t, s, host.ID); got != store.MembershipActive {
+		t.Errorf("state = %q after reporting, want %q", got, store.MembershipActive)
 	}
 }
 
@@ -1527,7 +1531,7 @@ func TestReportingDoesNotResurrectABlockedHost(t *testing.T) {
 	ctx := context.Background()
 	net := newNetwork(t, s, "10.91.0.0/16")
 
-	for i, state := range []string{store.HostSuspended, store.HostCreated, store.HostDeleted} {
+	for i, state := range []string{store.MembershipSuspended, store.MembershipCreated, store.MembershipDeleted} {
 		t.Run(state, func(t *testing.T) {
 			host := newHost(t, s, net, "host-"+state, fmt.Sprintf("10.91.0.%d", i+10))
 			if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
@@ -1566,4 +1570,53 @@ func readHostState(t *testing.T, s *store.Store, id uuid.UUID) string {
 		t.Fatal(err)
 	}
 	return state
+}
+
+// insertHost creates a membership with a device, which is the only kind there is.
+//
+// Every fixture here used to call tx.CreateHost directly, which stopped
+// compiling in spirit and started failing in fact when device_id became NOT NULL
+// (migration 0015). That is the constraint doing its job: a membership is "this
+// device, in that network", so a test that creates one without a machine is
+// testing a state the product cannot reach.
+//
+// A fresh device per host, because real machines have their own. Sharing one
+// would make every fixture the same device and would hide exactly the bugs the
+// device model exists to prevent.
+func insertHost(ctx context.Context, tx *store.Tx, h *store.Membership) error {
+	d := store.Device{PublicKey: randomKeyBytes()}
+	if err := tx.SeeDevice(ctx, &d); err != nil {
+		return err
+	}
+	h.DeviceID = &d.ID
+	return tx.CreateHost(ctx, h)
+}
+
+func randomKeyBytes() []byte {
+	k := make([]byte, 65)
+	if _, err := rand.Read(k); err != nil {
+		panic(err)
+	}
+	k[0] = 0x04
+	return k
+}
+
+// withIdentity fills the network identity a real bootstrap would generate.
+//
+// Every network needs one: its ID derives from it, and a network without a
+// verifiable ID is one a machine cannot safely join. `orbitd bootstrap`
+// generates the pair and writes the private half to a file; these tests only
+// need the public half and a ref, because nothing here verifies a proof.
+//
+// The ref still points at a real path so it is the same SHAPE the store stores
+// in production — a locator, never the key. A test that DOES verify a proof
+// (e2e) writes the file too.
+func withIdentity(t *testing.T, n *store.Network) {
+	t.Helper()
+	pub, _, err := ca.GenerateNetworkIdentity()
+	if err != nil {
+		t.Fatalf("generate network identity: %v", err)
+	}
+	n.IdentityPublicKey = pub
+	n.IdentitySignerRef = "file://" + filepath.Join(t.TempDir(), "network-identity.key")
 }

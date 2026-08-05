@@ -89,7 +89,7 @@ func TestRevokingATokenKillsItsSessions(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read", "hosts:write"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read", "memberships:write"}, nil)
 	cookie, _ := newSession(t, s, tokenID, false)
 
 	if _, err := s.ResolveSession(ctx, cookie); err != nil {
@@ -162,12 +162,12 @@ func TestReadOnlySessionCannotWiden(t *testing.T) {
 		},
 		{
 			name:  "a mixed token keeps only its read scopes",
-			token: []string{"hosts:read", "hosts:write", "hosts:block", "cas:write"},
-			want:  []string{"hosts:read"},
+			token: []string{"memberships:read", "memberships:write", "memberships:block", "cas:write"},
+			want:  []string{"memberships:read"},
 		},
 		{
 			name:  "a write-only token yields a session that can do nothing",
-			token: []string{"hosts:write", "cas:write"},
+			token: []string{"memberships:write", "cas:write"},
 			want:  []string{},
 		},
 	} {
@@ -197,7 +197,7 @@ func TestReadOnlySessionCannotWiden(t *testing.T) {
 					t.Errorf("read-only session holds a non-read scope %q", sc)
 				}
 			}
-			if id.HasScope("hosts:write") || id.HasScope("cas:write") {
+			if id.HasScope("memberships:write") || id.HasScope("cas:write") {
 				t.Error("a read-only session passes a write scope check")
 			}
 		})
@@ -211,7 +211,7 @@ func TestFullSessionKeepsTheTokensScopes(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()
 
-	scopes := []string{"hosts:read", "hosts:block"}
+	scopes := []string{"memberships:read", "memberships:block"}
 	tokenID, plaintext := newToken(t, s, scopes, nil)
 	cookie, _ := newSession(t, s, tokenID, false)
 
@@ -264,7 +264,7 @@ func TestExpiredSessionIsRefused(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+			tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 			cookie, _ := newSession(t, s, tokenID, true)
 
 			sum := sha256.Sum256([]byte(cookie))
@@ -288,7 +288,7 @@ func TestResolveRefreshesTheIdleWindow(t *testing.T) {
 	ctx := context.Background()
 	conn := adminConn(t)
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	cookie, _ := newSession(t, s, tokenID, true)
 	sum := sha256.Sum256([]byte(cookie))
 
@@ -322,7 +322,7 @@ func TestSessionNeverOutlivesItsToken(t *testing.T) {
 	s := setup(t)
 
 	shortly := time.Now().Add(45 * time.Minute)
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, &shortly)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, &shortly)
 	_, expires := newSession(t, s, tokenID, true)
 
 	if expires.After(shortly.Add(time.Minute)) {
@@ -330,7 +330,7 @@ func TestSessionNeverOutlivesItsToken(t *testing.T) {
 	}
 
 	// And the ceiling still applies to a token that never expires.
-	forever, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	forever, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	_, capped := newSession(t, s, forever, true)
 	if capped.After(time.Now().Add(store.SessionMaxLifetime + time.Minute)) {
 		t.Errorf("session expires at %s, beyond the %s ceiling", capped, store.SessionMaxLifetime)
@@ -345,7 +345,7 @@ func TestTwelveHourCeilingIsEnforcedByTheDatabase(t *testing.T) {
 	ctx := context.Background()
 	conn := adminConn(t)
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 
 	_, err := conn.Exec(ctx, `
 		INSERT INTO orbit.ui_session (token_id, cookie_hash, read_only, expires_at)
@@ -367,7 +367,7 @@ func TestCookieValueIsNotStoredInPlaintext(t *testing.T) {
 	ctx := context.Background()
 	conn := adminConn(t)
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	cookie, _ := newSession(t, s, tokenID, true)
 
 	// Every text-ish column of the row, not just the one we expect. The failure
@@ -409,7 +409,7 @@ func TestRevokeUISession(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()
 
-	tokenID, plaintext := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, plaintext := newToken(t, s, []string{"memberships:read"}, nil)
 	cookie, _ := newSession(t, s, tokenID, true)
 
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
@@ -460,7 +460,7 @@ func TestPruneUISessions(t *testing.T) {
 	ctx := context.Background()
 	conn := adminConn(t)
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	dead, _ := newSession(t, s, tokenID, true)
 	live, _ := newSession(t, s, tokenID, true)
 
@@ -504,7 +504,7 @@ func TestSessionLifecycleIsAudited(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	cookie, _ := newSession(t, s, tokenID, true)
 	if err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		return tx.RevokeUISession(ctx, cookie)
@@ -616,7 +616,7 @@ func TestListUISessionsAgreesWithResolveSession(t *testing.T) {
 	ctx := context.Background()
 	conn := adminConn(t)
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 
 	live, _ := newSession(t, s, tokenID, true)
 
@@ -666,7 +666,7 @@ func TestListUISessionsKillsItsRowsWhenTheTokenIsRevoked(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	newSession(t, s, tokenID, false)
 	newSession(t, s, tokenID, true)
 
@@ -691,7 +691,7 @@ func TestListUISessionsKillsItsRowsWhenTheTokenIsRevoked(t *testing.T) {
 func TestListUISessionsMarksTheCaller(t *testing.T) {
 	s := setup(t)
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	mine, _ := newSession(t, s, tokenID, false)
 	newSession(t, s, tokenID, true)
 
@@ -725,7 +725,7 @@ func TestListUISessionsMarksTheCaller(t *testing.T) {
 func TestListUISessionsCarriesNoCredential(t *testing.T) {
 	s := setup(t)
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	cookie, _ := newSession(t, s, tokenID, false)
 
 	got := sessionsOfToken(listSessions(t, s, cookie), tokenID)
@@ -762,7 +762,7 @@ func TestRevokeUISessionByIDEndsOneBrowser(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()
 
-	tokenID, tokenPlaintext := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, tokenPlaintext := newToken(t, s, []string{"memberships:read"}, nil)
 	doomed, _ := newSession(t, s, tokenID, false)
 	survivor, _ := newSession(t, s, tokenID, false)
 
@@ -815,7 +815,7 @@ func TestRevokeUISessionByIDIsAttributedToTheOperator(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()
 
-	tokenID, _ := newToken(t, s, []string{"hosts:read"}, nil)
+	tokenID, _ := newToken(t, s, []string{"memberships:read"}, nil)
 	cookie, _ := newSession(t, s, tokenID, false)
 
 	got := sessionsOfToken(listSessions(t, s, cookie), tokenID)

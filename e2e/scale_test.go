@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/griffithind/orbit/internal/ca"
@@ -33,14 +32,10 @@ func TestMeshJoinCost(t *testing.T) {
 	const networks = 4
 
 	h := setup(t)
-	hasher, err := enroll.NewHasher([]byte(strings.Repeat("pepper-for-tests", 4)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := ca.NewRegistry(ca.FileSignerFactory)
 	t.Cleanup(func() { registry.Close() })
 
-	svc := enroll.NewService(h.store, registry, hasher, enroll.Config{
+	svc := enroll.NewService(h.store, registry, enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: 0,
 	})
@@ -59,6 +54,7 @@ func TestMeshJoinCost(t *testing.T) {
 		// Each network needs its own CA and prefix.
 		nh := setup(t)
 		node, err := mesh.Join(context.Background(), svc, mesh.Config{
+			DeviceKey: testDeviceKey(t),
 			NetworkID: nh.netID,
 			Addr:      mustAddr(fmt.Sprintf("10.42.%d.2", 100+i)),
 			AgentPort: 8443,

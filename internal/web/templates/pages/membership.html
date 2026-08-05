@@ -1,9 +1,9 @@
 {{- define "content" -}}
 {{- with .Data }}
-<h1>{{ .Host.Name }} {{ template "badge" .Host.Badge }}</h1>
+<h1>{{ .Membership.Name }} {{ template "badge" .Membership.Badge }}</h1>
 <p class="subtitle">
   <a href="/ui/networks/{{ .Network.ID }}">{{ .Network.Name }}</a> ·
-  {{- range .Host.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
+  {{- range .Membership.OverlayAddrs }} <code>{{ . }}</code>{{ end }}
 </p>
 
 {{/*
@@ -30,10 +30,10 @@
     <h2>Reachability</h2>
     <dl class="pairs">
       <dt>Last seen</dt>
-      <dd>{{ agoPtr .Host.LastSeenAt }}{{ if .Host.LastSeenAt }}<span class="note">{{ stampPtr .Host.LastSeenAt }}</span>{{ end }}</dd>
-      <dt>Config epoch</dt><dd>{{ template "badge" .Host.ConfigBadge }}</dd>
-      <dt>Blocklist epoch</dt><dd>{{ template "badge" .Host.BlockBadge }}</dd>
-      {{- if .Host.RestartPending }}
+      <dd>{{ agoPtr .Membership.LastSeenAt }}{{ if .Membership.LastSeenAt }}<span class="note">{{ stampPtr .Membership.LastSeenAt }}</span>{{ end }}</dd>
+      <dt>Config epoch</dt><dd>{{ template "badge" .Membership.ConfigBadge }}</dd>
+      <dt>Blocklist epoch</dt><dd>{{ template "badge" .Membership.BlockBadge }}</dd>
+      {{- if .Membership.RestartPending }}
       {{/*
         Not a reload. Nebula refuses a certificate reload whose networks
         changed, so this host keeps running its old certificate until the
@@ -41,7 +41,7 @@
         makes it different from every other thing a host is behind on.
       */}}
       <dt>Restart</dt>
-      <dd><span class="badge warn"><span class="glyph" aria-hidden="true">▲</span>required for generation {{ .Host.RestartRequiredEpoch }}</span></dd>
+      <dd><span class="badge warn"><span class="glyph" aria-hidden="true">▲</span>required for generation {{ .Membership.RestartRequiredEpoch }}</span></dd>
       {{- end }}
     </dl>
   </section>
@@ -50,20 +50,20 @@
     <h2>Identity</h2>
     <dl class="pairs">
       <dt>Role</dt>
-      <dd>{{ if .Host.RoleName }}{{ .Host.RoleName }}{{ else }}<span class="note">none</span>{{ end }}</dd>
+      <dd>{{ if .Membership.RoleName }}{{ .Membership.RoleName }}{{ else }}<span class="note">none</span>{{ end }}</dd>
       <dt>Tags</dt>
-      <dd>{{ if .Host.Tags }}{{ join .Host.Tags ", " }}{{ else }}<span class="note">none</span>{{ end }}</dd>
+      <dd>{{ if .Membership.Tags }}{{ join .Membership.Tags ", " }}{{ else }}<span class="note">none</span>{{ end }}</dd>
       <dt>Topology</dt>
       <dd>
-        {{- if .Host.IsLighthouse }}<span class="tag">lighthouse</span>{{ end }}
-        {{- if .Host.IsRelay }}<span class="tag">relay</span>{{ end }}
-        {{- if and (not .Host.IsLighthouse) (not .Host.IsRelay) }}<span class="note">ordinary host</span>{{ end }}
+        {{- if .Membership.IsLighthouse }}<span class="tag">lighthouse</span>{{ end }}
+        {{- if .Membership.IsRelay }}<span class="tag">relay</span>{{ end }}
+        {{- if and (not .Membership.IsLighthouse) (not .Membership.IsRelay) }}<span class="note">ordinary host</span>{{ end }}
       </dd>
-      {{- if .Host.StaticAddrs }}
+      {{- if .Membership.StaticAddrs }}
       <dt>Public addresses</dt>
-      <dd>{{- range .Host.StaticAddrs }}<code>{{ . }}</code> {{ end }}</dd>
+      <dd>{{- range .Membership.StaticAddrs }}<code>{{ . }}</code> {{ end }}</dd>
       {{- end }}
-      <dt>Created</dt><dd>{{ ago .Host.CreatedAt }}<span class="note">{{ stamp .Host.CreatedAt }}</span></dd>
+      <dt>Created</dt><dd>{{ ago .Membership.CreatedAt }}<span class="note">{{ stamp .Membership.CreatedAt }}</span></dd>
     </dl>
   </section>
 
@@ -71,28 +71,28 @@
     <h2>Software</h2>
     <dl class="pairs">
       <dt>nebula</dt>
-      <dd>{{ if .Host.NebulaVersion }}<code>{{ .Host.NebulaVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
+      <dd>{{ if .Membership.NebulaVersion }}<code>{{ .Membership.NebulaVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
       <dt>agent</dt>
-      <dd>{{ if .Host.AgentVersion }}<code>{{ .Host.AgentVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
-      <dt>Config layout</dt><dd><code>{{ .Host.ConfigMode }}</code></dd>
+      <dd>{{ if .Membership.AgentVersion }}<code>{{ .Membership.AgentVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
+      <dt>Config layout</dt><dd><code>{{ .Membership.ConfigMode }}</code></dd>
       <dt>Interface</dt>
-      <dd>{{ if .Host.TunDev }}<code>{{ .Host.TunDev }}</code> · {{ end }}UDP {{ .Host.ListenPortLabel }}</dd>
+      <dd>{{ if .Membership.TunDev }}<code>{{ .Membership.TunDev }}</code> · {{ end }}UDP {{ .Membership.ListenPortLabel }}</dd>
     </dl>
   </section>
 
   <section class="card actions">
     <h2>Actions</h2>
-    {{- if hasScope $.Scopes "hosts:block" }}
-      {{- if eq .Host.State "suspended" }}
+    {{- if hasScope $.Scopes "memberships:block" }}
+      {{- if eq .Membership.State "suspended" }}
       {{/*
         Unblock is a real form POST, so it works with scripts disabled. The
         confirmation app.js adds on top is a guard against a misclick, not a
         requirement for the action to fire.
       */}}
-      <form method="post" action="/ui/hosts/{{ .Host.ID }}/unblock">
+      <form method="post" action="/ui/memberships/{{ .Membership.ID }}/unblock">
         <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
         <button type="submit" class="button"
-                data-confirm="Unblock {{ .Host.Name }}? It will need to re-enroll or recover before it holds a valid certificate again.">Unblock this host</button>
+                data-confirm="Unblock {{ .Membership.Name }}? It will need to re-enroll or recover before it holds a valid certificate again.">Unblock this host</button>
       </form>
       {{- else }}
       {{/*
@@ -101,12 +101,12 @@
         only lighthouse, that it relays for other machines — which is the part
         that changes the decision.
       */}}
-      <p><a class="button danger" href="/ui/hosts/{{ .Host.ID }}/block">Block this host…</a></p>
+      <p><a class="button danger" href="/ui/memberships/{{ .Membership.ID }}/block">Block this host…</a></p>
       {{- end }}
     {{- end }}
 
-    {{- if hasScope $.Scopes "hosts:enroll" }}
-    <form method="post" action="/ui/hosts/{{ .Host.ID }}/enrollment-code">
+    {{- if hasScope $.Scopes "memberships:enroll" }}
+    <form method="post" action="/ui/memberships/{{ .Membership.ID }}/enrollment-code">
       <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
       <button type="submit" class="button">Issue an enrollment code</button>
     </form>

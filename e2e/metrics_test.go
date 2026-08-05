@@ -79,7 +79,7 @@ func TestMetricsCountRevocation(t *testing.T) {
 
 	before := gauge(t, scrape(t, mx), "orbit_blocklist_entries", h.netName)
 
-	if code := h.adminPost(t, ts.URL+"/v1/hosts/"+host.id+"/block", nil, nil); code != http.StatusOK {
+	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+host.id+"/block", nil, nil); code != http.StatusOK {
 		t.Fatalf("block: %d", code)
 	}
 

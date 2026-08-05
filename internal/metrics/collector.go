@@ -26,15 +26,15 @@ type dbCollector struct {
 	up             *prometheus.Desc
 	scrapeFailures prometheus.Counter
 
-	configEpoch    *prometheus.Desc
-	blocklistEpoch *prometheus.Desc
-	hostsTotal     *prometheus.Desc
-	configApplied  *prometheus.Desc
-	blockApplied   *prometheus.Desc
-	lagSeconds     *prometheus.Desc
-	certsExpiring  *prometheus.Desc
-	certMinRemain  *prometheus.Desc
-	blocklistSize  *prometheus.Desc
+	configEpoch      *prometheus.Desc
+	blocklistEpoch   *prometheus.Desc
+	membershipsTotal *prometheus.Desc
+	configApplied    *prometheus.Desc
+	blockApplied     *prometheus.Desc
+	lagSeconds       *prometheus.Desc
+	certsExpiring    *prometheus.Desc
+	certMinRemain    *prometheus.Desc
+	blocklistSize    *prometheus.Desc
 }
 
 // RegisterDB attaches the database-backed collector to m's registry.
@@ -57,12 +57,12 @@ func (m *Metrics) RegisterDB(st *store.Store, log *slog.Logger) error {
 			"Current authoritative config epoch.", labels, nil),
 		blocklistEpoch: prometheus.NewDesc("orbit_blocklist_epoch",
 			"Current authoritative blocklist epoch.", labels, nil),
-		hostsTotal: prometheus.NewDesc("orbit_hosts_total",
-			"Hosts that hold or have held a certificate.", labels, nil),
+		membershipsTotal: prometheus.NewDesc("orbit_hosts_total",
+			"Memberships that hold or have held a certificate.", labels, nil),
 		configApplied: prometheus.NewDesc("orbit_hosts_config_converged",
-			"Hosts that have applied the current config epoch.", labels, nil),
+			"Memberships that have applied the current config epoch.", labels, nil),
 		blockApplied: prometheus.NewDesc("orbit_hosts_blocklist_converged",
-			"Hosts that have applied the current blocklist epoch.", labels, nil),
+			"Memberships that have applied the current blocklist epoch.", labels, nil),
 		lagSeconds: prometheus.NewDesc("orbit_convergence_lag_seconds",
 			"How long the most stale un-converged host has gone without reporting.", labels, nil),
 		certsExpiring: prometheus.NewDesc("orbit_certificates_expiring_soon",
@@ -80,7 +80,7 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.up
 	ch <- c.configEpoch
 	ch <- c.blocklistEpoch
-	ch <- c.hostsTotal
+	ch <- c.membershipsTotal
 	ch <- c.configApplied
 	ch <- c.blockApplied
 	ch <- c.lagSeconds
@@ -116,7 +116,7 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		g(c.configEpoch, float64(s.ConfigEpoch))
 		g(c.blocklistEpoch, float64(s.BlocklistEpoch))
-		g(c.hostsTotal, float64(s.HostsTotal))
+		g(c.membershipsTotal, float64(s.MembershipsTotal))
 		g(c.configApplied, float64(s.ConfigApplied))
 		g(c.blockApplied, float64(s.BlockApplied))
 		g(c.lagSeconds, s.LagSeconds)

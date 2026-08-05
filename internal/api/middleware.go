@@ -78,7 +78,7 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		rec := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 
-		// route is r.Pattern: the registered pattern ("GET /v1/hosts/{id}")
+		// route is r.Pattern: the registered pattern ("GET /v1/memberships/{id}")
 		// rather than the path, filled in by ServeMux on the way in. It is a
 		// closed set, so it is safe to group or alert on; path is caller-chosen
 		// and is here for reading, not for aggregating. Empty means no route

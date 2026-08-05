@@ -240,7 +240,7 @@ func (r *Runner) Sweep(ctx context.Context) (Stats, error) {
 					level = slog.LevelWarn
 				}
 				r.log.Log(ctx, level, "certificate is overdue for renewal",
-					"network", networkID, "host", c.HostID,
+					"network", networkID, "host", c.MembershipID,
 					"notAfter", c.NotAfter, "remaining", remaining.Round(time.Minute))
 			}
 			return nil

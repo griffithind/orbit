@@ -104,7 +104,7 @@ const (
 // (cert/cert_v2.go) never binds, because Orbit renders no unsafe networks at
 // all. A host that genuinely wants both families asks for the second address
 // explicitly, which is one call and is visible in the audit log as a decision.
-func (t *Tx) AllocateHostAddress(ctx context.Context, net *Network, hostID uuid.UUID, prefix netip.Prefix) (netip.Addr, error) {
+func (t *Tx) AllocateHostAddress(ctx context.Context, net *Network, membershipID uuid.UUID, prefix netip.Prefix) (netip.Addr, error) {
 	if len(net.CIDRs) == 0 {
 		return netip.Addr{}, fmt.Errorf("allocate address: network %s has no prefix", net.Slug)
 	}
@@ -122,9 +122,9 @@ func (t *Tx) AllocateHostAddress(ctx context.Context, net *Network, hostID uuid.
 	}
 
 	if hi-lo < 1<<addrScanHostBits {
-		return t.allocateByScan(ctx, net.ID, hostID, prefix, lo, hi)
+		return t.allocateByScan(ctx, net.ID, membershipID, prefix, lo, hi)
 	}
-	return t.allocateByProbe(ctx, net.ID, hostID, prefix)
+	return t.allocateByProbe(ctx, net.ID, membershipID, prefix)
 }
 
 // allocRange is the inclusive offset window inside a prefix that may be handed
@@ -141,28 +141,28 @@ func (t *Tx) AllocateHostAddress(ctx context.Context, net *Network, hostID uuid.
 // skipped too.
 func allocRange(p netip.Prefix) (lo, hi uint64, ok bool) {
 	bits := p.Addr().BitLen()
-	hostBits := bits - p.Bits()
-	if hostBits < 0 {
+	membershipBits := bits - p.Bits()
+	if membershipBits < 0 {
 		return 0, 0, false
 	}
 
 	var size uint64
-	if hostBits >= 64 {
+	if membershipBits >= 64 {
 		size = ^uint64(0) // saturate; nothing needs the exact 2^64
 	} else {
-		size = uint64(1) << uint(hostBits)
+		size = uint64(1) << uint(membershipBits)
 	}
 
 	if p.Addr().Is4() {
 		switch {
-		case hostBits <= 1:
+		case membershipBits <= 1:
 			// /31 and /32: every address in the prefix is assignable.
 			return 0, size - 1, true
 		default:
 			return 1, size - 2, true
 		}
 	}
-	if hostBits == 0 {
+	if membershipBits == 0 {
 		return 0, 0, true
 	}
 	return 1, size - 1, true
@@ -178,18 +178,18 @@ func allocRange(p netip.Prefix) (lo, hi uint64, ok bool) {
 // something entirely different — the window really is full — and returning both
 // values is what lets the caller tell exhaustion from contention without
 // guessing.
-func (t *Tx) allocateByScan(ctx context.Context, networkID, hostID uuid.UUID, p netip.Prefix, lo, hi uint64) (netip.Addr, error) {
+func (t *Tx) allocateByScan(ctx context.Context, networkID, membershipID uuid.UUID, p netip.Prefix, lo, hi uint64) (netip.Addr, error) {
 	const q = `
 		WITH candidate AS (
 			SELECT (host(network($3::cidr) + g))::inet AS addr
 			  FROM generate_series($4::bigint, $5::bigint) AS g
 			 WHERE NOT EXISTS (
-			           SELECT 1 FROM orbit.host_address a
+			           SELECT 1 FROM orbit.membership_address a
 			            WHERE a.network_id = $1
 			              AND a.addr = (host(network($3::cidr) + g))::inet)
 			 LIMIT 1
 		), ins AS (
-			INSERT INTO orbit.host_address (network_id, host_id, addr)
+			INSERT INTO orbit.membership_address (network_id, membership_id, addr)
 			SELECT $1, $2, c.addr FROM candidate c
 			ON CONFLICT DO NOTHING
 			RETURNING addr
@@ -198,7 +198,7 @@ func (t *Tx) allocateByScan(ctx context.Context, networkID, hostID uuid.UUID, p 
 
 	for range scanAttempts {
 		var candidate, inserted *netip.Addr
-		if err := t.tx.QueryRow(ctx, q, networkID, hostID, p, lo, hi).
+		if err := t.tx.QueryRow(ctx, q, networkID, membershipID, p, lo, hi).
 			Scan(&candidate, &inserted); err != nil {
 			return netip.Addr{}, mapErr(err, "allocate overlay address")
 		}
@@ -223,7 +223,7 @@ func (t *Tx) allocateByScan(ctx context.Context, networkID, hostID uuid.UUID, p 
 // thing this cannot prove: a prefix this wide is not full in any real sense, so
 // a run of collisions is reported as what it is rather than dressed up as a
 // certainty.
-func (t *Tx) allocateByProbe(ctx context.Context, networkID, hostID uuid.UUID, p netip.Prefix) (netip.Addr, error) {
+func (t *Tx) allocateByProbe(ctx context.Context, networkID, membershipID uuid.UUID, p netip.Prefix) (netip.Addr, error) {
 	for range probeAttempts {
 		addr, err := randomAddrIn(p)
 		if err != nil {
@@ -232,10 +232,10 @@ func (t *Tx) allocateByProbe(ctx context.Context, networkID, hostID uuid.UUID, p
 
 		var inserted *netip.Addr
 		err = t.tx.QueryRow(ctx, `
-			INSERT INTO orbit.host_address (network_id, host_id, addr)
+			INSERT INTO orbit.membership_address (network_id, membership_id, addr)
 			VALUES ($1, $2, $3)
 			ON CONFLICT DO NOTHING
-			RETURNING addr`, networkID, hostID, addr).Scan(&inserted)
+			RETURNING addr`, networkID, membershipID, addr).Scan(&inserted)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			continue // taken; probe again
@@ -311,13 +311,13 @@ func containsPrefix(ps []netip.Prefix, p netip.Prefix) bool {
 // handleCreateHost has always done it: the database would happily store an
 // address outside every prefix, and the failure would surface much later as a
 // certificate the CA refuses to sign.
-func (t *Tx) ClaimHostAddress(ctx context.Context, net *Network, hostID uuid.UUID, addr netip.Addr) error {
+func (t *Tx) ClaimHostAddress(ctx context.Context, net *Network, membershipID uuid.UUID, addr netip.Addr) error {
 	if !net.ContainsAddr(addr) {
 		return fmt.Errorf("%w: %s is outside %v", ErrAddrOutOfRange, addr, net.CIDRs)
 	}
 	_, err := t.tx.Exec(ctx, `
-		INSERT INTO orbit.host_address (network_id, host_id, addr)
-		VALUES ($1, $2, $3)`, net.ID, hostID, addr)
+		INSERT INTO orbit.membership_address (network_id, membership_id, addr)
+		VALUES ($1, $2, $3)`, net.ID, membershipID, addr)
 	return mapErr(err, "claim overlay address")
 }
 
@@ -332,18 +332,18 @@ func (t *Tx) ClaimHostAddress(ctx context.Context, net *Network, hostID uuid.UUI
 // to referee a deletion the way there is for an insert, so the host row stands
 // in for one. Address changes are rare enough that serialising them per host
 // costs nothing.
-func (t *Tx) RemoveHostAddress(ctx context.Context, networkID, hostID uuid.UUID, addr netip.Addr) error {
+func (t *Tx) RemoveHostAddress(ctx context.Context, networkID, membershipID uuid.UUID, addr netip.Addr) error {
 	var locked uuid.UUID
 	if err := t.tx.QueryRow(ctx,
-		`SELECT id FROM orbit.host WHERE id = $1 AND network_id = $2 FOR UPDATE`,
-		hostID, networkID).Scan(&locked); err != nil {
+		`SELECT id FROM orbit.membership WHERE id = $1 AND network_id = $2 FOR UPDATE`,
+		membershipID, networkID).Scan(&locked); err != nil {
 		return mapErr(err, "lock host for address removal")
 	}
 
 	var total, matching int
 	if err := t.tx.QueryRow(ctx, `
 		SELECT count(*), count(*) FILTER (WHERE addr = $2)
-		  FROM orbit.host_address WHERE host_id = $1`, hostID, addr,
+		  FROM orbit.membership_address WHERE membership_id = $1`, membershipID, addr,
 	).Scan(&total, &matching); err != nil {
 		return mapErr(err, "count host addresses")
 	}
@@ -355,8 +355,8 @@ func (t *Tx) RemoveHostAddress(ctx context.Context, networkID, hostID uuid.UUID,
 	}
 
 	_, err := t.tx.Exec(ctx,
-		`DELETE FROM orbit.host_address WHERE network_id = $1 AND host_id = $2 AND addr = $3`,
-		networkID, hostID, addr)
+		`DELETE FROM orbit.membership_address WHERE network_id = $1 AND membership_id = $2 AND addr = $3`,
+		networkID, membershipID, addr)
 	return mapErr(err, "remove host address")
 }
 
@@ -390,14 +390,14 @@ func (t *Tx) RemoveHostAddress(ctx context.Context, networkID, hostID uuid.UUID,
 // about everyone else: a host outside those states does not appear in
 // NetworkTopology, so nothing any other host renders changes, and bumping would
 // wake the whole network to re-fetch a byte-identical fragment.
-func (t *Tx) MarkAddressChanged(ctx context.Context, networkID, hostID uuid.UUID) (int64, error) {
+func (t *Tx) MarkAddressChanged(ctx context.Context, networkID, membershipID uuid.UUID) (int64, error) {
 	var state string
 	if err := t.tx.QueryRow(ctx,
-		`SELECT state FROM orbit.host WHERE id = $1 AND network_id = $2`,
-		hostID, networkID).Scan(&state); err != nil {
+		`SELECT state FROM orbit.membership WHERE id = $1 AND network_id = $2`,
+		membershipID, networkID).Scan(&state); err != nil {
 		return 0, mapErr(err, "read host state")
 	}
-	if state != HostEnrolled && state != HostActive {
+	if state != MembershipEnrolled && state != MembershipActive {
 		return 0, nil
 	}
 
@@ -406,9 +406,9 @@ func (t *Tx) MarkAddressChanged(ctx context.Context, networkID, hostID uuid.UUID
 		return 0, err
 	}
 	if _, err := t.tx.Exec(ctx, `
-		UPDATE orbit.host
+		UPDATE orbit.membership
 		   SET restart_required_epoch = $2, addr_changed_at = now()
-		 WHERE id = $1`, hostID, epoch); err != nil {
+		 WHERE id = $1`, membershipID, epoch); err != nil {
 		return 0, mapErr(err, "mark address changed")
 	}
 	return epoch, nil
@@ -426,9 +426,9 @@ func (t *Tx) MarkAddressChanged(ctx context.Context, networkID, hostID uuid.UUID
 // who reads "the host will restart" about a relay has been told the least
 // important half of the truth.
 type AddressImpact struct {
-	HostID   uuid.UUID
-	HostName string
-	State    string
+	MembershipID   uuid.UUID
+	MembershipName string
+	State          string
 
 	// HasCertificate is what makes the difference between a disruption and a
 	// bookkeeping change: without one there is no running nebula to disrupt.
@@ -444,7 +444,7 @@ type AddressImpact struct {
 	Lighthouses  int
 	Relays       int
 	RelayClients int
-	Hosts        int
+	Memberships  int
 
 	// LiveControlPlanes counts replicas currently advertised to agents. One
 	// means every agent on this network loses renewal and revocation for the
@@ -459,7 +459,7 @@ type AddressImpact struct {
 // anyway would train operators to send the acknowledgement reflexively, which is
 // the failure mode that makes a gate worse than none.
 func (i AddressImpact) Disruptive() bool {
-	return i.HasCertificate && (i.State == HostEnrolled || i.State == HostActive)
+	return i.HasCertificate && (i.State == MembershipEnrolled || i.State == MembershipActive)
 }
 
 // OnlyLighthouse reports that this host is the network's sole lighthouse, which
@@ -484,9 +484,9 @@ func (i AddressImpact) OnlyControlPlane() bool { return i.IsControlPlane && i.Li
 // controlPlaneSince bounds what counts as a live replica; pass the same
 // staleness window the agent endpoint list uses, or a zero time to count every
 // registered replica.
-func (t *Tx) AddressChangeImpact(ctx context.Context, hostID uuid.UUID, controlPlaneSince time.Time) (*AddressImpact, error) {
+func (t *Tx) AddressChangeImpact(ctx context.Context, membershipID uuid.UUID, controlPlaneSince time.Time) (*AddressImpact, error) {
 	var i AddressImpact
-	i.HostID = hostID
+	i.MembershipID = membershipID
 
 	var since any
 	if !controlPlaneSince.IsZero() {
@@ -496,32 +496,32 @@ func (t *Tx) AddressChangeImpact(ctx context.Context, hostID uuid.UUID, controlP
 	err := t.tx.QueryRow(ctx, `
 		SELECT h.name, h.state, h.is_lighthouse, h.is_relay,
 		       EXISTS (SELECT 1 FROM orbit.certificate c
-		                WHERE c.host_id = h.id AND c.state = 'active'),
+		                WHERE c.membership_id = h.id AND c.state = 'active'),
 		       EXISTS (SELECT 1 FROM orbit.control_plane cp
-		                WHERE (cp.network_id, cp.host_id) = (h.network_id, h.id)),
-		       (SELECT count(*) FROM orbit.host x
+		                WHERE (cp.network_id, cp.membership_id) = (h.network_id, h.id)),
+		       (SELECT count(*) FROM orbit.membership x
 		         WHERE x.network_id = h.network_id AND x.is_lighthouse
 		           AND x.state IN ('enrolled', 'active')),
-		       (SELECT count(*) FROM orbit.host x
+		       (SELECT count(*) FROM orbit.membership x
 		         WHERE x.network_id = h.network_id AND x.is_relay
 		           AND x.state IN ('enrolled', 'active')),
-		       -- Hosts that would USE a relay. renderFor sets use_relays on
+		       -- Memberships that would USE a relay. renderFor sets use_relays on
 		       -- every host that is not itself a relay, so this is the population
 		       -- whose traffic can be riding through the host being restarted.
-		       (SELECT count(*) FROM orbit.host x
+		       (SELECT count(*) FROM orbit.membership x
 		         WHERE x.network_id = h.network_id AND NOT x.is_relay
 		           AND x.state IN ('enrolled', 'active')),
-		       (SELECT count(*) FROM orbit.host x
+		       (SELECT count(*) FROM orbit.membership x
 		         WHERE x.network_id = h.network_id
 		           AND x.state IN ('enrolled', 'active')),
 		       (SELECT count(*) FROM orbit.control_plane cp
 		         WHERE cp.network_id = h.network_id
 		           AND ($2::timestamptz IS NULL OR cp.last_seen_at > $2))
-		  FROM orbit.host h
-		 WHERE h.id = $1`, hostID, since,
-	).Scan(&i.HostName, &i.State, &i.IsLighthouse, &i.IsRelay,
+		  FROM orbit.membership h
+		 WHERE h.id = $1`, membershipID, since,
+	).Scan(&i.MembershipName, &i.State, &i.IsLighthouse, &i.IsRelay,
 		&i.HasCertificate, &i.IsControlPlane,
-		&i.Lighthouses, &i.Relays, &i.RelayClients, &i.Hosts, &i.LiveControlPlanes)
+		&i.Lighthouses, &i.Relays, &i.RelayClients, &i.Memberships, &i.LiveControlPlanes)
 	if err != nil {
 		return nil, mapErr(err, "address change impact")
 	}

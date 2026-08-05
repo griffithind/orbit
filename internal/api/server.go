@@ -18,7 +18,6 @@ package api
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -94,6 +93,19 @@ type Config struct {
 	// Metrics counts events. Nil is safe and every call becomes a no-op, so
 	// tests and metric-less deployments need no branching at the call sites.
 	Metrics *metrics.Metrics
+
+	// NetworkKeyDir is where POST /v1/networks writes the identity key it
+	// generates. Empty refuses that endpoint rather than inventing a location.
+	//
+	// A network's ID commits to a key, so creating a network means creating a
+	// keypair and putting the private half somewhere durable — which the API
+	// server cannot guess. `orbitd bootstrap` takes an explicit path for the
+	// same reason.
+	//
+	// THIS IS THE PART docs/key-custody.md §4.1 REPLACES. Storing the key
+	// encrypted in Postgres removes the directory, the per-replica file copy,
+	// and this field with it.
+	NetworkKeyDir string
 }
 
 type Server struct {
@@ -200,11 +212,12 @@ func (s *Server) enrollRoutes() []route {
 	}
 	return []route{
 		e("POST /enroll/v1/enroll", s.handleEnroll),
-		// Recovery lives on the public surface for the same reason enrollment
-		// does: a host whose certificate expired cannot reach the overlay,
-		// which is the only place the agent API listens.
-		e("GET /enroll/v1/recover/challenge", s.handleRecoveryChallenge),
-		e("POST /enroll/v1/recover", s.handleRecover),
+		// Joining and claiming live here rather than on the agent surface for
+		// the reason recovery does, and more strongly: a device that has just
+		// joined has no certificate, so it has no overlay, so it cannot reach
+		// the only place the agent API listens.
+		e("POST /enroll/v1/join", s.handleJoin),
+		e("POST /enroll/v1/claim", s.handleClaim),
 	}
 }
 
@@ -225,26 +238,51 @@ func (s *Server) adminRoutes() []route {
 		return route{pattern: pattern, surface: surfaceAdmin, scope: scope, h: s.admin(scope, h)}
 	}
 	out := []route{
-		a("POST /v1/hosts", "hosts:create", s.handleCreateHost),
-		a("GET /v1/hosts", "hosts:read", s.handleListHosts),
-		a("GET /v1/hosts/{id}", "hosts:read", s.handleGetHost),
+		// There is deliberately no POST /v1/memberships.
+		//
+		// It created a membership that named no machine, which is the one thing
+		// docs/model.md §5 invariant 1 forbids and the reason device_id could
+		// not be NOT NULL. What it was FOR — deciding a machine's name, address
+		// and role before it exists — is now a reservation: same intent,
+		// recorded on the credential, redeemed into a membership that names its
+		// device from the moment it exists.
+		a("POST /v1/networks/{ref}/reservations", "memberships:create", s.handleReserve),
+		a("GET /v1/memberships", "memberships:read", s.handleListHosts),
+		a("GET /v1/memberships/{id}", "memberships:read", s.handleGetHost),
 		// hosts:read, not a scope of its own: the response carries no PEM and
 		// no key material, only what a host's own listing already implies.
-		a("GET /v1/hosts/{id}/certificates", "hosts:read", s.handleHostCertificates),
-		a("PATCH /v1/hosts/{id}", "hosts:write", s.handleUpdateHost),
+		a("GET /v1/memberships/{id}/certificates", "memberships:read", s.handleHostCertificates),
+		a("PATCH /v1/memberships/{id}", "memberships:write", s.handleUpdateHost),
 		// Deletion revokes, so it takes hosts:block rather than hosts:write. A
 		// token trusted to edit a host but not to cut one off must not reach
 		// the stronger outcome through a different verb.
-		a("DELETE /v1/hosts/{id}", "hosts:block", s.handleDeleteHost),
-		a("POST /v1/hosts/{id}/enrollment-code", "hosts:enroll", s.handleCreateEnrollCode),
+		a("DELETE /v1/memberships/{id}", "memberships:block", s.handleDeleteHost),
+		a("POST /v1/memberships/{id}/enrollment-code", "memberships:enroll", s.handleCreateEnrollCode),
+		// The authorization queue.
+		//
+		// hosts:create, not hosts:write. Authorizing a pending join is what
+		// brings a machine onto the network — it allocates the address and
+		// makes the membership real — so it is the same power POST /v1/memberships
+		// carries, arriving through a different door. A token trusted to edit
+		// existing hosts but not to add one must not be able to admit a
+		// machine by approving it.
+		a("GET /v1/networks/{ref}/pending", "memberships:read", s.handleListPending),
+		a("POST /v1/memberships/{id}/authorize", "memberships:create", s.handleAuthorizeMembership),
 		// Address changes take hosts:write, but the endpoint gates them behind a
 		// typed acknowledgement of its own: an address change forces a nebula
 		// restart, which drops every tunnel on that host and, for a relay, the
 		// traffic it forwards for others.
-		a("POST /v1/hosts/{id}/addresses", "hosts:write", s.handleAddHostAddress),
-		a("DELETE /v1/hosts/{id}/addresses/{addr}", "hosts:write", s.handleRemoveHostAddress),
-		a("POST /v1/hosts/{id}/block", "hosts:block", s.handleBlockHost),
-		a("POST /v1/hosts/{id}/unblock", "hosts:block", s.handleUnblockHost),
+		a("POST /v1/memberships/{id}/addresses", "memberships:write", s.handleAddHostAddress),
+		a("DELETE /v1/memberships/{id}/addresses/{addr}", "memberships:write", s.handleRemoveHostAddress),
+		a("POST /v1/memberships/{id}/block", "memberships:block", s.handleBlockHost),
+		a("POST /v1/memberships/{id}/unblock", "memberships:block", s.handleUnblockHost),
+		// Devices. Not network-scoped, deliberately: a machine on three
+		// networks is one device with one posture, which is the whole reason
+		// the noun exists.
+		a("GET /v1/devices", "devices:read", s.handleListDevices),
+		a("GET /v1/devices/{id}", "devices:read", s.handleGetDevice),
+		a("POST /v1/devices/{id}/block", "devices:block", s.handleBlockDevice),
+		a("POST /v1/devices/{id}/unblock", "devices:block", s.handleUnblockDevice),
 		a("GET /v1/networks/{id}/convergence", "networks:read", s.handleConvergence),
 	}
 	return append(out, s.resourceRoutes()...)
@@ -341,7 +379,7 @@ func (s *Server) agentIdentity(w http.ResponseWriter, r *http.Request) (*store.A
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return nil, false
 	}
-	if id.State == store.HostSuspended {
+	if id.State == store.MembershipSuspended {
 		writeErr(w, http.StatusForbidden, "host is blocked")
 		return nil, false
 	}
@@ -357,7 +395,7 @@ func (s *Server) handleAgentState(w http.ResponseWriter, r *http.Request) {
 	knownConfig, _ := strconv.ParseInt(r.URL.Query().Get("config_epoch"), 10, 64)
 	knownBlock, _ := strconv.ParseInt(r.URL.Query().Get("blocklist_epoch"), 10, 64)
 
-	resp, err := s.enroll.State(r.Context(), id.HostID, knownConfig, knownBlock)
+	resp, err := s.enroll.State(r.Context(), id.MembershipID, knownConfig, knownBlock)
 	if err != nil {
 		s.log.Error("agent state failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -378,7 +416,46 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		return tx.RecordAgentReport(ctx, id.HostID, store.AgentReport{
+		// Facts and posture describe the MACHINE and are recorded against the
+		// device, not this membership. Best effort by design: a membership
+		// created the old way has no device, and a report from one must still
+		// record its epochs rather than fail because it has nowhere to put a
+		// posture reading it did not have to send.
+		if req.Facts != nil || req.Posture != nil {
+			d, derr := tx.DeviceForHost(ctx, id.MembershipID)
+			switch {
+			case derr == nil:
+				if req.Facts != nil {
+					if err := tx.RecordDeviceFacts(ctx, d.ID, store.DeviceFacts{
+						OS:            req.Facts.OS,
+						OSVersion:     req.Facts.OSVersion,
+						Kernel:        req.Facts.Kernel,
+						Arch:          req.Facts.Arch,
+						AgentVersion:  req.Facts.AgentVersion,
+						NebulaVersion: req.Facts.NebulaVersion,
+					}); err != nil {
+						return err
+					}
+				}
+				if req.Posture != nil {
+					if err := tx.RecordDevicePosture(ctx, d.ID, store.DevicePosture{
+						DiskEncrypted:   req.Posture.DiskEncrypted,
+						SecureBoot:      req.Posture.SecureBoot,
+						FirewallEnabled: req.Posture.FirewallEnabled,
+						TPMPresent:      req.Posture.TPMPresent,
+					}); err != nil {
+						return err
+					}
+				}
+			case errors.Is(derr, store.ErrNotFound):
+				s.log.Debug("host reported posture but has no device; it predates the join path",
+					"host", id.MembershipID)
+			default:
+				return derr
+			}
+		}
+
+		return tx.RecordAgentReport(ctx, id.MembershipID, store.AgentReport{
 			ConfigEpoch:    req.ConfigEpoch,
 			BlocklistEpoch: req.BlocklistEpoch,
 			NebulaVersion:  req.NebulaVersion,
@@ -407,7 +484,7 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	if req.RevertedFromConfigEpoch != 0 {
 		s.cfg.Metrics.ConfigReverted()
 		s.log.Warn("host reverted a pushed generation; it could not reach the control plane after applying",
-			"host", id.HostID,
+			"host", id.MembershipID,
 			"revertedFrom", req.RevertedFromConfigEpoch,
 			"nowAt", req.ConfigEpoch,
 			"quarantined", req.QuarantinedConfigEpoch)
@@ -421,7 +498,7 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	// here is the only way anyone finds out.
 	if req.DataPlaneDown {
 		s.log.Error("host reports nebula is not running; it is converged on paper and carrying no traffic",
-			"host", id.HostID, "configEpoch", req.ConfigEpoch)
+			"host", id.MembershipID, "configEpoch", req.ConfigEpoch)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -437,7 +514,7 @@ func (s *Server) handleAgentRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.enroll.Renew(r.Context(), id.HostID, req)
+	resp, err := s.enroll.Renew(r.Context(), id.MembershipID, req)
 	if err != nil {
 		if errors.Is(err, enroll.ErrInvalidPublicKey) || errors.Is(err, enroll.ErrCurveMismatch) {
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -656,73 +733,4 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func hashToken(token string) []byte {
 	sum := sha256.Sum256([]byte(token))
 	return sum[:]
-}
-
-// constantTimeEqual is used where a comparison result could otherwise leak
-// timing information about a secret.
-func constantTimeEqual(a, b []byte) bool {
-	return subtle.ConstantTimeCompare(a, b) == 1
-}
-
-// handleRecoveryChallenge starts the proof-of-possession exchange.
-//
-// Rate limited with the same budget as enrollment: it is public, unauthenticated,
-// and does elliptic-curve work per request.
-func (s *Server) handleRecoveryChallenge(w http.ResponseWriter, r *http.Request) {
-	hostID, err := uuid.Parse(r.URL.Query().Get("host_id"))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "host_id is required")
-		return
-	}
-
-	resp, err := s.enroll.Challenge(r.Context(), hostID)
-	if err != nil {
-		s.recoveryError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
-	var req wire.RecoverRequest
-	if !decode(w, r, &req) {
-		return
-	}
-
-	resp, err := s.enroll.Recover(r.Context(), req, s.clientAddr(r))
-	if err != nil {
-		s.cfg.Metrics.EnrollAttempt("recovery_denied")
-		s.recoveryError(w, err)
-		return
-	}
-	// Counted separately from renew: a nonzero rate here means renewal is
-	// failing somewhere, and it is invisible if it shares a counter with the
-	// normal path.
-	s.cfg.Metrics.CertificateIssued("recover")
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// recoveryError maps recovery failures to responses.
-//
-// A bad proof, an unknown host, and an ineligible host all return 401 with one
-// message. Distinguishing them would let a caller enumerate host ids and learn
-// which are recoverable, which is reconnaissance for exactly the attack this
-// endpoint has to withstand.
-func (s *Server) recoveryError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, enroll.ErrChallengeExpired):
-		// Safe to distinguish: the caller already knows how old its challenge
-		// is, and telling it to retry avoids a confusing loop.
-		writeErr(w, http.StatusUnauthorized, "recovery challenge has expired; request a new one")
-	case errors.Is(err, enroll.ErrBadProof),
-		errors.Is(err, enroll.ErrRecoveryUnavailable),
-		errors.Is(err, enroll.ErrHostBlocked),
-		errors.Is(err, store.ErrNotFound):
-		writeErr(w, http.StatusUnauthorized, "recovery denied")
-	case errors.Is(err, enroll.ErrInvalidPublicKey), errors.Is(err, enroll.ErrCurveMismatch):
-		writeErr(w, http.StatusBadRequest, err.Error())
-	default:
-		s.log.Error("recovery failed", "error", err)
-		writeErr(w, http.StatusInternalServerError, "recovery failed")
-	}
 }

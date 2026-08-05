@@ -11,14 +11,14 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-// HostFilter mirrors the query parameters GET /v1/hosts accepts.
+// MembershipFilter mirrors the query parameters GET /v1/memberships accepts.
 //
 // Typed, and every field is passed through. The server refuses a parameter it
 // cannot parse rather than dropping it, because a dropped filter returns the
 // whole fleet as the answer to a narrow question; a client that quietly failed
 // to send one would reintroduce exactly that failure on the other side of the
 // wire.
-type HostFilter struct {
+type MembershipFilter struct {
 	NetworkID uuid.UUID
 
 	State        string
@@ -35,7 +35,7 @@ type HostFilter struct {
 	Count bool
 }
 
-func (f HostFilter) values() url.Values {
+func (f MembershipFilter) values() url.Values {
 	q := url.Values{}
 	q.Set("network_id", f.NetworkID.String())
 	if f.State != "" {
@@ -66,16 +66,16 @@ func (f HostFilter) values() url.Values {
 }
 
 // ListHosts returns one page of the fleet.
-func (c *Client) ListHosts(ctx context.Context, f HostFilter) (Result[wire.HostListResponse], error) {
-	return get[wire.HostListResponse](ctx, c, "/v1/hosts", f.values())
+func (c *Client) ListHosts(ctx context.Context, f MembershipFilter) (Result[wire.MembershipListResponse], error) {
+	return get[wire.MembershipListResponse](ctx, c, "/v1/memberships", f.values())
 }
 
 // GetHost returns one host with its active certificates.
-func (c *Client) GetHost(ctx context.Context, id uuid.UUID) (Result[wire.HostResponse], error) {
-	return get[wire.HostResponse](ctx, c, "/v1/hosts/"+id.String(), nil)
+func (c *Client) GetHost(ctx context.Context, id uuid.UUID) (Result[wire.MembershipResponse], error) {
+	return get[wire.MembershipResponse](ctx, c, "/v1/memberships/"+id.String(), nil)
 }
 
-// CertFilter mirrors the query parameters GET /v1/hosts/{id}/certificates
+// CertFilter mirrors the query parameters GET /v1/memberships/{id}/certificates
 // accepts.
 type CertFilter struct {
 	State  string
@@ -97,17 +97,23 @@ func (f CertFilter) values() url.Values {
 	return q
 }
 
-// HostCertificates returns one page of a host's certificate history.
-func (c *Client) HostCertificates(ctx context.Context, id uuid.UUID, f CertFilter) (Result[wire.CertificateListResponse], error) {
-	return get[wire.CertificateListResponse](ctx, c, "/v1/hosts/"+id.String()+"/certificates", f.values())
+// MembershipCertificates returns one page of a host's certificate history.
+func (c *Client) MembershipCertificates(ctx context.Context, id uuid.UUID, f CertFilter) (Result[wire.CertificateListResponse], error) {
+	return get[wire.CertificateListResponse](ctx, c, "/v1/memberships/"+id.String()+"/certificates", f.values())
 }
 
-func (c *Client) CreateHost(ctx context.Context, req wire.CreateHostRequest) (Result[wire.HostResponse], error) {
-	return send[wire.HostResponse](ctx, c, http.MethodPost, "/v1/hosts", nil, req)
+// Reserve holds a place in a network for a machine that has not arrived.
+//
+// It replaced CreateHost. The difference is that nothing exists afterwards: the
+// intent lives on the returned credential, and the membership is created — named
+// after its device — when a machine redeems it.
+func (c *Client) Reserve(ctx context.Context, network string, req wire.ReserveRequest) (Result[wire.EnrollmentCodeResponse], error) {
+	return send[wire.EnrollmentCodeResponse](ctx, c, http.MethodPost,
+		"/v1/networks/"+url.PathEscape(network)+"/reservations", nil, req)
 }
 
-func (c *Client) UpdateHost(ctx context.Context, id uuid.UUID, req wire.UpdateHostRequest) (Result[wire.HostResponse], error) {
-	return send[wire.HostResponse](ctx, c, http.MethodPatch, "/v1/hosts/"+id.String(), nil, req)
+func (c *Client) UpdateHost(ctx context.Context, id uuid.UUID, req wire.UpdateHostRequest) (Result[wire.MembershipResponse], error) {
+	return send[wire.MembershipResponse](ctx, c, http.MethodPatch, "/v1/memberships/"+id.String(), nil, req)
 }
 
 // DeleteHost decommissions a host: it revokes the certificates and releases the
@@ -118,24 +124,41 @@ func (c *Client) DeleteHost(ctx context.Context, id uuid.UUID, reason string) (R
 	if reason != "" {
 		q.Set("reason", reason)
 	}
-	return send[wire.BlockResponse](ctx, c, http.MethodDelete, "/v1/hosts/"+id.String(), q, nil)
+	return send[wire.BlockResponse](ctx, c, http.MethodDelete, "/v1/memberships/"+id.String(), q, nil)
 }
 
 func (c *Client) BlockHost(ctx context.Context, id uuid.UUID) (Result[wire.BlockResponse], error) {
-	return send[wire.BlockResponse](ctx, c, http.MethodPost, "/v1/hosts/"+id.String()+"/block", nil, nil)
+	return send[wire.BlockResponse](ctx, c, http.MethodPost, "/v1/memberships/"+id.String()+"/block", nil, nil)
 }
 
 func (c *Client) UnblockHost(ctx context.Context, id uuid.UUID) (Result[wire.BlockResponse], error) {
-	return send[wire.BlockResponse](ctx, c, http.MethodPost, "/v1/hosts/"+id.String()+"/unblock", nil, nil)
+	return send[wire.BlockResponse](ctx, c, http.MethodPost, "/v1/memberships/"+id.String()+"/unblock", nil, nil)
 }
 
 // EnrollmentCode mints a single-use enrollment credential. The plaintext is in
 // the response and nowhere else, ever.
 func (c *Client) EnrollmentCode(ctx context.Context, id uuid.UUID) (Result[wire.EnrollmentCodeResponse], error) {
-	return send[wire.EnrollmentCodeResponse](ctx, c, http.MethodPost, "/v1/hosts/"+id.String()+"/enrollment-code", nil, nil)
+	return send[wire.EnrollmentCodeResponse](ctx, c, http.MethodPost, "/v1/memberships/"+id.String()+"/enrollment-code", nil, nil)
 }
 
 // Convergence reports how much of a network has applied the current epochs.
 func (c *Client) Convergence(ctx context.Context, networkID uuid.UUID) (Result[wire.ConvergenceResponse], error) {
 	return get[wire.ConvergenceResponse](ctx, c, "/v1/networks/"+networkID.String()+"/convergence", nil)
+}
+
+// PendingJoins lists memberships waiting for an operator to authorize them.
+func (c *Client) PendingJoins(ctx context.Context, network string) (Result[wire.PendingJoinList], error) {
+	return send[wire.PendingJoinList](ctx, c, http.MethodGet,
+		"/v1/networks/"+url.PathEscape(network)+"/pending", nil, nil)
+}
+
+// Authorize admits a pending membership: it allocates the overlay address and
+// takes the row out of the queue.
+//
+// It issues no certificate. The machine still has to come back and prove it
+// holds the device key it joined with before anything is signed for it, which is
+// why this and `orbit host code` are not two ways to do the same thing.
+func (c *Client) Authorize(ctx context.Context, id uuid.UUID, roleID string) (Result[wire.MembershipResponse], error) {
+	return send[wire.MembershipResponse](ctx, c, http.MethodPost,
+		"/v1/memberships/"+id.String()+"/authorize", nil, wire.AuthorizeRequest{RoleID: roleID})
 }

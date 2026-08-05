@@ -10,10 +10,10 @@
     <dl class="pairs">
       <dt>Config</dt>
       <dd>{{ template "badge" .Convergence.ConfigBadge }}
-        <span class="note">epoch {{ .Convergence.ConfigEpoch }} · {{ pct .Convergence.ConfigApplied .Convergence.HostsTotal }}</span></dd>
+        <span class="note">epoch {{ .Convergence.ConfigEpoch }} · {{ pct .Convergence.ConfigApplied .Convergence.MembershipsTotal }}</span></dd>
       <dt>Blocklist</dt>
       <dd>{{ template "badge" .Convergence.BlockBadge }}
-        <span class="note">epoch {{ .Convergence.BlocklistEpoch }} · {{ pct .Convergence.BlockApplied .Convergence.HostsTotal }}</span></dd>
+        <span class="note">epoch {{ .Convergence.BlocklistEpoch }} · {{ pct .Convergence.BlockApplied .Convergence.MembershipsTotal }}</span></dd>
     </dl>
     <p><a href="/ui/networks/{{ .Network.ID }}/convergence">Watch convergence</a></p>
   </section>
@@ -32,7 +32,7 @@
     {{- if .Replicas }}
     <ul class="plain">
       {{- range .Replicas }}
-      <li><a href="/ui/hosts/{{ .HostID }}"><code>{{ .Addr }}:{{ .AgentPort }}</code></a>
+      <li><a href="/ui/memberships/{{ .MembershipID }}"><code>{{ .Addr }}:{{ .AgentPort }}</code></a>
         <span class="note">heartbeat {{ ago .LastSeenAt }}</span></li>
       {{- end }}
     </ul>
@@ -82,7 +82,7 @@
     <tbody>
     {{- range .Expiring }}
       <tr>
-        <td data-label="Host"><a href="/ui/hosts/{{ .HostID }}">{{ .HostName }}</a>
+        <td data-label="Host"><a href="/ui/memberships/{{ .MembershipID }}">{{ .MembershipName }}</a>
           <span class="note"><code>{{ .Short }}</code></span></td>
         <td data-label="State">{{ template "badge" .Badge }}</td>
         <td data-label="Renewal due">{{ ago .RenewAt }}<span class="note">{{ stamp .RenewAt }}</span></td>

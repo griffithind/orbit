@@ -209,7 +209,7 @@ plane was last told.
 
 A third followed from the first two: a network that never finished setup gets a
 slot before it starts, so it appears in the report carrying its error. A
-registry populated only on success would omit precisely the host this command
+registry populated only on success would omit precisely the membership this command
 is run against.
 
 ### 6.2 What step 2 settled
@@ -232,7 +232,7 @@ and merging it into the established list would hide it among peers that work.
 
 **The hostmap is sorted before it leaves the agent.** nebula iterates a Go map,
 so without this, two runs against an unchanged mesh print different orders and
-an operator comparing hosts is reading a shuffle.
+an operator comparing memberships is reading a shuffle.
 
 One thing came for free and was worth taking: `Embedded` had recorded *why*
 nebula last exited since it was written, and nothing read it. `Status` now
@@ -273,7 +273,7 @@ that sends an operator looking in the wrong place, so `Decision` carries
 
 **Policy is answerable with the data plane down.** The rules are on disk, so
 the one layer that does not need a running Nebula still answers — which matters
-because the host somebody runs this against is usually the broken one.
+because the membership somebody runs this against is usually the broken one.
 
 ### 6.4 What step 4 settled
 
@@ -297,7 +297,7 @@ matcher rule field by field would have re-implemented the port-range and
 protocol parsing this whole arrangement exists to avoid — and it would have let
 the server's answer drift from the agent's in exactly the place nobody would
 look. It also means a compiler bug that emits something nebula cannot read
-surfaces here rather than at four hundred hosts.
+surfaces here rather than at four hundred memberships.
 
 **Both halves print even when one settles it.** Which END denies a flow decides
 whose policy an operator has to change, so a bare "DENIED" is not an answer.

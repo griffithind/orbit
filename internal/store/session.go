@@ -525,7 +525,8 @@ func (t *Tx) PruneUISessions(ctx context.Context, before time.Time) (int64, erro
 var readOnlyScopes = []string{
 	"audit:read",
 	"cas:read",
-	"hosts:read",
+	"devices:read",
+	"memberships:read",
 	"networks:read",
 	"policy:read",
 	"roles:read",

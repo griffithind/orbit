@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,15 +28,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/slackhq/nebula/cert"
 
+	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/mesh"
 	"github.com/griffithind/orbit/internal/metrics"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/sched"
+	"github.com/griffithind/orbit/internal/secrets"
 	"github.com/griffithind/orbit/internal/store"
+	"github.com/griffithind/orbit/internal/vault"
 	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/web"
 )
@@ -126,24 +129,6 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// pepper loads the enrollment credential pepper.
-//
-// Required, and deliberately without a default. A hardcoded fallback would mean
-// every deployment that forgot to set one shared the same value, which defeats
-// the purpose of having a pepper at all.
-func pepper() ([]byte, error) {
-	raw := os.Getenv("ORBIT_ENROLL_PEPPER")
-	if raw == "" {
-		return nil, errors.New("ORBIT_ENROLL_PEPPER is required (32+ random bytes, base64); " +
-			"generate one with: head -c 32 /dev/urandom | base64")
-	}
-	b, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil, fmt.Errorf("ORBIT_ENROLL_PEPPER is not valid base64: %w", err)
-	}
-	return b, nil
-}
-
 func openStore(ctx context.Context, dsn string) (*store.Store, error) {
 	if dsn == "" {
 		dsn = os.Getenv("ORBIT_DSN")
@@ -180,6 +165,10 @@ func serve(args []string) error {
 			"external URL the UI is reached at; required when -ui-addr is not loopback")
 		uiMaxStreams = fs.Int("ui-max-streams", web.DefaultMaxStreams,
 			"cap on concurrent UI event streams")
+		deviceKeyPath = fs.String("device-key", agent.DeviceKeyPath(""),
+			"this control plane's own device identity key; generated on first use. It is a machine on its own network like any other, and this is the key that says which one")
+		keyDir = fs.String("key-dir", "/var/lib/orbit",
+			"where POST /v1/networks writes the identity key it generates. Empty refuses that endpoint; networks are then created only by `orbitd bootstrap`")
 		metricsAddr = fs.String("metrics-addr", "127.0.0.1:9464",
 			"Prometheus exposition address; empty disables it. Bind to localhost or the overlay: the output is fleet inventory")
 		meshes meshSpecs
@@ -190,15 +179,6 @@ func serve(args []string) error {
 	log := newLogger()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-
-	pep, err := pepper()
-	if err != nil {
-		return err
-	}
-	hasher, err := enroll.NewHasher(pep)
-	if err != nil {
-		return err
-	}
 
 	// Checked before anything is opened or joined. A refusal that arrives after
 	// the store is up and the mesh is joined has already done work, and the
@@ -214,10 +194,36 @@ func serve(args []string) error {
 	}
 	defer st.Close()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	// The vault, if this deployment has one. A control plane whose keys are all
+	// on disk needs no passphrase and gets none — which is what keeps the
+	// single-VM path working unchanged.
+	//
+	// When there IS one, the passphrase is checked here, at startup, against a
+	// verifier stored at bootstrap. A replica with a mistyped passphrase that
+	// started cleanly would fail on its first signing operation, which is while
+	// somebody is adding a machine and days after the mistake.
+	if err := secrets.ConfigureKDF(); err != nil {
+		return err
+	}
+	signerFactory := ca.FileSignerFactory
+	var vlt *vault.Vault
+	switch v, err := vault.Open(ctx, st); {
+	case err == nil:
+		vlt = v
+		// The vault first: a db:// ref is unambiguous, and trying the file
+		// factory first would make every vault lookup log a failed parse.
+		signerFactory = ca.ChainFactories(vlt.SignerFactory(), ca.FileSignerFactory)
+		log.Info("key vault open; private keys are stored encrypted in the database")
+	case errors.Is(err, store.ErrNoKEK):
+		log.Info("no key vault for this deployment; keys are read from disk")
+	default:
+		return fmt.Errorf("open the key vault: %w", err)
+	}
+
+	registry := ca.NewRegistry(signerFactory)
 	defer registry.Close()
 
-	svc := enroll.NewService(st, registry, hasher, enroll.Config{
+	enrollCfg := enroll.Config{
 		Paths:      nebulacfg.DefaultPaths(),
 		ListenPort: *listenPort,
 		EnrollURL:  *enrollURL,
@@ -227,7 +233,11 @@ func serve(args []string) error {
 		// store.NetworkPolicy. Naming it here would suggest a caller that omits
 		// it gets something else, which is exactly the assumption that left this
 		// path inert once already.
-	})
+	}
+	if vlt != nil {
+		enrollCfg.NetworkIdentity = vlt.NetworkIdentity
+	}
+	svc := enroll.NewService(st, registry, enrollCfg)
 
 	// Metrics. Built before anything that reports into it, and served on its
 	// own listener: /metrics enumerates network names and host counts, which is
@@ -250,7 +260,8 @@ func serve(args []string) error {
 	apiCfg := api.Config{
 		TrustForwardedFor: *trustXFF,
 		MaxWatchers:       *maxWatch,
-		SignerFactory:     ca.FileSignerFactory,
+		SignerFactory:     signerFactory,
+		NetworkKeyDir:     *keyDir,
 		Metrics:           mx,
 	}
 
@@ -340,6 +351,21 @@ func serve(args []string) error {
 	// One overlay listener per network. The agent API lives ONLY here: it is
 	// never mounted on the public listener, so it is not merely authenticated
 	// but unroutable from outside the mesh.
+	// This control plane's own device identity, loaded once and shared by every
+	// mesh node. One process is one machine, so one key: reading it per node
+	// would make a single control plane present several identities and would
+	// undo the thing the device noun is for.
+	var selfDevice *device.Identity
+	if len(meshes) > 0 {
+		var err error
+		selfDevice, err = device.LoadOrCreate(*deviceKeyPath)
+		if err != nil {
+			return fmt.Errorf("control plane device key: %w", err)
+		}
+		log.Info("control plane device identity",
+			"fingerprint", selfDevice.Fingerprint(), "path", *deviceKeyPath)
+	}
+
 	for _, mc := range meshes {
 		// Every field of mesh.Config, explicitly. Zero means different things
 		// per field — a safe default for Heartbeat, an unreachable lighthouse
@@ -350,6 +376,7 @@ func serve(args []string) error {
 		mc.LighthouseAddrs = splitCSV(*lighthouse)
 		mc.Relay = *relay
 		mc.Heartbeat = mesh.DefaultHeartbeat
+		mc.DeviceKey = selfDevice.PublicKey()
 		node, err := mesh.Join(ctx, svc, mc, log)
 		if err != nil {
 			return err
@@ -457,7 +484,7 @@ func serve(args []string) error {
 		if (*lighthouse != "" || *relay) && !roles.SeededThisStart {
 			log.Warn("-lighthouse/-relay are seeds and were ignored: this control plane "+
 				"already has a host record. Change its roles with "+
-				"PATCH /v1/hosts/{id} instead; it will pick them up without a restart",
+				"PATCH /v1/memberships/{id} instead; it will pick them up without a restart",
 				"lighthouse", roles.IsLighthouse, "relay", roles.IsRelay)
 		}
 	}
@@ -513,15 +540,33 @@ func serve(args []string) error {
 func bootstrap(args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	var (
-		dsn      = fs.String("dsn", "", "postgres DSN for the orbit_app role (or ORBIT_DSN)")
-		netName  = fs.String("network", "default", "network display name; may be renamed later")
-		netSlug  = fs.String("slug", "", "immutable network identifier: the directory name on every managed host and what `orbit -network` takes (default: derived from -network)")
-		cidr     = fs.String("cidr", "10.42.0.0/16", "overlay network prefix")
-		caName   = fs.String("ca-name", "", "CA name (defaults to the network name)")
-		caDays   = fs.Int("ca-days", 90, "CA lifetime in days")
-		certTTL  = fs.Duration("cert-ttl", 24*time.Hour, "host certificate lifetime; this is the revocation SLA for a partitioned host")
-		keyPath  = fs.String("ca-key", "ca.key", "where to write the CA signing key; encrypted automatically when a passphrase is available")
+		dsn     = fs.String("dsn", "", "postgres DSN for the orbit_app role (or ORBIT_DSN)")
+		netName = fs.String("network", "default", "network display name; may be renamed later")
+		netSlug = fs.String("slug", "", "immutable network identifier: the directory name on every managed host and what `orbit -network` takes (default: derived from -network)")
+		cidr    = fs.String("cidr", "10.42.0.0/16", "overlay network prefix")
+		caName  = fs.String("ca-name", "", "CA name (defaults to the network name)")
+		caDays  = fs.Int("ca-days", 90, "CA lifetime in days")
+		certTTL = fs.Duration("cert-ttl", 24*time.Hour, "host certificate lifetime; this is the revocation SLA for a partitioned host")
+		keyPath = fs.String("ca-key", "", "write the CA signing key to this FILE instead of the database. Empty stores it encrypted in Postgres, which is what lets a second replica work without copying key files — see docs/key-custody.md")
+
+		// Separate from -ca-key because they have different lifetimes and
+		// different jobs. The CA key rotates; this one never does, because
+		// rotating it would change the network's ID. Writing them to one file
+		// would make rotating the first mean touching the second.
+		identityPath = fs.String("identity-key", "",
+			"write the network identity key to this FILE instead of the database. Empty stores it encrypted in Postgres alongside the CA key")
 		groupsCS = fs.String("groups", "default", "comma separated groups the CA may delegate")
+
+		// PERMANENT. Nebula refuses a certificate whose curve differs from its
+		// signer's, and a network's curve is never updated after creation, so
+		// this is the one bootstrap flag with no migration path: getting it
+		// wrong means building a new network and re-enrolling every host.
+		//
+		// P256 is the default because it is the only curve on which a host key
+		// can live in hardware. TPM 2.0 has no Curve25519 at all, and Apple's
+		// Secure Enclave is P-256 only, so a CURVE25519 network can never have
+		// hardware-backed host identity — see docs/credential-model.md §7.
+		curveName = fs.String("curve", "P256", "curve for the CA and every certificate under it: P256 or CURVE25519. PERMANENT — a network's curve cannot be changed after bootstrap. CURVE25519 forecloses hardware-backed host keys (TPM, Secure Enclave)")
 
 		// Writing the unit is opt-in rather than the default: bootstrap is also
 		// run inside a container and from a laptop against a remote database,
@@ -545,43 +590,80 @@ func bootstrap(args []string) error {
 	}
 	groups := splitCSV(*groupsCS)
 
+	curve, err := ca.ParseCurve(*curveName)
+	if err != nil {
+		return fmt.Errorf("-curve: %w", err)
+	}
+	if curve == cert.Curve_CURVE25519 {
+		// Not an error — 25519 is a legitimate choice, and it is what every
+		// network created before this flag existed uses. But it is unrecoverable
+		// and silent, so say it once, loudly, at the only moment it can be
+		// changed.
+		log.Warn("bootstrapping a CURVE25519 network: host keys can never be "+
+			"hardware-backed, because TPM 2.0 has no Curve25519 and Apple's "+
+			"Secure Enclave is P-256 only. This is permanent for this network; "+
+			"pass -curve P256 to keep that option open",
+			"curve", curve.String())
+	}
+
 	st, err := openStore(ctx, *dsn)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	// Generate the CA key and write it to disk, encrypted if a passphrase is
-	// available. Nebula has no intermediate CAs, so this key is a root of trust
-	// for the whole mesh; encryption is what makes a disk snapshot, a backup,
-	// or a stolen volume useless on its own.
-	caPub, caPriv, err := ca.GenerateCAKey(cert.Curve_CURVE25519)
+	// Both keys are generated here and stored in one of two places.
+	//
+	// BY DEFAULT, THE DATABASE, encrypted under a key encryption key derived
+	// from a passphrase that never touches it. That is what makes a second
+	// replica possible: it needs the passphrase and nothing else, instead of a
+	// copy of every key file kept in step through every rotation. See
+	// docs/key-custody.md.
+	//
+	// -ca-key and -identity-key put them on disk instead, which stays a
+	// first-class answer for a single VM that already works that way — the
+	// signer ref is a string, so a deployment can hold some keys in each.
+	caPub, caPriv, err := ca.GenerateCAKey(curve)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(*keyPath, cert.MarshalSigningPrivateKeyToPEM(cert.Curve_CURVE25519, caPriv), 0o600); err != nil {
-		return fmt.Errorf("write ca key: %w", err)
+	caPEMBytes := cert.MarshalSigningPrivateKeyToPEM(curve, caPriv)
+
+	// Ed25519 regardless of -curve: the identity key never signs a certificate,
+	// so nebula's "a certificate's curve must match its signer's" rule does not
+	// reach it. A P-256 network and a Curve25519 network get the same kind.
+	identityPub, identityPriv, err := ca.GenerateNetworkIdentity()
+	if err != nil {
+		return err
 	}
+	identityPEMBytes := ca.MarshalNetworkIdentityPEM(identityPriv)
 
 	passphrase, err := ca.CAKeyPassphrase()
 	if err != nil {
 		return err
 	}
-	if len(passphrase) > 0 {
-		if err := ca.EncryptKeyFile(*keyPath, passphrase); err != nil {
-			return fmt.Errorf("encrypt ca key: %w", err)
+
+	// Written before anything reaches the database, so a failure to write a key
+	// file leaves no network behind referencing a key that does not exist.
+	var caRef, identityRef string
+	if *keyPath != "" {
+		if caRef, err = writeKeyFile(*keyPath, caPEMBytes, passphrase, log,
+			"CA key written UNENCRYPTED: set ORBIT_CA_KEY_PASSPHRASE_FILE (or "+
+				"ORBIT_CA_KEY_PASSPHRASE) and re-run `orbitd ca encrypt` — a disk "+
+				"snapshot or backup of this host currently yields the mesh's root key"); err != nil {
+			return err
 		}
-		log.Info("CA key written encrypted", "path", *keyPath)
-	} else {
-		// Loud, because the failure is invisible: everything works, and the
-		// key sits in plaintext in every snapshot and backup of this machine.
-		log.Warn("CA key written UNENCRYPTED: set ORBIT_CA_KEY_PASSPHRASE_FILE "+
-			"(or ORBIT_CA_KEY_PASSPHRASE) and re-run `orbitd ca encrypt` — "+
-			"a disk snapshot or backup of this host currently yields the mesh's root key",
-			"path", *keyPath)
+	}
+	if *identityPath != "" {
+		if identityRef, err = writeKeyFile(*identityPath, identityPEMBytes, passphrase, log,
+			"network identity key written UNENCRYPTED: anyone with this file can "+
+				"convince a JOINING machine that their control plane is this network. "+
+				"It cannot mint certificates for the existing fleet — that needs the CA key"); err != nil {
+			return err
+		}
 	}
 
-	signer := ca.NewMemorySigner(cert.Curve_CURVE25519, caPub, caPriv)
+	signer := ca.NewMemorySigner(curve, caPub, caPriv)
 
 	now := time.Now()
 	caCert, err := ca.CreateCA(ctx, signer, ca.CAParams{
@@ -603,46 +685,75 @@ func bootstrap(args []string) error {
 		return err
 	}
 
-	absKey, err := filepath.Abs(*keyPath)
-	if err != nil {
-		return err
-	}
-
 	token, tokenHash, err := store.NewAPIToken()
 	if err != nil {
 		return err
 	}
 
 	var (
-		networkID uuid.UUID
-		roleID    uuid.UUID
+		networkID    uuid.UUID
+		verifiableID string
+		roleID       uuid.UUID
 	)
 	slug := *netSlug
 	if slug == "" {
 		slug = store.Slugify(*netName)
 	}
 
+	if err := secrets.ConfigureKDF(); err != nil {
+		return err
+	}
+	// The vault, if either key is going into the database. Initialised before
+	// the transaction so a missing passphrase fails before anything is written.
+	var vlt *vault.Vault
+	if caRef == "" || identityRef == "" {
+		if vlt, err = vault.Init(ctx, st); err != nil {
+			return fmt.Errorf("initialise the key vault: %w\n\n"+
+				"Set ORBIT_KEK_PASSPHRASE_FILE (or ORBIT_KEK_PASSPHRASE), or pass "+
+				"-ca-key and -identity-key to keep the keys on disk instead", err)
+		}
+	}
+
 	err = st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		// Sealed inside the same transaction as the rows that reference them. A
+		// key stored in a transaction that then rolled back would be ciphertext
+		// nothing points at; a network stored without its key would be a network
+		// that cannot sign.
+		if identityRef == "" {
+			if identityRef, err = vlt.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil, identityPEMBytes); err != nil {
+				return err
+			}
+		}
+
 		net := store.Network{
-			Name:    *netName,
-			Slug:    slug,
-			CIDRs:   []netip.Prefix{prefix},
-			CertVer: int16(cert.Version2),
-			Curve:   cert.Curve_CURVE25519.String(),
-			CertTTL: *certTTL,
+			Name:              *netName,
+			Slug:              slug,
+			CIDRs:             []netip.Prefix{prefix},
+			CertVer:           int16(cert.Version2),
+			Curve:             curve.String(),
+			CertTTL:           *certTTL,
+			IdentityPublicKey: identityPub,
+			IdentitySignerRef: identityRef,
 		}
 		if err := tx.CreateNetwork(ctx, &net); err != nil {
 			return err
 		}
 		networkID = net.ID
+		verifiableID = net.NetworkID
+
+		if caRef == "" {
+			if caRef, err = vlt.PutTx(ctx, tx, secrets.KindCASigning, &net.ID, caPEMBytes); err != nil {
+				return err
+			}
+		}
 
 		caRow := store.CA{
 			NetworkID:   net.ID,
 			Name:        *caName,
 			Fingerprint: fingerprint,
 			CertPEM:     string(caPEM),
-			SignerRef:   "file://" + absKey,
-			Curve:       cert.Curve_CURVE25519.String(),
+			SignerRef:   caRef,
+			Curve:       curve.String(),
 			NotBefore:   caCert.NotBefore(),
 			NotAfter:    caCert.NotAfter(),
 		}
@@ -686,10 +797,12 @@ func bootstrap(args []string) error {
 	log.Info("bootstrap complete")
 	fmt.Printf(`
 network    %s  (%s)
+network id %s  ← what machines join by, and can verify
 slug       %s  ← the directory name on every managed host; immutable
 role       %s  (default)
 ca         %s  fingerprint %s
 ca key     %s
+identity   %s
 
 Admin token (shown once):
 
@@ -705,13 +818,24 @@ Join the overlay so agents can poll, renew, and receive revocations
 
   orbitd serve -mesh %s=<overlay-addr>
 
-The CA private key is on local disk and is a root of trust for this entire
-mesh: nebula has no intermediate CAs, so anyone who reads it can mint any
-identity this CA's constraints allow. Keep it encrypted (see "orbitd ca
-encrypt"), mode 0600, and rotate on a schedule you have rehearsed —
-docs/design.md section 6.
-`, *netName, networkID, slug, roleID, *caName, fingerprint[:16], absKey,
-		token, token, networkID, prefix, networkID)
+Add a machine — the network id is what it joins by, and unlike a uuid it is
+something the machine can CHECK. A machine given this id will refuse any
+control plane that cannot prove it holds the matching key, so a mistyped or
+hostile URL fails instead of quietly enrolling into somebody else's mesh:
+
+  orbit membership reserve -name web-01 -role default    # prints a code
+  sudo orbit agent install                               # on the machine
+  sudo orbit agent join -url <this control plane> -network %s -code <code>
+
+The network identity key names this network. It cannot mint a certificate, so
+it is not the CA key; but anyone holding it can convince a JOINING machine that
+their control plane is this network, so it gets the same custody. If it is ever
+compromised, bootstrap a new network id and change the -network argument
+wherever machines join — they keep their memberships, addresses and
+certificates, because those are keyed on the device.
+
+%s`, *netName, networkID, verifiableID, slug, roleID, *caName, fingerprint[:16], caRef,
+		identityRef, token, token, networkID, prefix, networkID, verifiableID, custodyNote(caRef))
 
 	if *writeUnit {
 		if *enrollURL == "" {
@@ -726,8 +850,8 @@ docs/design.md section 6.
 				"\nwarning: no -overlay-addr, so the unit joins no network. Agents will be "+
 					"able to enroll but not poll, renew, or receive revocations.")
 		}
-		plan := planControlPlane(networkID.String(), *dsn, os.Getenv("ORBIT_ENROLL_PEPPER"),
-			*enrollURL, *overlayAddr, *lighthouse, absKey)
+		plan := planControlPlane(networkID.String(), *dsn,
+			*enrollURL, *overlayAddr, *lighthouse, caRef)
 		if err := plan.write(); err != nil {
 			return err
 		}
@@ -780,4 +904,50 @@ func caCmd(args []string) error {
 	default:
 		return fmt.Errorf("unknown ca subcommand %q (want: encrypt)", args[0])
 	}
+}
+
+// writeKeyFile writes a private key to disk and returns its signer ref.
+//
+// Encrypted when a passphrase is available, and loud when it is not: the failure
+// is otherwise invisible — everything works, and the key sits in plaintext in
+// every snapshot and backup of the machine.
+func writeKeyFile(path string, pem, passphrase []byte, log *slog.Logger, plaintextWarning string) (string, error) {
+	if err := os.WriteFile(path, pem, 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	if len(passphrase) > 0 {
+		if err := ca.EncryptKeyFile(path, passphrase); err != nil {
+			return "", fmt.Errorf("encrypt %s: %w", path, err)
+		}
+		log.Info("key written encrypted", "path", path)
+	} else {
+		log.Warn(plaintextWarning, "path", path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return "file://" + abs, nil
+}
+
+// custodyNote says where the CA key ended up and what that obliges.
+//
+// Two paragraphs rather than one, because the obligations genuinely differ. The
+// earlier version printed "the CA private key is on local disk" unconditionally,
+// which after this change was false for the default path — and a bootstrap that
+// tells an operator to `chmod 600` a file that does not exist is worse than
+// silence: they go looking, find nothing, and stop trusting the rest of it.
+func custodyNote(caRef string) string {
+	const shared = "Nebula has no intermediate CAs, so this key is a root of trust for the\n" +
+		"entire mesh: anyone who reads it can mint any identity this CA's constraints\n" +
+		"allow. Rotate on a schedule you have rehearsed — docs/design.md section 6.\n"
+
+	if strings.HasPrefix(caRef, "file://") {
+		return "\nThe CA private key is on local disk. Keep it encrypted (see \"orbitd ca\n" +
+			"encrypt\") and mode 0600. " + shared
+	}
+	return "\nThe CA private key is in the database, encrypted under your KEK passphrase.\n" +
+		"The database never sees that passphrase, so a leaked dump is ciphertext — and\n" +
+		"losing it makes every stored key unreadable. Escrow it somewhere the database\n" +
+		"backups are not: docs/deployment.md section 5.\n\n" + shared
 }
