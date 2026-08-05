@@ -299,6 +299,28 @@ The config epoch advances, every agent stops listing the old address on its next
 poll, and the control plane picks up the new lighthouse the same way — it
 refreshes its own configuration on an epoch change like any other host.
 
+### A dedicated lighthouse, provisioned unattended
+
+A lighthouse is the machine you least want to finish by hand: a fixed-address
+box in a datacentre, brought up from a template. The reservation carries what it
+will **be**, not only what it will be **called**, so there is no follow-up call
+and no window in which the machine is up and the fleet has been told there is no
+lighthouse:
+
+```bash
+orbit membership reserve -name lh-01 -lighthouse -public-addr 203.0.113.20
+```
+
+Hand the printed code to cloud-init. When the machine redeems it, the membership
+comes into existence already a lighthouse, the address lands on the machine's
+`device` record, and every other host picks it up on its next poll.
+
+`-public-addr` is required with `-lighthouse` for a machine Orbit has not met. A
+lighthouse nobody can reach is worse than none — every host keeps dialling it —
+and reservation time is the last moment an operator is present to say where it
+will be. If the machine has already joined another network it already has its
+addresses, and `orbit device set-addrs` is the way to change them.
+
 ### Separating them from the start
 
 If you want the control plane out of the data path entirely, the ordering
@@ -307,7 +329,7 @@ needs a lighthouse, which has to be enrolled by a running `orbitd`.
 
 1. Start `orbitd` with **no** `-mesh` — enrollment and admin work, the agent API
    does not exist yet, and it says so at startup.
-2. Create and enroll the lighthouse with its public address, start its nebula.
+2. Reserve and bring up the lighthouse as above, start its nebula.
 3. Restart `orbitd` with `-mesh`.
 
 ---

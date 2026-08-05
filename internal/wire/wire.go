@@ -1522,6 +1522,33 @@ type ReserveRequest struct {
 
 	RoleID string `json:"role_id,omitempty"`
 
+	// What the machine will BE, applied when the code is redeemed.
+	//
+	// Here rather than in a follow-up PATCH because a lighthouse is precisely
+	// the machine you provision unattended — a fixed-address box brought up from
+	// a template — and needing a human to finish the job afterwards left a
+	// window in which every other machine had been told there is no lighthouse.
+	IsLighthouse bool `json:"is_lighthouse,omitempty"`
+	IsRelay      bool `json:"is_relay,omitempty"`
+
+	// PublicAddrs is where the machine will be reachable from outside. Hosts
+	// only, no ports — an entry carrying one is refused rather than trimmed.
+	//
+	// A DEVICE fact, not a membership one, and SEEDED: a machine that already
+	// has public addresses from another network keeps them, because it is one
+	// machine with one set of addresses. Change them with
+	// PATCH /v1/devices/{id}/addrs, which is honest about affecting every
+	// network.
+	//
+	// Required alongside is_lighthouse for a machine Orbit has not met, since a
+	// lighthouse nobody can reach is worse than no lighthouse: every other
+	// machine keeps dialling it.
+	PublicAddrs []string `json:"public_addrs,omitempty"`
+
+	// AdvertisePort is the port other machines dial, when it is not the port
+	// nebula binds. For port forwarding; leave unset otherwise.
+	AdvertisePort *int `json:"advertise_port,omitempty"`
+
 	// TTLSeconds overrides the default lifetime. A reservation for a machine
 	// that will be racked next week needs longer than the fifteen minutes that
 	// suit an installer being run right now.

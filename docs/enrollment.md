@@ -14,6 +14,12 @@ what happens when renewal stops working.
 | **Join** | a human says yes | `orbit agent join` | a machine handed to a person; anything provisioned before its name is decided |
 | **Reservation** | a code, made in advance | `orbit membership reserve` then `orbit agent join -code` | unattended provisioning, where nobody is watching a queue |
 
+A reservation records the whole of the operator's intent — name, address, role,
+and whether the machine will be a lighthouse or a relay and where it is
+reachable. That is what makes it unattended: nothing is left to be applied after
+the machine arrives, so there is no window in which the intent is half in
+effect.
+
 Both end in the same place: a membership that names a device, holding a
 certificate issued over a mesh key that never left the machine. The difference
 is only whether a secret had to travel.

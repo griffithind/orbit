@@ -46,7 +46,9 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, enroll.ErrJoinSignature):
 			writeErr(w, http.StatusUnauthorized, "join signature is not valid")
-		case errors.Is(err, enroll.ErrJoinName):
+		case errors.Is(err, enroll.ErrJoinName),
+			errors.Is(err, enroll.ErrLighthouseNeedsAddr),
+			errors.Is(err, store.ErrBadPublicAddr):
 			writeErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, enroll.ErrNameTaken):
 			writeErr(w, http.StatusConflict, err.Error())
@@ -224,7 +226,17 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res := store.Reservation{Name: req.Name}
+	res := store.Reservation{
+		Name:          req.Name,
+		IsLighthouse:  req.IsLighthouse,
+		IsRelay:       req.IsRelay,
+		PublicAddrs:   req.PublicAddrs,
+		AdvertisePort: req.AdvertisePort,
+	}
+	if req.AdvertisePort != nil && (*req.AdvertisePort < 1 || *req.AdvertisePort > 65535) {
+		writeErr(w, http.StatusBadRequest, "advertise_port must be between 1 and 65535")
+		return
+	}
 	if req.OverlayAddr != "" {
 		addr, err := netip.ParseAddr(req.OverlayAddr)
 		if err != nil {
@@ -248,7 +260,9 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, enroll.ErrReservedNameTaken):
 			writeErr(w, http.StatusConflict, err.Error())
-		case errors.Is(err, enroll.ErrJoinName):
+		case errors.Is(err, enroll.ErrJoinName),
+			errors.Is(err, enroll.ErrLighthouseNeedsAddr),
+			errors.Is(err, store.ErrBadPublicAddr):
 			writeErr(w, http.StatusBadRequest, err.Error())
 		default:
 			s.notFoundOr(w, err, "network")

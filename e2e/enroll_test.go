@@ -428,6 +428,12 @@ func (h *harness) reqAs(t *testing.T, token, method, url string, body, out any) 
 	}
 	if resp.StatusCode >= 300 {
 		t.Logf("%s %s -> %d: %s", method, url, resp.StatusCode, raw)
+		// A test asserting on an error MESSAGE gets one, and only then: out is
+		// otherwise a success type, and filling it from an error body would hand
+		// the caller a zero value that looks like a decoded response.
+		if e, ok := out.(*wire.Error); ok {
+			_ = jsonUnmarshal(raw, e)
+		}
 	}
 	return resp.StatusCode
 }

@@ -3,8 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net"
 	"net/http"
 
 	"github.com/griffithind/orbit/internal/store"
@@ -221,26 +219,15 @@ func (s *Server) handleSetDeviceAddrs(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	for _, a := range req.PublicAddrs {
-		// Ports are refused rather than stripped. Stripping would silently
-		// discard something the caller meant, and the port they wanted is a
-		// different field on a different noun — saying so is the useful answer.
-		if _, _, err := net.SplitHostPort(a); err == nil {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf(
-				"public_addrs entry %q carries a port. Addresses belong to the machine and "+
-					"ports to each membership — set the port with `advertise_port` on the "+
-					"membership if it differs from the bound one", a))
-			return
-		}
-		if a == "" {
-			writeErr(w, http.StatusBadRequest, "public_addrs entries cannot be empty")
-			return
-		}
+	addrs, err := store.ValidatePublicAddrs(req.PublicAddrs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	var out wire.DeviceResponse
-	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
-		if err := tx.SetDevicePublicAddrs(ctx, id, req.PublicAddrs); err != nil {
+	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if err := tx.SetDevicePublicAddrs(ctx, id, addrs); err != nil {
 			return err
 		}
 		d, err := tx.GetDevice(ctx, id)

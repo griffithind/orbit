@@ -416,6 +416,11 @@ func membershipReserve(ctx context.Context, args []string) error {
 		addr = fs.String("addr", "", "pin a specific overlay address; omit to allocate one")
 		role = fs.String("role", "", "role name or uuid")
 		ttl  = fs.Duration("ttl", 0, "how long the code stays valid; the server's default when unset")
+
+		lighthouse    = fs.Bool("lighthouse", false, "the machine will be a lighthouse; needs -public-addr")
+		relay         = fs.Bool("relay", false, "the machine will relay other machines' traffic")
+		publicAddr    = fs.String("public-addr", "", "comma-separated public addresses, hosts WITHOUT ports")
+		advertisePort = fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound one (NAT forwarding)")
 	)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -437,9 +442,15 @@ func membershipReserve(ctx context.Context, args []string) error {
 	}
 
 	req := wire.ReserveRequest{
-		Name:        *name,
-		OverlayAddr: *addr,
-		TTLSeconds:  int(ttl.Seconds()),
+		Name:         *name,
+		OverlayAddr:  *addr,
+		TTLSeconds:   int(ttl.Seconds()),
+		IsLighthouse: *lighthouse,
+		IsRelay:      *relay,
+		PublicAddrs:  csvList(*publicAddr),
+	}
+	if *advertisePort != 0 {
+		req.AdvertisePort = advertisePort
 	}
 	if *role != "" {
 		id, err := o.client.ResolveRole(ctx, networkID, *role)
@@ -470,6 +481,22 @@ func membershipReserve(ctx context.Context, args []string) error {
 		"  orbit agent join -url %s -network %s -code %s\n",
 		*name, network.Name, res.Value.ExpiresAt.Format(time.RFC3339),
 		orDash(res.Value.EnrollURL), network.Slug, res.Value.Code)
+
+	// Say what the machine will BE, not just that a code exists. The whole point
+	// of putting the topology on the reservation is that nobody has to come back
+	// afterwards, and an operator has no other way to confirm the flags took
+	// before a machine redeems the code.
+	if *lighthouse || *relay {
+		roles := "a relay"
+		if *lighthouse {
+			roles = "a lighthouse"
+			if *relay {
+				roles = "a lighthouse and a relay"
+			}
+		}
+		fmt.Fprintf(errOut, "\nOn redemption it becomes %s at %s. No follow-up call.\n",
+			roles, strings.Join(csvList(*publicAddr), ", "))
+	}
 	return nil
 }
 

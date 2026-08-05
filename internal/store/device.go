@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -638,4 +640,45 @@ func (t *Tx) SetDevicePublicAddrs(ctx context.Context, deviceID uuid.UUID, addrs
 		}
 	}
 	return nil
+}
+
+// ErrBadPublicAddr is a public address that cannot go in device.public_addrs.
+var ErrBadPublicAddr = errors.New("invalid public address")
+
+// ValidatePublicAddrs checks and normalizes what may go in device.public_addrs.
+//
+// Here, beside the column, because three call sites need the same answer: the
+// device endpoint, a reservation carrying addresses for a machine that has not
+// arrived, and the control plane seeding its own. Three copies of "does this
+// string carry a port" is two chances for them to disagree about IPv6.
+//
+// Ports are REFUSED, not stripped. An operator who wrote "203.0.113.10:4242"
+// believes they set the port; silently dropping it leaves them believing a
+// number that is not in effect. The port belongs to the membership — it is
+// advertise_port — because two networks on one machine cannot share one, and
+// saying that is more useful than quietly fixing the input.
+//
+// Failures wrap ErrBadPublicAddr so an HTTP layer can answer 400 rather than
+// 500. Without it the caller sees an unclassified error, and "you typed a port"
+// reaches the operator as "internal error".
+func ValidatePublicAddrs(addrs []string) ([]string, error) {
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			return nil, fmt.Errorf("%w: an empty entry", ErrBadPublicAddr)
+		}
+		// SplitHostPort succeeding is the test, and it is the right one for
+		// IPv6: a bare "2001:db8::1" fails it ("too many colons") while
+		// "[2001:db8::1]:4242" succeeds, which is exactly the distinction a
+		// hand-rolled colon count gets wrong.
+		if _, _, err := net.SplitHostPort(a); err == nil {
+			return nil, fmt.Errorf(
+				"%w: %q carries a port. Addresses belong to the machine and ports "+
+					"to each membership, so set advertise_port on the membership "+
+					"if it differs from the bound one", ErrBadPublicAddr, a)
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }

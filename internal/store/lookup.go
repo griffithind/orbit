@@ -68,9 +68,7 @@ func (s *Store) RedeemEnrollmentCredential(ctx context.Context, secretHash []byt
 	var (
 		r       RedeemedCredential
 		fromArg any = nil
-		name    *string
-		addr    *netip.Addr
-		roleID  *uuid.UUID
+		res     reservedCols
 	)
 	if from.IsValid() {
 		fromArg = from
@@ -82,23 +80,17 @@ func (s *Store) RedeemEnrollmentCredential(ctx context.Context, secretHash []byt
 		 WHERE secret_hash = $1
 		   AND used_at IS NULL
 		   AND expires_at > now()
-		RETURNING id, network_id, membership_id, method,
-		          reserved_name, reserved_addr, reserved_role_id`,
+		RETURNING id, network_id, membership_id, method, ` + reservedColumns,
 		secretHash, fromArg,
-	).Scan(&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method,
-		&name, &addr, &roleID)
+	).Scan(append([]any{&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method},
+		res.dest()...)...)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, mapErr(err, "redeem enrollment credential")
 	}
-	if name != nil {
-		r.Reserved = &Reservation{Name: *name, RoleID: roleID}
-		if addr != nil {
-			r.Reserved.Addr = *addr
-		}
-	}
+	r.Reserved = res.reservation()
 	return &r, nil
 }
 
@@ -121,9 +113,7 @@ func (t *Tx) RedeemCredential(ctx context.Context, secretHash []byte, from netip
 	var (
 		r       RedeemedCredential
 		fromArg any = nil
-		name    *string
-		addr    *netip.Addr
-		roleID  *uuid.UUID
+		res     reservedCols
 	)
 	if from.IsValid() {
 		fromArg = from
@@ -135,23 +125,17 @@ func (t *Tx) RedeemCredential(ctx context.Context, secretHash []byte, from netip
 		 WHERE secret_hash = $1
 		   AND used_at IS NULL
 		   AND expires_at > now()
-		RETURNING id, network_id, membership_id, method,
-		          reserved_name, reserved_addr, reserved_role_id`,
+		RETURNING id, network_id, membership_id, method, ` + reservedColumns,
 		secretHash, fromArg,
-	).Scan(&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method,
-		&name, &addr, &roleID)
+	).Scan(append([]any{&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method},
+		res.dest()...)...)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, mapErr(err, "redeem credential")
 	}
-	if name != nil {
-		r.Reserved = &Reservation{Name: *name, RoleID: roleID}
-		if addr != nil {
-			r.Reserved.Addr = *addr
-		}
-	}
+	r.Reserved = res.reservation()
 	return &r, nil
 }
 

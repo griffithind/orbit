@@ -435,6 +435,77 @@ type Reservation struct {
 	Addr netip.Addr
 
 	RoleID *uuid.UUID
+
+	// What the machine will BE, not only what it will be called.
+	//
+	// Here rather than in a follow-up PATCH because a lighthouse is the topology
+	// that most wants to be provisioned unattended — a fixed-address box brought
+	// up from a template nobody watches — and it was the one that needed a human
+	// at the end. See migration 0020.
+	IsLighthouse bool
+	IsRelay      bool
+
+	// PublicAddrs is a DEVICE fact carried on the reservation, and the only
+	// field here that does not land on the membership.
+	//
+	// It belongs on the reservation anyway: a lighthouse's public address is
+	// known BEFORE the machine exists — that is what makes it a lighthouse, and
+	// the operator has already typed it into their cloud provider. Hosts only,
+	// no ports, exactly as device.public_addrs stores them.
+	//
+	// SEEDED, NOT IMPOSED. A device that already has addresses keeps them: it is
+	// one machine, its addresses are a machine-wide fact, and letting a
+	// per-network reservation overwrite them would let joining network B move
+	// where network A believes the machine is.
+	PublicAddrs []string
+
+	// AdvertisePort overrides the bound port for a machine behind port
+	// forwarding. Nil means derive it, which is right for almost everything.
+	AdvertisePort *int
+}
+
+// reservedCols is the reservation half of an enrollment_credential row.
+//
+// A struct rather than a handful of locals because the same columns are read by
+// two redemption paths — one on *Store, one on *Tx — and adding a field to one
+// and not the other would mean a reservation whose lighthouse flag applies from
+// the enrollment endpoint and vanishes from the join endpoint.
+type reservedCols struct {
+	name          *string
+	addr          *netip.Addr
+	roleID        *uuid.UUID
+	isLighthouse  bool
+	isRelay       bool
+	publicAddrs   []string
+	advertisePort *int
+}
+
+// reservedColumns must list the same columns, in the same order, as dest().
+const reservedColumns = `reserved_name, reserved_addr, reserved_role_id,
+	reserved_is_lighthouse, reserved_is_relay,
+	reserved_public_addrs, reserved_advertise_port`
+
+func (c *reservedCols) dest() []any {
+	return []any{&c.name, &c.addr, &c.roleID,
+		&c.isLighthouse, &c.isRelay, &c.publicAddrs, &c.advertisePort}
+}
+
+// reservation returns what was reserved, or nil if this credential names an
+// existing membership instead. reserved_name is the discriminator, which is what
+// the schema's CHECK constraint enforces.
+func (c *reservedCols) reservation() *Reservation {
+	if c.name == nil {
+		return nil
+	}
+	r := &Reservation{
+		Name: *c.name, RoleID: c.roleID,
+		IsLighthouse: c.isLighthouse, IsRelay: c.isRelay,
+		PublicAddrs: c.publicAddrs, AdvertisePort: c.advertisePort,
+	}
+	if c.addr != nil {
+		r.Addr = *c.addr
+	}
+	return r
 }
 
 // Convergence summarizes how much of a network has applied the current epochs.

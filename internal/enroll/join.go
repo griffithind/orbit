@@ -536,6 +536,16 @@ func (s *Service) redeemReservation(ctx context.Context, tx *store.Tx, net *stor
 // either by a live membership or by another unspent reservation.
 var ErrReservedNameTaken = errors.New("that name is already taken in this network")
 
+// ErrLighthouseNeedsAddr is a lighthouse reservation with nowhere to be reached.
+//
+// Refused at RESERVATION time, which is the only moment an operator is present.
+// A lighthouse with no public address does not fail — it succeeds into a network
+// where every other machine has been told to dial an empty list, and the symptom
+// is "nothing can find anything", days later, on a machine nobody is watching.
+var ErrLighthouseNeedsAddr = errors.New(
+	"a lighthouse needs a public address: pass -public-addr, or set it on the machine " +
+		"first with `orbit device set-addrs` if it has already joined another network")
+
 // Reserve holds a place in a network for a machine that has not arrived.
 //
 // This is what replaced `orbit host create` followed by `orbit host code`. The
@@ -555,6 +565,23 @@ func (s *Service) Reserve(ctx context.Context, networkRef string, r store.Reserv
 	}
 	if ttl <= 0 {
 		ttl = DefaultCodeTTL
+	}
+	addrs, err := store.ValidatePublicAddrs(r.PublicAddrs)
+	if err != nil {
+		return nil, err
+	}
+	r.PublicAddrs = addrs
+
+	// A lighthouse must be reachable somewhere. Checked here because this is the
+	// last moment an operator is present: by redemption time the machine is
+	// booting from a template and there is nobody to tell.
+	//
+	// Only the addresses this reservation carries are visible. A machine that
+	// already holds them on its device record satisfies the requirement too, but
+	// that device does not exist yet — so the error names both fixes rather than
+	// asserting the one it can see.
+	if r.IsLighthouse && len(r.PublicAddrs) == 0 {
+		return nil, ErrLighthouseNeedsAddr
 	}
 
 	plaintext, stored, err := NewCredential()

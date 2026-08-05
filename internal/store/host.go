@@ -777,21 +777,31 @@ func (t *Tx) CreateEnrollmentCredential(ctx context.Context, c *EnrollmentCreden
 		addr   *netip.Addr
 		roleID *uuid.UUID
 	)
+	var (
+		isLighthouse, isRelay bool
+		publicAddrs           []string
+		advertisePort         *int
+	)
 	if c.Reserved != nil {
 		name = &c.Reserved.Name
 		roleID = c.Reserved.RoleID
 		if c.Reserved.Addr.IsValid() {
 			addr = &c.Reserved.Addr
 		}
+		isLighthouse, isRelay = c.Reserved.IsLighthouse, c.Reserved.IsRelay
+		publicAddrs, advertisePort = c.Reserved.PublicAddrs, c.Reserved.AdvertisePort
 	}
 	err := t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.enrollment_credential
 			(network_id, membership_id, method, secret_hash, expires_at, created_by,
-			 reserved_name, reserved_addr, reserved_role_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 reserved_name, reserved_addr, reserved_role_id,
+			 reserved_is_lighthouse, reserved_is_relay,
+			 reserved_public_addrs, reserved_advertise_port)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, created_at`,
 		c.NetworkID, c.MembershipID, c.Method, secretHash, c.ExpiresAt, c.CreatedBy,
 		name, addr, roleID,
+		isLighthouse, isRelay, nonNil(publicAddrs), advertisePort,
 	).Scan(&c.ID, &c.CreatedAt)
 	return mapErr(err, "create enrollment credential")
 }
@@ -816,14 +826,34 @@ func (t *Tx) CreateReservedMembership(ctx context.Context, net *Network, d *Devi
 	}
 
 	h := &Membership{
-		NetworkID: net.ID,
-		Name:      r.Name,
-		RoleID:    r.RoleID,
-		State:     MembershipCreated,
-		DeviceID:  &d.ID,
+		NetworkID:     net.ID,
+		Name:          r.Name,
+		RoleID:        r.RoleID,
+		State:         MembershipCreated,
+		DeviceID:      &d.ID,
+		IsLighthouse:  r.IsLighthouse,
+		IsRelay:       r.IsRelay,
+		AdvertisePort: r.AdvertisePort,
 	}
 	if err := t.CreateHost(ctx, h); err != nil {
 		return nil, err
+	}
+
+	// The reservation's public addresses are a DEVICE fact, so they are SEEDED
+	// and only onto a machine that has none.
+	//
+	// A device that already has addresses has them because it is a lighthouse on
+	// another network already, and one machine has one set of public addresses.
+	// Letting a reservation for network B overwrite them would move where
+	// network A believes the machine is — a cross-network effect from an
+	// operation scoped to a single network, which is exactly the confusion the
+	// device/membership split exists to prevent. `orbit device set-addrs` is the
+	// way to change them, and it is honest about affecting every network.
+	if len(r.PublicAddrs) > 0 && len(d.PublicAddrs) == 0 {
+		if err := t.SetDevicePublicAddrs(ctx, d.ID, r.PublicAddrs); err != nil {
+			return nil, err
+		}
+		d.PublicAddrs = r.PublicAddrs
 	}
 
 	// A reserved address is claimed rather than allocated. The reservation
