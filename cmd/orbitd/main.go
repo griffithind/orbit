@@ -640,17 +640,6 @@ func bootstrap(args []string) error {
 		// would make rotating the first mean touching the second.
 		groupsCS = fs.String("groups", "default", "comma separated groups the CA may delegate")
 
-		// PERMANENT. Nebula refuses a certificate whose curve differs from its
-		// signer's, and a network's curve is never updated after creation, so
-		// this is the one bootstrap flag with no migration path: getting it
-		// wrong means building a new network and re-enrolling every host.
-		//
-		// P256 is the default because it is the only curve on which a host key
-		// can live in hardware. TPM 2.0 has no Curve25519 at all, and Apple's
-		// Secure Enclave is P-256 only, so a CURVE25519 network can never have
-		// hardware-backed host identity — see docs/credential-model.md §7.
-		curveName = fs.String("curve", "P256", "curve for the CA and every certificate under it: P256 or CURVE25519. PERMANENT — a network's curve cannot be changed after bootstrap. CURVE25519 forecloses hardware-backed host keys (TPM, Secure Enclave)")
-
 		// Writing the unit is opt-in rather than the default: bootstrap is also
 		// run inside a container and from a laptop against a remote database,
 		// where writing to /etc/systemd would be wrong and surprising.
@@ -673,21 +662,33 @@ func bootstrap(args []string) error {
 	}
 	groups := splitCSV(*groupsCS)
 
-	curve, err := ca.ParseCurve(*curveName)
-	if err != nil {
-		return fmt.Errorf("-curve: %w", err)
-	}
-	if curve == cert.Curve_CURVE25519 {
-		// Not an error — 25519 is a legitimate choice, and it is what every
-		// network created before this flag existed uses. But it is unrecoverable
-		// and silent, so say it once, loudly, at the only moment it can be
-		// changed.
-		log.Warn("bootstrapping a CURVE25519 network: host keys can never be "+
-			"hardware-backed, because TPM 2.0 has no Curve25519 and Apple's "+
-			"Secure Enclave is P-256 only. This is permanent for this network; "+
-			"pass -curve P256 to keep that option open",
-			"curve", curve.String())
-	}
+	// P-256, and there is no flag.
+	//
+	// A network's curve is PERMANENT — nebula refuses a certificate whose curve
+	// differs from its signer's, and nothing updates it — so the wrong answer
+	// here means building a new network and re-enrolling every machine. That is
+	// a bad thing to leave as a choice, and there is only one defensible answer.
+	//
+	// P-256 is the only curve on which a host key can live in hardware. TPM 2.0
+	// has no Curve25519 at all, Apple's Secure Enclave is P-256 only, and
+	// Windows' Platform Crypto Provider is ECDSA P-256/P-384 — and nebula's
+	// PKCS#11 support exists only for P-256 (noiseutil.DHP256PKCS11, with no
+	// 25519 equivalent). Choosing 25519 forecloses hardware-backed keys forever
+	// for that network.
+	//
+	// What it costs is nothing that reaches the data plane. The curve selects
+	// only the Noise handshake's DH function (pki.go newCipherSuite); the AEAD
+	// and hash come from the separate `cipher` setting, so every packet after
+	// the handshake is identical either way. Measured, P-256 costs ~10% on the
+	// handshake DH and ~24% on a certificate verify — on the order of 10-20µs,
+	// once per peer pair.
+	//
+	// It also removes a class of bug: bootstrap defaulted to P256 while every
+	// `orbit agent` path defaulted to CURVE25519, so a machine following the
+	// documented steps failed its claim with a curve mismatch. Neither default
+	// was wrong alone, which is exactly why it survived. One constant cannot
+	// disagree with itself.
+	const curve = cert.Curve_P256
 
 	st, err := openStore(ctx, *dsn)
 	if err != nil {

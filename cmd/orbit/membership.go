@@ -835,7 +835,7 @@ func membershipPending(ctx context.Context, args []string) error {
 		t.add(p.Name, p.MembershipID, shortFingerprint(p.DeviceID), ago(&requested))
 	}
 	t.render(out)
-	fmt.Fprintf(errOut, "\nAuthorize one with:\n\n  orbit host authorize <membership>\n")
+	fmt.Fprintf(errOut, "\nAuthorize one with:\n\n  orbit membership authorize <membership>\n")
 	return nil
 }
 

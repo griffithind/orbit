@@ -172,7 +172,7 @@ func TestEnrollmentIsRateLimited(t *testing.T) {
 	ts := h.serveRateLimited(t, freeUDPPort(t))
 
 	client := agent.NewClient(ts.URL)
-	kp, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
 
 	var limited bool
 	for i := 0; i < 40; i++ {
@@ -210,7 +210,12 @@ func TestFailedEnrollmentIsAudited(t *testing.T) {
 
 	// Redeem with a public key for the wrong curve: redemption succeeds (so the
 	// host is known), issuance then fails.
-	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
+	//
+	// CURVE25519 deliberately, and it must stay that way even though Orbit only
+	// creates P-256 networks now — the mismatch IS the test. nebula's cert
+	// library still knows both curves, so this exercises the control plane's
+	// check rather than a parse failure.
+	kp, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
 	_, err := agent.NewClient(ts.URL).Enroll(ctx, code.Code, kp, "e2e")
 	if err == nil {
 		t.Fatal("enrollment with a mismatched curve succeeded")

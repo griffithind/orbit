@@ -201,7 +201,7 @@ func TestControlPlaneJoinsOverlay(t *testing.T) {
 		node.AgentEndpoint(agentPort))
 
 	// And renewal works over the same path.
-	kp, err := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, err := agent.GenerateKeypair(cert.Curve_P256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestEnrollmentAdvertisesLiveReplicas(t *testing.T) {
 	var code wire.EnrollmentCodeResponse
 	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &code)
 
-	kp, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
 	resp, err := agent.NewClient(ts.URL).Enroll(ctx, code.Code, kp, "e2e")
 	if err != nil {
 		t.Fatalf("enroll: %v", err)

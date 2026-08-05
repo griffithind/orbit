@@ -65,7 +65,10 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 		n.CertVer = 2
 	}
 	if n.Curve == "" {
-		n.Curve = "CURVE25519"
+		// Matches migration 0021's column default and its CHECK. A different
+		// answer here would be refused by the database, which is the point of
+		// putting it there.
+		n.Curve = "P256"
 	}
 	if n.CertTTL == 0 {
 		n.CertTTL = 24 * time.Hour

@@ -116,7 +116,7 @@ func (h *harness) enrollExisting(t *testing.T, ts *httptest.Server, membershipID
 	if code := h.adminPost(t, ts.URL+"/v1/memberships/"+membershipID+"/enrollment-code", nil, &codeResp); code != http.StatusCreated {
 		t.Fatalf("enrollment code for %s: status %d", name, code)
 	}
-	kp, err := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, err := agent.GenerateKeypair(cert.Curve_P256)
 	if err != nil {
 		t.Fatal(err)
 	}

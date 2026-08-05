@@ -531,7 +531,7 @@ func TestCLIReserveThenJoin(t *testing.T) {
 	// That is the property unattended provisioning needs.
 	join := h.cliEnv(t, nil, "agent", "join",
 		"-url", ts.URL, "-network", h.netID.String(), "-code", code.Code,
-		"-dir", dir, "-curve", h.curve.String(), "-root", root, "-wait", "30s")
+		"-dir", dir, "-root", root, "-wait", "30s")
 	if join.code != 0 {
 		t.Fatalf("join: exit %d\n%s", join.code, join.stderr)
 	}
@@ -608,7 +608,7 @@ func TestInstallThenJoinPicksUpTheNetwork(t *testing.T) {
 	dir := filepath.Join(root, "prod")
 	join := h.cliEnv(t, nil, "agent", "join",
 		"-url", ts.URL, "-network", h.netID.String(), "-code", code.Code,
-		"-dir", dir, "-curve", h.curve.String(), "-root", root, "-wait", "30s")
+		"-dir", dir, "-root", root, "-wait", "30s")
 	if join.code != 0 {
 		t.Fatalf("join: exit %d\n%s", join.code, join.stderr)
 	}

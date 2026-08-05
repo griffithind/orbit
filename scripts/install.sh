@@ -3,6 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/griffithind/orbit/main/scripts/install.sh | sh
 #   curl -fsSL … | sh -s -- --version 0.3.0 --control-plane
+#   curl -fsSL … | sh -s -- --pkcs11            # hardware-backed mesh key (Linux)
 #
 # It detects the platform, downloads from the GitHub release, VERIFIES against
 # SHA256SUMS, and installs to /usr/local/bin. It enrolls nothing and starts
@@ -14,12 +15,14 @@ REPO=${ORBIT_REPO:-griffithind/orbit}
 VERSION=${ORBIT_VERSION:-}
 PREFIX=${ORBIT_PREFIX:-/usr/local/bin}
 CONTROL_PLANE=0
+PKCS11=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --version) VERSION=$2; shift 2 ;;
         --prefix)  PREFIX=$2;  shift 2 ;;
         --control-plane) CONTROL_PLANE=1; shift ;;
+        --pkcs11)  PKCS11=1; shift ;;
         -h|--help)
             sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -70,8 +73,27 @@ echo "orbit $VERSION for $OS/$ARCH"
 BINARIES="orbit"
 [ "$CONTROL_PLANE" = 1 ] && BINARIES="orbit orbitd"
 
+# --pkcs11 fetches the hardware-key build of `orbit`, for a host whose mesh key
+# should live in a TPM rather than in a file.
+#
+# A separate artifact because it has to be: nebula's PKCS#11 support is a cgo
+# binding, so the binary is dynamically linked against a glibc host and is Linux
+# only, while the default build is static and runs anywhere. Only `orbit` has
+# one — orbitd holds no token-resident key.
+#
+# It also needs a PKCS#11 module at runtime (tpm2-pkcs11), which this script
+# does not install: which module, and which token and object within it, is a
+# decision about the machine that nobody else should be making.
+SUFFIX=""
+if [ "$PKCS11" = 1 ]; then
+    [ "$OS" = linux ] || fail "--pkcs11 is Linux only: nebula's PKCS#11 support is a cgo binding, and there is no macOS build"
+    SUFFIX="_pkcs11"
+fi
+
 for b in $BINARIES; do
-    f="${b}_${VERSION}_${OS}_${ARCH}.tar.gz"
+    sfx=""
+    [ "$b" = orbit ] && sfx="$SUFFIX"
+    f="${b}_${VERSION}_${OS}_${ARCH}${sfx}.tar.gz"
     curl -fsSLO "$BASE/$f" || fail "download $f"
 done
 curl -fsSLO "$BASE/SHA256SUMS" || fail "download SHA256SUMS"
@@ -89,7 +111,9 @@ fi
 echo "checksums ok"
 
 for b in $BINARIES; do
-    tar -xzf "${b}_${VERSION}_${OS}_${ARCH}.tar.gz" "$b"
+    sfx=""
+    [ "$b" = orbit ] && sfx="$SUFFIX"
+    tar -xzf "${b}_${VERSION}_${OS}_${ARCH}${sfx}.tar.gz" "$b"
 done
 
 # sudo only if it is needed. Piping a script into a root shell is a habit worth

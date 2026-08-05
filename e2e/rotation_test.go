@@ -249,7 +249,7 @@ func TestFullRotation(t *testing.T) {
 			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 		Policy: agent.DefaultRenewalPolicy(),
-		Layout: layout, Curve: cert.Curve_CURVE25519,
+		Layout: layout, Curve: cert.Curve_P256,
 		Guard: agent.GuardPolicy{Disabled: true},
 		State: st, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -293,7 +293,7 @@ func TestSweepRetiresExpiredCAs(t *testing.T) {
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		c := store.CA{
 			NetworkID: h.netID, Name: "long-expired", Fingerprint: uuid.NewString(),
-			CertPEM: "pem", SignerRef: stubSignerRef, Curve: "CURVE25519",
+			CertPEM: "pem", SignerRef: stubSignerRef, Curve: "P256",
 			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-24 * time.Hour),
 			State: store.CARetiring,
 		}
@@ -376,7 +376,7 @@ func TestSweepLeavesAnExpiredActiveCAAlone(t *testing.T) {
 
 		active := store.CA{
 			NetworkID: net.ID, Name: "expired-signer", Fingerprint: uuid.NewString(),
-			CertPEM: activePEM, SignerRef: stubSignerRef, Curve: "CURVE25519",
+			CertPEM: activePEM, SignerRef: stubSignerRef, Curve: "P256",
 			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-2 * time.Hour),
 			State: store.CAActive,
 		}
@@ -387,7 +387,7 @@ func TestSweepLeavesAnExpiredActiveCAAlone(t *testing.T) {
 
 		pending := store.CA{
 			NetworkID: net.ID, Name: "expired-pending", Fingerprint: uuid.NewString(),
-			CertPEM: "pending-pem", SignerRef: stubSignerRef, Curve: "CURVE25519",
+			CertPEM: "pending-pem", SignerRef: stubSignerRef, Curve: "P256",
 			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-2 * time.Hour),
 			State: store.CAPending,
 		}

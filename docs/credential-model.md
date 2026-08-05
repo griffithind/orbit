@@ -138,11 +138,27 @@ It is not proof that the report is true, and it should not be sold as one.
 
 ## 7. Constraints this design inherits
 
-**Curve is a whole-network, create-time decision.** `cert/ca_pool.go` rejects a
-certificate whose curve differs from its signer's. Hardware-backed keys require
-P-256 — and the Secure Enclave is P-256-only, so that constraint is a match
-rather than an obstacle. `cmd/orbitd/main.go` currently hardcodes Curve25519 at
-bootstrap. **This is the only irreversible decision in the plan.**
+**Curve was a whole-network, create-time decision. Now it is not a decision at
+all.** `cert/ca_pool.go` rejects a certificate whose curve differs from its
+signer's, and nothing updates a network's curve — so the wrong answer meant
+rebuilding the network and re-enrolling every machine. Hardware-backed keys
+require P-256: TPM 2.0 has no Curve25519, Apple's Secure Enclave is P-256 only,
+Windows' Platform Crypto Provider is ECDSA P-256/P-384, and nebula's own PKCS#11
+path exists only for P-256 (`noiseutil.DHP256PKCS11`, with no 25519 equivalent).
+
+So Orbit is **P-256 only**. There is no `-curve` flag on either half, and
+migration 0021 refuses anything else in the database. What it costs reaches no
+further than the handshake — the curve selects only the Noise DH function
+(`pki.go newCipherSuite`), while the AEAD and hash come from the separate
+`cipher` setting, so every packet after the handshake is identical work.
+Measured: about 10% on the handshake DH and 24% on a certificate verify, which
+is 10-20µs once per peer pair.
+
+Removing the choice also removed a live bug: `orbitd bootstrap` defaulted to
+P256 while every `orbit agent` path defaulted to CURVE25519, so a machine
+following the documented steps failed its claim with a curve mismatch. Neither
+default was wrong alone, which is why it survived — two constants in two
+binaries cannot notice they disagree.
 
 **Nebula needs raw ECDH.** `pkclient.DeriveNoise` uses `CKM_ECDH1_DERIVE` with
 `CKD_NULL` — no KDF, the bare 32-byte X coordinate — and requires the derived

@@ -2,8 +2,6 @@ package e2e
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"fmt"
 	"io"
 	"log/slog"
@@ -48,14 +46,17 @@ const (
 // testCA is a certificate authority and the hosts under it.
 type testCA struct {
 	cert cert.Certificate
-	key  ed25519.PrivateKey
+	// ECDSA P-256, not Ed25519: every Orbit network is P-256 (migration 0021),
+	// and a certificate whose curve differs from its signer's is refused by
+	// nebula's own ca_pool. Raw bytes because that is what cert.Sign takes.
+	key  []byte
 	dir  string
 	path string
 }
 
 func newTestCA(t *testing.T) *testCA {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := orbitca.GenerateCAKey(cert.Curve_P256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +68,9 @@ func newTestCA(t *testing.T) *testCA {
 		NotBefore: time.Now().Add(-2 * time.Hour),
 		NotAfter:  time.Now().Add(48 * time.Hour),
 		PublicKey: pub,
-		Curve:     cert.Curve_CURVE25519,
+		Curve:     cert.Curve_P256,
 	}
-	c, err := tbs.Sign(nil, cert.Curve_CURVE25519, priv)
+	c, err := tbs.Sign(nil, cert.Curve_P256, priv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +90,12 @@ func newTestCA(t *testing.T) *testCA {
 // host writes a signed certificate and its key, returning their paths.
 func (ca *testCA) host(t *testing.T, name, addr string, groups []string) (certPath, keyPath string) {
 	t.Helper()
-	// An X25519 keypair, not Ed25519. The CA SIGNS with Ed25519, but a host
-	// certificate carries the Noise handshake key and pki.key is its 32-byte
-	// private half — handing nebula an Ed25519 key here fails at load with
-	// "key was not 32 bytes", which names the symptom and not this distinction.
-	pub, priv, err := orbitca.GenerateHostKey(cert.Curve_CURVE25519)
+	// A HANDSHAKE keypair, not a signing one. The CA signs with ECDSA P-256,
+	// but a host certificate carries the Noise DH key and pki.key is its
+	// private half — handing nebula a signing key here fails at load with a
+	// message about key length, which names the symptom and not the
+	// distinction.
+	pub, priv, err := orbitca.GenerateHostKey(cert.Curve_P256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,9 +107,9 @@ func (ca *testCA) host(t *testing.T, name, addr string, groups []string) (certPa
 		NotBefore: time.Now().Add(-time.Hour),
 		NotAfter:  time.Now().Add(24 * time.Hour),
 		PublicKey: pub,
-		Curve:     cert.Curve_CURVE25519,
+		Curve:     cert.Curve_P256,
 	}
-	c, err := tbs.Sign(ca.cert, cert.Curve_CURVE25519, ca.key)
+	c, err := tbs.Sign(ca.cert, cert.Curve_P256, ca.key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +123,7 @@ func (ca *testCA) host(t *testing.T, name, addr string, groups []string) (certPa
 	if err := os.WriteFile(certPath, pem, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, cert.MarshalPrivateKeyToPEM(cert.Curve_CURVE25519, priv), 0o600); err != nil {
+	if err := os.WriteFile(keyPath, cert.MarshalPrivateKeyToPEM(cert.Curve_P256, priv), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return certPath, keyPath

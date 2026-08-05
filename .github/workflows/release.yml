@@ -163,6 +163,52 @@ jobs:
           # unit files in git.
           tar -czf "dist/orbit-deploy_${VERSION}.tar.gz" deploy LICENSE
 
+      # Hardware-backed host keys, as a SECOND set of artifacts.
+      #
+      # Nebula's PKCS#11 support is a cgo binding behind a build tag, so a
+      # binary without both silently gets a stub whose every method returns
+      # "not implemented" — which means the static builds above cannot use a
+      # TPM at all, however the network is configured. Every Orbit network is
+      # P-256 precisely so that option stays open (see migration 0021); this is
+      # what opens it.
+      #
+      # SEPARATE ARTIFACTS RATHER THAN REPLACING THE DEFAULTS, for three
+      # reasons that are not preferences:
+      #
+      #   - cgo cannot cross-compile to darwin from this runner at all, so
+      #     "cgo everywhere" would simply delete the macOS builds.
+      #   - a cgo binary is dynamically linked against the build host's libc,
+      #     which retires the "runs on any libc" property the agent depends on
+      #     — it lands on whatever base image a host happens to use.
+      #   - PKCS#11 needs a module present at runtime (tpm2-pkcs11), which is a
+      #     Linux package. A macOS build could not use one anyway.
+      #
+      # So: static by default, TPM-capable on request, and both always built.
+      # A machine that wants a token installs the -pkcs11 build.
+      #
+      # This step runs AFTER the artifacts above are already in dist/, so a
+      # cross-toolchain problem here cannot cost the release its normal builds.
+      - name: build with PKCS#11
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-s -w -X github.com/griffithind/orbit/internal/version.Version=${VERSION}"
+
+          # orbit only. orbitd holds no token-resident key: the control plane's
+          # own mesh material is generated per start and kept in memory, never
+          # written, so there is nothing for a TPM to hold.
+          for target in amd64 arm64; do
+            if [ "$target" = arm64 ]; then export CC=aarch64-linux-gnu-gcc; else unset CC || true; fi
+            CGO_ENABLED=1 GOOS=linux GOARCH="$target" go build \
+              -tags pkcs11 -trimpath -buildvcs=false -ldflags "$LDFLAGS" \
+              -o "build/orbit" "./cmd/orbit"
+            tar -czf "dist/orbit_${VERSION}_linux_${target}_pkcs11.tar.gz" \
+              -C build orbit -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
+            rm -f build/orbit
+          done
+
       # Assert the stamp took. -ldflags -X fails silently when the symbol path
       # is wrong: the build succeeds and every binary reports "dev". A release
       # could otherwise ship with no version in it, which is the one defect that

@@ -37,7 +37,6 @@ func joinCmd(args []string) error {
 		url     = fs.String("url", "", "control plane base URL")
 		network = fs.String("network", "", "network to join, as a uuid or a slug")
 		name    = fs.String("name", "", "membership name, unique within the network (default: this machine's hostname)")
-		curve   = fs.String("curve", "CURVE25519", "mesh key curve; must match the network")
 		root    = fs.String("root", agent.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
 
 		// Waiting is the default because it is what the operator running this
@@ -72,10 +71,11 @@ func joinCmd(args []string) error {
 		*name = h
 	}
 
-	c, err := parseCurve(*curve)
-	if err != nil {
-		return err
-	}
+	// P-256, always. See cmd/orbitd bootstrap: a network's curve is permanent
+	// and there is only one answer that leaves hardware-backed keys possible,
+	// so it is a constant on both halves rather than a flag on each that can
+	// disagree — which is exactly how the two used to.
+	c := cert.Curve_P256
 
 	log := newLogger()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -111,8 +111,26 @@ func joinCmd(args []string) error {
 	fmt.Printf("joined %s as %q\n  membership %s\n  device     %s\n  fingerprint %s\n",
 		*network, *name, joined.MembershipID, joined.DeviceID, id.Fingerprint())
 
+	// A reservation IS the authorization, so the two paths say different things.
+	//
+	// They used to say the same thing: a machine that redeemed a code was told
+	// to go and find an operator, naming a command that no longer exists. On the
+	// one path meant to run unattended, that is the opposite of true — nobody is
+	// watching, and nobody needs to be.
+	// The literal, not store.MembershipPending. Importing internal/store here
+	// would link pgx into the client binary, which is the thing
+	// TestCLIDoesNotLinkTheDataPlane exists to prevent — this state string is
+	// part of the wire contract, and the constant lives on the far side of a
+	// boundary the CLI must not cross.
+	authorized := joined.State != "pending"
+
 	if *wait == 0 {
-		fmt.Printf("\nawaiting authorization. An operator runs:\n  orbit host authorize %s\n",
+		if authorized {
+			fmt.Printf("\nalready authorized by the reservation. Re-run without -wait 0 " +
+				"to collect the certificate.\n")
+			return nil
+		}
+		fmt.Printf("\nawaiting authorization. An operator runs:\n  orbit membership authorize %s\n",
 			joined.MembershipID)
 		return nil
 	}
@@ -125,8 +143,12 @@ func joinCmd(args []string) error {
 		dir = agent.DirFor(*network)
 	}
 
-	fmt.Printf("\nwaiting for an operator to authorize (up to %s). Meanwhile, they run:\n"+
-		"  orbit host authorize %s\n\n", *wait, joined.MembershipID)
+	if authorized {
+		fmt.Printf("\nauthorized by the reservation; collecting the certificate.\n\n")
+	} else {
+		fmt.Printf("\nwaiting for an operator to authorize (up to %s). Meanwhile, they run:\n"+
+			"  orbit membership authorize %s\n\n", *wait, joined.MembershipID)
+	}
 
 	// joined.NetworkKey is the key verifyNetwork just proved the control plane
 	// holds. Carried through so it is PINNED rather than re-learned later: what

@@ -80,7 +80,7 @@ func (s *Store) RedeemEnrollmentCredential(ctx context.Context, secretHash []byt
 		 WHERE secret_hash = $1
 		   AND used_at IS NULL
 		   AND expires_at > now()
-		RETURNING id, network_id, membership_id, method, ` + reservedColumns,
+		RETURNING id, network_id, membership_id, method, `+reservedColumns,
 		secretHash, fromArg,
 	).Scan(append([]any{&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method},
 		res.dest()...)...)
@@ -125,7 +125,7 @@ func (t *Tx) RedeemCredential(ctx context.Context, secretHash []byte, from netip
 		 WHERE secret_hash = $1
 		   AND used_at IS NULL
 		   AND expires_at > now()
-		RETURNING id, network_id, membership_id, method, ` + reservedColumns,
+		RETURNING id, network_id, membership_id, method, `+reservedColumns,
 		secretHash, fromArg,
 	).Scan(append([]any{&r.CredentialID, &r.NetworkID, &r.MembershipID, &r.Method},
 		res.dest()...)...)

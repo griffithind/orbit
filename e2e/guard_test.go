@@ -44,7 +44,7 @@ func newLoopWithGuard(t *testing.T, host *enrolledHost, baseURL string, g agent.
 		},
 		Policy: agent.DefaultRenewalPolicy(),
 		Layout: layout,
-		Curve:  cert.Curve_CURVE25519,
+		Curve:  cert.Curve_P256,
 		Guard:  g,
 		State:  st,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),

@@ -96,7 +96,7 @@ func TestRenewalKeepsTunnelAlive(t *testing.T) {
 		},
 		Policy: agent.DefaultRenewalPolicy(),
 		Layout: layout,
-		Curve:  cert.Curve_CURVE25519,
+		Curve:  cert.Curve_P256,
 		State:  st,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -180,7 +180,7 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 		},
 		Policy: agent.DefaultRenewalPolicy(),
 		Layout: layout,
-		Curve:  cert.Curve_CURVE25519,
+		Curve:  cert.Curve_P256,
 		State:  st,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -226,7 +226,7 @@ func TestRenewReuseKeyKeepsPrivateKey(t *testing.T) {
 		},
 		Policy:   agent.DefaultRenewalPolicy(),
 		Layout:   layout,
-		Curve:    cert.Curve_CURVE25519,
+		Curve:    cert.Curve_P256,
 		ReuseKey: true,
 		State:    st,
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),

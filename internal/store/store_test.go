@@ -211,7 +211,7 @@ func TestOneActiveCAPerNetwork(t *testing.T) {
 		c := store.CA{
 			NetworkID: net.ID, Name: name,
 			Fingerprint: uuid.NewString(), CertPEM: "-----BEGIN NEBULA CERTIFICATE-----\n",
-			SignerRef: "file://dev.key", Curve: "CURVE25519",
+			SignerRef: "file://dev.key", Curve: "P256",
 			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(90 * 24 * time.Hour),
 		}
 		if err := tx.CreateCA(ctx, &c); err != nil {
@@ -579,7 +579,7 @@ func TestBlockHostFlow(t *testing.T) {
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		c := store.CA{
 			NetworkID: net.ID, Name: "ca", Fingerprint: uuid.NewString(),
-			CertPEM: "pem", SignerRef: "file://k", Curve: "CURVE25519",
+			CertPEM: "pem", SignerRef: "file://k", Curve: "P256",
 			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(90 * 24 * time.Hour),
 		}
 		if err := tx.CreateCA(ctx, &c); err != nil {
@@ -670,7 +670,7 @@ func TestLiveBlocklistExcludesExpired(t *testing.T) {
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		ca := store.CA{
 			NetworkID: net.ID, Name: "ca", Fingerprint: uuid.NewString(),
-			CertPEM: "pem", SignerRef: "file://k", Curve: "CURVE25519",
+			CertPEM: "pem", SignerRef: "file://k", Curve: "P256",
 			NotBefore: now.Add(-48 * time.Hour), NotAfter: now.Add(90 * 24 * time.Hour),
 		}
 		if err := tx.CreateCA(ctx, &ca); err != nil {
@@ -820,7 +820,7 @@ func TestCertificateSupersedesPerVersion(t *testing.T) {
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		ca := store.CA{
 			NetworkID: net.ID, Name: "ca", Fingerprint: uuid.NewString(),
-			CertPEM: "pem", SignerRef: "file://k", Curve: "CURVE25519",
+			CertPEM: "pem", SignerRef: "file://k", Curve: "P256",
 			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(90 * 24 * time.Hour),
 		}
 		if err := tx.CreateCA(ctx, &ca); err != nil {
@@ -1192,7 +1192,7 @@ func TestHostCertificateHistory(t *testing.T) {
 	err := s.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		caRow := store.CA{
 			NetworkID: net.ID, Name: "history-ca", Fingerprint: uuid.NewString(),
-			CertPEM: "pem", SignerRef: "file://k", Curve: "CURVE25519",
+			CertPEM: "pem", SignerRef: "file://k", Curve: "P256",
 			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(90 * 24 * time.Hour),
 		}
 		if err := tx.CreateCA(ctx, &caRow); err != nil {

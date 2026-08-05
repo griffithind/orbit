@@ -198,7 +198,6 @@ func enrollCmd(args []string) error {
 	var (
 		url   = fs.String("url", "", "control plane base URL")
 		code  = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-		curve = fs.String("curve", "CURVE25519", "key curve; must match the network")
 
 		// A token URI rather than a boolean, because which object on which
 		// token is not something the agent can guess, and getting it wrong must
@@ -225,10 +224,10 @@ func enrollCmd(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	c, err := parseCurve(*curve)
-	if err != nil {
-		return err
-	}
+	// P-256, always: one constant across both halves rather than a flag on each
+	// that can disagree. See cmd/orbitd bootstrap for why there is only one
+	// defensible answer, and why the two defaults used to differ.
+	c := cert.Curve_P256
 
 	// Either way the private half stays on this host and is never transmitted.
 	// The difference is how strong that guarantee is: a file can be copied off
@@ -238,10 +237,10 @@ func enrollCmd(args []string) error {
 		if !agent.IsTokenRef(*keyRef) {
 			return fmt.Errorf("-key must be a pkcs11: URI, got %q", *keyRef)
 		}
-		// No -curve check: the token's curve is P-256 by construction and the
-		// enrollment request carries the keypair's own curve, so -curve simply
-		// does not participate. The control plane rejects a mismatch against
-		// the network, which is the check that matters.
+		// The token's curve is P-256 by construction, and so is every network,
+		// so there is nothing left to disagree. The control plane still
+		// rejects a mismatch against the network, which is the check that
+		// matters if either ever changes.
 		kp, err = agent.KeypairFromToken(*keyRef)
 		if err != nil {
 			return fmt.Errorf("read public key from token: %w", err)
@@ -321,7 +320,6 @@ func runCmd(args []string) error {
 	var (
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		interval  = fs.Duration("interval", time.Minute, "poll interval")
-		curve     = fs.String("curve", "CURVE25519", "key curve; must match the network")
 		reuseKey  = fs.Bool("reuse-key", false, "keep the existing private key across renewals (for hardware-backed keys)")
 		once      = fs.Bool("once", false, "run one iteration and exit")
 		root      = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
@@ -333,10 +331,7 @@ func runCmd(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	c, err := parseCurve(*curve)
-	if err != nil {
-		return err
-	}
+	c := cert.Curve_P256
 
 	// Every joined network, in one process.
 	//

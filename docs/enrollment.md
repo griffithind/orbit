@@ -175,7 +175,7 @@ POST /enroll/v1/enroll
 
 { "credential":  "orb_1_aBcD…",
   "public_key":  "<base64 raw X25519 or ECDH P-256 public key>",
-  "curve":       "CURVE25519",
+  "curve":       "P256",
   "agent_version": "0.2.0",
   "host_info":   { "hostname": "web-01", "os": "linux", "arch": "amd64" } }
 ```
@@ -244,7 +244,7 @@ attributes against a pre-registered rule.
 { "method": "cloud_iid",
   "provider": "aws",
   "document": "<base64 PKCS#7 signed instance identity document>",
-  "public_key": "…", "curve": "CURVE25519" }
+  "public_key": "…", "curve": "P256" }
 ```
 
 Orbit verifies:
@@ -326,7 +326,7 @@ Steady state. Runs over the overlay, authenticated by source address
 
 ```http
 POST /agent/v1/renew          (from 10.42.0.7, over the tunnel)
-{ "public_key": "…", "curve": "CURVE25519" }
+{ "public_key": "…", "curve": "P256" }
 ```
 
 Orbit resolves the membership from the source overlay address, confirms it is not

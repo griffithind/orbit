@@ -372,13 +372,13 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 
 func enrollWorks(t *testing.T, ts *httptest.Server, code string) bool {
 	t.Helper()
-	kp, err := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, err := agent.GenerateKeypair(cert.Curve_P256)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out wire.EnrollResponse
 	body, err := jsonMarshal(wire.EnrollRequest{
-		Credential: code, PublicKey: kp.PublicB64, Curve: "CURVE25519",
+		Credential: code, PublicKey: kp.PublicB64, Curve: cert.Curve_P256.String(),
 	})
 	if err != nil {
 		t.Fatal(err)

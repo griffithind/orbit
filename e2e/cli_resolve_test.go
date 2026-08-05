@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/slackhq/nebula/cert"
-
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
@@ -181,11 +179,11 @@ func (h *harness) addCA(t *testing.T, name string) *store.CA {
 	t.Helper()
 	ctx := context.Background()
 
-	pub, priv, err := ca.GenerateCAKey(cert.Curve_CURVE25519)
+	pub, priv, err := ca.GenerateCAKey(h.curve)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := ca.NewMemorySigner(cert.Curve_CURVE25519, pub, priv)
+	signer := ca.NewMemorySigner(h.curve, pub, priv)
 	now := time.Now()
 	caCert, err := ca.CreateCA(ctx, signer, ca.CAParams{
 		Name:      name,
@@ -203,7 +201,7 @@ func (h *harness) addCA(t *testing.T, name string) *store.CA {
 	row := store.CA{
 		NetworkID: h.netID, Name: name, Fingerprint: fingerprint,
 		CertPEM:   string(pemBytes),
-		Curve:     cert.Curve_CURVE25519.String(),
+		Curve:     h.curve.String(),
 		NotBefore: caCert.NotBefore(), NotAfter: caCert.NotAfter(),
 	}
 	err = h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {

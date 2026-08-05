@@ -130,7 +130,7 @@ func TestRevocationPropagation(t *testing.T) {
 			},
 			Policy: agent.DefaultRenewalPolicy(),
 			Layout: layout,
-			Curve:  cert.Curve_CURVE25519,
+			Curve:  cert.Curve_P256,
 			State:  st,
 			Log:    alog,
 		}

@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/slackhq/nebula"
-	"github.com/slackhq/nebula/cert"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/overlay"
 	"github.com/slackhq/nebula/service"
@@ -54,7 +53,7 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 		t.Fatalf("enrollment code: %d", code)
 	}
 
-	kp, err := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, err := agent.GenerateKeypair(h.curve)
 	if err != nil {
 		t.Fatal(err)
 	}

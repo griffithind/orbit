@@ -86,24 +86,25 @@ type harness struct {
 	// test that needs to act AS that machine — claiming, re-reporting — can.
 	membershipDevices map[string]*device.Identity
 
-	// curve is this network's curve, chosen once at bootstrap and permanent
-	// thereafter — nebula refuses a certificate whose curve differs from its
-	// signer's. Defaults to CURVE25519 so tests written before the choice
-	// existed behave identically; setupCurve overrides it.
+	// curve is this network's curve. P-256 for every network now — the choice
+	// is gone, and migration 0021 refuses anything else — but it stays a field
+	// because certificates, CA keys and mesh keypairs all have to be generated
+	// with it, and reading it from one place is what stops a test hardcoding a
+	// curve its network does not use.
 	curve cert.Curve
 }
 
 func setup(t *testing.T) *harness {
 	t.Helper()
-	return setupCurve(t, cert.Curve_CURVE25519)
+	return setupCurve(t, cert.Curve_P256)
 }
 
 // setupCurve is setup on a network of the given curve.
 //
-// P-256 is what `orbitd bootstrap` now produces by default, because it is the
-// only curve on which a host key can live in a TPM or Secure Enclave. That made
-// it the untested path: every test here bootstrapped 25519 explicitly, so
-// nothing exercised what a new deployment actually gets.
+// Only P-256 is valid now. The parameter survives so the curve reaches every
+// generator through the harness rather than being written out at each call
+// site — the shape that let bootstrap default to P256 while every agent
+// defaulted to CURVE25519 without either noticing.
 func setupCurve(t *testing.T, curve cert.Curve) *harness {
 	t.Helper()
 	ctx := context.Background()
@@ -818,12 +819,12 @@ func TestEnrollmentCodeIsSingleUse(t *testing.T) {
 	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp)
 
 	client := agent.NewClient(ts.URL)
-	kp1, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp1, _ := agent.GenerateKeypair(cert.Curve_P256)
 	if _, err := client.Enroll(ctx, codeResp.Code, kp1, "e2e"); err != nil {
 		t.Fatalf("first enrollment failed: %v", err)
 	}
 
-	kp2, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp2, _ := agent.GenerateKeypair(cert.Curve_P256)
 	_, err := client.Enroll(ctx, codeResp.Code, kp2, "e2e")
 	if err == nil {
 		t.Fatal("second enrollment with the same code succeeded")
@@ -861,7 +862,7 @@ func TestBlockedHostCannotEnroll(t *testing.T) {
 		t.Error("block did not advance the blocklist epoch")
 	}
 
-	kp, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
+	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
 	_, err := agent.NewClient(ts.URL).Enroll(ctx, codeResp.Code, kp, "e2e")
 	if err == nil {
 		t.Fatal("a blocked host enrolled successfully")
