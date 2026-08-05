@@ -56,6 +56,19 @@ func (n *nftConfigurer) Apply(h HostState) error {
 		// that the control plane believes is closed.
 		return n.Remove()
 	}
+	// Policy routing first, because it is what a CLIENT of an exit node needs
+	// and a client is not a gateway: it forwards nothing, it NATs nothing, and
+	// it may have no nft on the machine at all.
+	if err := applyPolicyRoute(h); err != nil {
+		return err
+	}
+	if !h.Forward && len(h.Masquerade) == 0 {
+		// Exit-node client and nothing more. Netfilter has nothing to do, but
+		// removing is still right: this host may have been a gateway until the
+		// last config.
+		return n.removeTable()
+	}
+
 	if _, err := exec.LookPath("nft"); err != nil {
 		return fmt.Errorf("this host is a route gateway but has no nft binary: "+
 			"install nftables (it is the default firewall backend on every current "+
@@ -101,6 +114,13 @@ func (n *nftConfigurer) Apply(h HostState) error {
 }
 
 func (n *nftConfigurer) Remove() error {
+	if err := removePolicyRoute(); err != nil {
+		return err
+	}
+	return n.removeTable()
+}
+
+func (n *nftConfigurer) removeTable() error {
 	if _, err := exec.LookPath("nft"); err != nil {
 		// Nothing to remove and no tool to remove it with. Not an error: a host
 		// that never had nft never had a table.

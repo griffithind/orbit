@@ -63,6 +63,14 @@ test: ## Run all tests (store tests skip if Postgres is unreachable)
 test-v: ## Run all tests verbosely
 	go test ./... -count=1 -v
 
+# The host-state tests need root, a real kernel and a network namespace they can
+# ruin, so they skip everywhere else. What they check was assumed correct once
+# and was not, which is why they exist rather than a comment claiming it works.
+.PHONY: test-netns
+test-netns: ## Run the host-state tests on a real Linux kernel, in Docker
+	docker run --rm --privileged -v "$(PWD)":/src -w /src golang:1.26-alpine \
+		sh -c 'apk add -q iproute2 nftables && go test ./internal/agent/ -count=1 -v -run "TestPolicyRoute|TestHostState"'
+
 .PHONY: check
 check: ## gofmt + vet + test
 	@test -z "$$(gofmt -l . | tee /dev/stderr)" || (echo "gofmt needed"; exit 1)

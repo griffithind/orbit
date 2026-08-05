@@ -32,11 +32,14 @@ func TestAnExitNodeReachesOnlyTheMachineThatChoseIt(t *testing.T) {
 	// A machine that has NOT chosen it must not receive it.
 	bystander := h.createAndEnroll(t, ts, "bystander", "10.42.95.8", false, false, nil)
 	cfg := readFile(t, agent.DefaultLayout(bystander.dir).ConfigPath())
-	if strings.Contains(cfg, "0.0.0.0/0") {
+	if strings.Contains(cfg, "0.0.0.0/1") || strings.Contains(cfg, "0.0.0.0/0") {
 		t.Fatalf("a machine that chose no exit node was given a default route:\n%s", cfg)
 	}
 	if strings.Contains(cfg, "so_mark") {
 		t.Error("so_mark was emitted for a host with no default route")
+	}
+	if strings.Contains(cfg, "exit_node") {
+		t.Error("exit_node was emitted for a host with no default route")
 	}
 
 	// One that chooses it does.
@@ -48,13 +51,26 @@ func TestAnExitNodeReachesOnlyTheMachineThatChoseIt(t *testing.T) {
 	}
 
 	mat := h.rerender(t, ts, user)
-	if !strings.Contains(mat.Config, "0.0.0.0/0") {
-		t.Fatalf("the machine that chose an exit node was not given it:\n%s", mat.Config)
+	// The two halves rather than 0.0.0.0/0: a second default route is a
+	// collision, not a route. Darwin's RTM_ADD returns EEXIST and nebula logs
+	// that an identical route exists, so the exit node silently never works.
+	// Each half is more specific, so it wins without replacing anything.
+	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		if !strings.Contains(mat.Config, half) {
+			t.Fatalf("the machine that chose an exit node was not given %s:\n%s", half, mat.Config)
+		}
 	}
-	// so_mark is what stops nebula's own UDP being routed into the tunnel it
-	// carries. Without it a default route is a loop.
+	if strings.Contains(mat.Config, "route: 0.0.0.0/0") {
+		t.Errorf("a bare default route was rendered; it collides with the one already there:\n%s", mat.Config)
+	}
+	// so_mark marks nebula's own UDP and exit_node tells the agent to act on
+	// it. Either one alone is a routing loop: a mark nothing reads, or a host
+	// told to divert traffic that carries no mark to divert.
 	if !strings.Contains(mat.Config, "so_mark") {
 		t.Errorf("so_mark missing; a default route without it is a routing loop:\n%s", mat.Config)
+	}
+	if !strings.Contains(mat.Config, "exit_node: true") {
+		t.Errorf("exit_node missing; the mark would be set and nothing would read it:\n%s", mat.Config)
 	}
 }
 

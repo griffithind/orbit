@@ -112,7 +112,11 @@ func (e *Embedded) startLocked(_ context.Context) error {
 	// difference between this and internal/mesh: the control plane runs on a
 	// userspace stack and needs no interface, a managed host IS the interface.
 	// It is also why this path needs root.
-	ctrl, err := nebula.Main(c, false, "orbit-agent", nlog, nil, nil)
+	// A listener factory only when the signed config says this host uses an exit
+	// node, and only on darwin — see listener.go. Nil everywhere else means
+	// nebula's own socket, unchanged.
+	ctrl, err := nebula.Main(c, false, "orbit-agent", nlog, nil,
+		newListenerFactory(nlog, c.GetBool("orbit.exit_node", false)))
 	if err != nil {
 		return fmt.Errorf("nebula rejected the configuration: %w", err)
 	}

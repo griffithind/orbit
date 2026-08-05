@@ -129,13 +129,12 @@ func exitNodeUse(ctx context.Context, args []string, clear bool) error {
 	}
 	fmt.Fprintf(out, "%s will send all traffic through the exit node\n", fs.Arg(0))
 
-	// The two things that are not automatic, said where somebody will read
-	// them: the gateway has to be Linux, and policy has to permit the flow.
-	fmt.Fprintf(errOut, "\nIt takes effect on the next poll. Two things this does NOT do:\n\n"+
+	// The thing that is not automatic, said where somebody will read it.
+	// Choosing an exit node is not being allowed to use one, and the symptom of
+	// confusing them is a default route that silently carries nothing.
+	fmt.Fprintf(errOut, "\nIt takes effect on the next poll. What this does NOT do:\n\n"+
 		"  - grant access. Policy still decides whether %s may reach 0.0.0.0/0\n"+
-		"    through that gateway; if it may not, the route carries nothing.\n"+
-		"  - work on macOS. Nebula marks its own packets with SO_MARK to avoid\n"+
-		"    routing them into the tunnel they carry, and that is Linux only.\n",
+		"    through that gateway; if it may not, the route carries nothing.\n",
 		fs.Arg(0))
 	return nil
 }

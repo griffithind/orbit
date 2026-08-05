@@ -63,6 +63,25 @@ type HostState struct {
 	// TunDev is the interface forwarded traffic arrives on, used to scope rules
 	// so they cannot match traffic that has nothing to do with Orbit.
 	TunDev string
+
+	// ExitNode is true when this host reaches 0.0.0.0/0 through the mesh.
+	//
+	// Unlike the fields above this is not about being a gateway — it is about
+	// USING one, and it is the only host state an ordinary client ever has. On
+	// Linux it means installing the ip rule that makes listen.so_mark do
+	// something; without it the mark is set on nebula's packets and nothing
+	// looks at it, so nebula's own UDP takes the default route it just
+	// installed and the tunnel carries the packets that carry the tunnel.
+	ExitNode bool
+
+	// SoMark is the mark nebula was told to put on its own packets, read from
+	// the same signed config that set it.
+	//
+	// Read rather than hardcoded so the rule and the mark cannot drift: the ip
+	// rule is worthless unless it matches exactly what nebula stamps, and a
+	// constant duplicated on both sides of the config is a thing that gets
+	// changed on one side.
+	SoMark int
 }
 
 // Empty reports whether there is nothing to do.
@@ -71,7 +90,7 @@ type HostState struct {
 // REMOVE anything it left behind rather than skip — a machine that stops being
 // a gateway must stop forwarding.
 func (h HostState) Empty() bool {
-	return !h.Forward && len(h.Masquerade) == 0
+	return !h.Forward && !h.ExitNode && len(h.Masquerade) == 0
 }
 
 // String is a stable description, used to decide whether anything changed.
@@ -84,8 +103,8 @@ func (h HostState) String() string {
 		nets = append(nets, p.String())
 	}
 	sort.Strings(nets)
-	return fmt.Sprintf("forward=%v tun=%s masquerade=[%s]",
-		h.Forward, h.TunDev, strings.Join(nets, ","))
+	return fmt.Sprintf("forward=%v exit=%v mark=%#x tun=%s masquerade=[%s]",
+		h.Forward, h.ExitNode, h.SoMark, h.TunDev, strings.Join(nets, ","))
 }
 
 // HostConfigurer applies host state. One per platform.
@@ -126,8 +145,12 @@ func HostStateFromConfig(yamlCfg string) (HostState, error) {
 		Tun struct {
 			Dev string `yaml:"dev"`
 		} `yaml:"tun"`
+		Listen struct {
+			SoMark int `yaml:"so_mark"`
+		} `yaml:"listen"`
 		Orbit *struct {
 			Forward    bool     `yaml:"forward"`
+			ExitNode   bool     `yaml:"exit_node"`
 			Masquerade []string `yaml:"masquerade"`
 		} `yaml:"orbit"`
 	}
@@ -141,7 +164,12 @@ func HostStateFromConfig(yamlCfg string) (HostState, error) {
 		return HostState{}, nil
 	}
 
-	h := HostState{Forward: doc.Orbit.Forward, TunDev: doc.Tun.Dev}
+	h := HostState{
+		Forward:  doc.Orbit.Forward,
+		ExitNode: doc.Orbit.ExitNode,
+		TunDev:   doc.Tun.Dev,
+		SoMark:   doc.Listen.SoMark,
+	}
 	for _, raw := range doc.Orbit.Masquerade {
 		p, err := netip.ParsePrefix(raw)
 		if err != nil {

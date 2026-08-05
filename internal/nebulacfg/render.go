@@ -481,6 +481,14 @@ type orbitSection struct {
 	// Forward is true when this host is a gateway for something.
 	Forward bool `yaml:"forward,omitempty"`
 
+	// ExitNode is true when this host reaches 0.0.0.0/0 through the mesh.
+	//
+	// It is what a platform acts on to keep nebula's own UDP out of the tunnel
+	// it carries: on darwin the agent pins the socket to the physical default
+	// route's interface, on Linux it installs the ip rule that listen.so_mark
+	// exists to be matched by. Nebula reads neither.
+	ExitNode bool `yaml:"exit_node,omitempty"`
+
 	// Masquerade lists prefixes whose forwarded traffic is NATed leaving this
 	// host. Per prefix rather than per host: a gateway can legitimately want
 	// NAT for 0.0.0.0/0 and not for a LAN it also serves.
@@ -654,7 +662,7 @@ func Render(in Input) ([]byte, error) {
 			UnsafeRoutes: renderRoutes(in.Routes),
 		},
 		Firewall: fw,
-		Orbit:    renderOrbit(in.Serves),
+		Orbit:    renderOrbit(in.Serves, hasDefault(in.Routes)),
 	}
 	if in.LogLevel != "" || in.LogFormat != "" {
 		doc.Logging = &loggingSection{Level: in.LogLevel, Format: in.LogFormat}
@@ -735,14 +743,16 @@ func renderRoutes(routes []Route) []unsafeRoute {
 		if len(via) == 0 {
 			continue
 		}
-		e := unsafeRoute{Route: r.Prefix.String(), Via: via, MTU: r.MTU}
-		if !r.Install {
-			// Only when false. Nebula defaults to true, so emitting it always
-			// would be noise in every config that never wanted the knob.
-			no := false
-			e.Install = &no
+		for _, p := range splitDefault(r.Prefix) {
+			e := unsafeRoute{Route: p, Via: via, MTU: r.MTU}
+			if !r.Install {
+				// Only when false. Nebula defaults to true, so emitting it always
+				// would be noise in every config that never wanted the knob.
+				no := false
+				e.Install = &no
+			}
+			out = append(out, e)
 		}
-		out = append(out, e)
 	}
 	if len(out) == 0 {
 		return nil
@@ -750,16 +760,54 @@ func renderRoutes(routes []Route) []unsafeRoute {
 	return out
 }
 
+// splitDefault turns a default route into the two halves that cover the same space
+// without being a default route.
+//
+// A host already has a default route, and a second one is not a route — it is a
+// collision. Darwin's RTM_ADD returns EEXIST and nebula logs "identical route already
+// exists" and carries on doing nothing, so the exit node silently never works. The halves
+// are each more specific, so longest-prefix match prefers them over whatever the DHCP
+// lease installed, with nothing removed and nothing to restore on the way out: teardown
+// deletes two routes rather than repairing one it clobbered.
+//
+// Every implementation lands here — wg-quick's darwin path, ZeroTier's _forkTarget,
+// Tailscale. It is applied on all platforms rather than only the ones that would break,
+// because "more specific than the default" is the behaviour we want everywhere and one
+// rendering is one thing to reason about.
+func splitDefault(p netip.Prefix) []string {
+	if p.Bits() != 0 {
+		return []string{p.String()}
+	}
+	if p.Addr().Is4() {
+		return []string{"0.0.0.0/1", "128.0.0.0/1"}
+	}
+	return []string{"::/1", "8000::/1"}
+}
+
+// hasDefault reports whether any of these routes is a default route.
+//
+// Derived from the rendered routes rather than passed in beside them, so the flag and the
+// routes cannot disagree: a host told it has an exit node but given no default route, or
+// the reverse, is a machine whose network behaviour nobody can predict from its config.
+func hasDefault(routes []Route) bool {
+	for _, r := range routes {
+		if r.Prefix.Bits() == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // renderOrbit describes what the agent must do to the host.
 //
 // Nil when this host serves nothing, so an ordinary machine's configuration is
 // byte-identical to what it was before routes existed — which is what keeps a
 // feature nobody uses from re-applying every config in a fleet.
-func renderOrbit(serves []Served) *orbitSection {
-	if len(serves) == 0 {
+func renderOrbit(serves []Served, exitNode bool) *orbitSection {
+	if len(serves) == 0 && !exitNode {
 		return nil
 	}
-	out := &orbitSection{Forward: true}
+	out := &orbitSection{Forward: len(serves) > 0, ExitNode: exitNode}
 	for _, s := range serves {
 		if s.Masquerade {
 			out.Masquerade = append(out.Masquerade, s.Prefix.String())

@@ -422,9 +422,11 @@ because the agent runs only what the control plane signed.
 
 Two limits worth knowing:
 
-- **The machine using an exit node must be Linux.** Nebula marks its own packets
-  with `SO_MARK` so they are not routed into the tunnel they carry, and that is
-  implemented for Linux only.
+- **Advertising still requires Linux.** Forwarding and NAT are implemented for
+  Linux only; a Mac refuses rather than pretending. Using an exit node works on
+  both — Linux through `so_mark` and an `ip rule`, macOS by pinning nebula's
+  socket to the physical default route's interface. Both are installed and
+  removed by the agent.
 - **Choosing does not grant.** Policy still decides whether that membership may
   reach `0.0.0.0/0` through that gateway. Choosing one it may not use produces a
   default route that carries nothing.
