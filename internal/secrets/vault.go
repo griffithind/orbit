@@ -85,11 +85,17 @@ var (
 // is deliberate.
 //
 // nebula-cert derives once, interactively, on a workstation. This derives at
-// every control-plane START, on a VM that README sizing puts at 2 vCPU / 4 GB —
-// where orbitd has already been observed peaking near 2 GB bringing up nebula's
-// userspace stack. A 2 GiB derivation on top of that is an OOM kill at boot,
-// which converts a deployment's key custody into a deployment that does not
-// start.
+// every control-plane START, on a VM sized at 2 vCPU / 2 GB with Postgres
+// sharing it. A 2 GiB allocation there is most of the machine, at the moment the
+// process is least able to spare it — and an OOM kill at boot turns a
+// deployment's key custody into a deployment that does not start.
+//
+// (An earlier version of this comment justified the choice by claiming orbitd
+// already peaks near 2 GB. That was repeated from a docs figure taken during a
+// crash loop and is wrong by two orders of magnitude — measured, the whole
+// process peaks at ~108 MB with two nebula stacks running. The conclusion holds
+// on the plainer argument above; the false premise did not deserve to survive in
+// a comment justifying a security parameter.)
 //
 // 64 MiB is comfortably above OWASP's Argon2id floor and costs about a tenth of
 // a second. It is also more headroom than the threat needs: the passphrase is

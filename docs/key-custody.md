@@ -160,10 +160,9 @@ ends up one refactor away from a query.
 
 The Argon2id parameters are **64 MiB, t=3, p=4** — deliberately not nebula-cert's
 2 GiB. nebula-cert derives once, interactively, on a workstation; this derives at
-every control-plane start, on a VM the README sizes at 4 GB where orbitd already
-peaks near 2 GB bringing up nebula's userspace stack. A 2 GiB derivation on top
-of that is an OOM kill at boot, which turns key custody into a control plane that
-does not start. `ORBIT_KEK_ARGON_MEMORY_MIB` raises it and cannot lower it.
+every control-plane start, on a small VM with Postgres sharing it, where a 2 GiB
+allocation is most of the machine at the moment it can least spare it.
+`ORBIT_KEK_ARGON_MEMORY_MIB` raises it and cannot lower it.
 
 Two things the database enforces rather than the code:
 

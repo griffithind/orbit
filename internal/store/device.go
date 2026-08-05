@@ -66,6 +66,14 @@ type Device struct {
 	BlockedAt     *time.Time
 	BlockedReason string
 
+	// PublicAddrs are the underlay addresses other machines dial to reach this
+	// one — a lighthouse's or a relay's. Hosts only, no ports: the port belongs
+	// to a membership, because two networks on one machine cannot share one.
+	//
+	// Empty for almost every machine. Only something that must be dialable at a
+	// known address needs them; everything else is found by hole punching.
+	PublicAddrs []string
+
 	FirstSeenAt time.Time
 	LastSeenAt  time.Time
 
@@ -144,7 +152,7 @@ func DeviceFingerprint(publicKey []byte) string {
 // error, not a compile error — it builds fine and fails on the join path.
 const deviceCols = `d.id, d.key_fingerprint, d.public_key, d.key_backing,
 	COALESCE(d.hostname, ''), d.blocked_at, COALESCE(d.blocked_reason, ''),
-	d.first_seen_at, d.last_seen_at,
+	d.public_addrs, d.first_seen_at, d.last_seen_at,
 	COALESCE(d.os, ''), COALESCE(d.os_version, ''), COALESCE(d.kernel, ''),
 	COALESCE(d.arch, ''), COALESCE(d.agent_version, ''), COALESCE(d.nebula_version, ''),
 	d.facts_observed_at,
@@ -153,7 +161,7 @@ const deviceCols = `d.id, d.key_fingerprint, d.public_key, d.key_backing,
 
 const deviceColsBare = `id, key_fingerprint, public_key, key_backing,
 	COALESCE(hostname, ''), blocked_at, COALESCE(blocked_reason, ''),
-	first_seen_at, last_seen_at,
+	public_addrs, first_seen_at, last_seen_at,
 	COALESCE(os, ''), COALESCE(os_version, ''), COALESCE(kernel, ''),
 	COALESCE(arch, ''), COALESCE(agent_version, ''), COALESCE(nebula_version, ''),
 	facts_observed_at,
@@ -164,7 +172,7 @@ func scanDevice(row pgx.Row) (*Device, error) {
 	var d Device
 	if err := row.Scan(&d.ID, &d.KeyFingerprint, &d.PublicKey, &d.KeyBacking,
 		&d.Hostname, &d.BlockedAt, &d.BlockedReason,
-		&d.FirstSeenAt, &d.LastSeenAt,
+		&d.PublicAddrs, &d.FirstSeenAt, &d.LastSeenAt,
 		&d.Facts.OS, &d.Facts.OSVersion, &d.Facts.Kernel,
 		&d.Facts.Arch, &d.Facts.AgentVersion, &d.Facts.NebulaVersion,
 		&d.Facts.ObservedAt,
@@ -575,6 +583,59 @@ func (t *Tx) AttachHostToDevice(ctx context.Context, membershipID, deviceID uuid
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// SetDevicePublicAddrs records where a machine is reachable from outside.
+//
+// ONE WRITE FOR EVERY NETWORK. This is the point of migration 0019: a machine
+// that is a lighthouse on three networks has one public address, and changing it
+// used to mean editing three memberships — with a partial edit leaving some of
+// the fleet dialling somewhere nothing is listening.
+//
+// Bumps the config epoch of EVERY network this device belongs to, because those
+// addresses are rendered into every other machine's static_host_map. A change
+// nobody is told about is a lighthouse half the mesh still dials and half does
+// not.
+func (t *Tx) SetDevicePublicAddrs(ctx context.Context, deviceID uuid.UUID, addrs []string) error {
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE orbit.device SET public_addrs = $2
+		 WHERE id = $1 AND public_addrs IS DISTINCT FROM $2::text[]`,
+		deviceID, nonNil(addrs))
+	if err != nil {
+		return mapErr(err, "set device public addresses")
+	}
+	if tag.RowsAffected() == 0 {
+		// Either unchanged or no such device. Unchanged is the common case and
+		// wants no epoch churn; a missing device is caught by the caller, which
+		// has already read it.
+		return nil
+	}
+
+	rows, err := t.tx.Query(ctx,
+		`SELECT DISTINCT network_id FROM orbit.membership WHERE device_id = $1`, deviceID)
+	if err != nil {
+		return mapErr(err, "set device public addresses")
+	}
+	var networks []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return mapErr(err, "set device public addresses")
+		}
+		networks = append(networks, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return mapErr(err, "set device public addresses")
+	}
+
+	for _, networkID := range networks {
+		if _, err := t.BumpEpoch(ctx, networkID, EpochConfig); err != nil {
+			return err
+		}
 	}
 	return nil
 }

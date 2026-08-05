@@ -3,8 +3,6 @@ package ca
 import (
 	"crypto/ed25519"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -229,83 +227,42 @@ func TestSignNetworkProofRejectsAMalformedKey(t *testing.T) {
 	}
 }
 
-// TestNetworkIdentityRoundTripsThroughAFile, both plaintext and encrypted.
+// TestNetworkIdentityPEMRoundTrip.
 //
-// The identity key uses nebula's Ed25519 signing-key PEM so that one encryption
-// path serves both keys. That is only worth it if a key encrypted by
-// EncryptKeyFile actually loads again — which is the thing a bootstrap does once
-// and a control plane does on every start.
-func TestNetworkIdentityRoundTripsThroughAFile(t *testing.T) {
+// The identity key uses nebula's Ed25519 signing-key PEM so that one parser
+// serves both this and the CA key. That is only worth it if what the vault
+// stores comes back as the key that went in.
+//
+// The file-based cases this replaced are gone with the file path: keys live in
+// the vault, and internal/vault's own tests cover the encrypted round trip
+// against real Postgres.
+func TestNetworkIdentityPEMRoundTrip(t *testing.T) {
 	_, priv := genIdentity(t)
 
-	for _, tc := range []struct {
-		name       string
-		passphrase []byte
-	}{
-		{"plaintext", nil},
-		{"encrypted", []byte("correct horse battery staple")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "network-identity.key")
-			if err := os.WriteFile(path, MarshalNetworkIdentityPEM(priv), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if len(tc.passphrase) > 0 {
-				if err := EncryptKeyFile(path, tc.passphrase); err != nil {
-					t.Fatalf("encrypt: %v", err)
-				}
-			}
-
-			got, err := LoadNetworkIdentity("file://"+path, tc.passphrase)
-			if err != nil {
-				t.Fatalf("load: %v", err)
-			}
-			if !got.Equal(priv) {
-				t.Fatal("the key that came back is not the key that went in")
-			}
-		})
+	got, err := ParseNetworkIdentityPEM(MarshalNetworkIdentityPEM(priv))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !got.Equal(priv) {
+		t.Fatal("the key that came back is not the key that went in")
 	}
 }
 
-// TestLoadNetworkIdentityRefusesAWorldReadableKey.
+// TestParseNetworkIdentityPEMRejectsTheCAKey.
 //
-// Refuse, not warn. Someone holding this key can convince every machine that
-// joins afterwards that their control plane is this network, and a key the whole
-// machine can read is a mistake nobody notices.
-func TestLoadNetworkIdentityRefusesAWorldReadableKey(t *testing.T) {
-	_, priv := genIdentity(t)
-	path := filepath.Join(t.TempDir(), "network-identity.key")
-	if err := os.WriteFile(path, MarshalNetworkIdentityPEM(priv), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := LoadNetworkIdentity("file://"+path, nil)
-	if !errors.Is(err, ErrKeyPermissions) {
-		t.Fatalf("error = %v, want ErrKeyPermissions", err)
-	}
-}
-
-// TestLoadNetworkIdentityRejectsTheCAKey.
-//
-// The two files sit side by side in /var/lib/orbit and are easy to transpose in
-// a runbook. A P-256 CA key is the wrong length and is caught here; a Curve25519
-// one has the same shape and is caught later, by the network ID not matching —
-// which is the better error anyway, because it names both IDs.
-func TestLoadNetworkIdentityRejectsTheCAKey(t *testing.T) {
+// The two are sealed in the same table under the same KEK and distinguished by a
+// `kind` column. A P-256 CA key is the wrong length and is caught here; a
+// Curve25519 one has the same shape and is caught by the AEAD, which binds the
+// kind into its additional data.
+func TestParseNetworkIdentityPEMRejectsTheCAKey(t *testing.T) {
 	_, caPriv, err := GenerateCAKey(cert.Curve_P256)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "ca.key")
-	if err := os.WriteFile(path, cert.MarshalSigningPrivateKeyToPEM(cert.Curve_P256, caPriv), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadNetworkIdentity("file://"+path, nil); err == nil {
+	if _, err := ParseNetworkIdentityPEM(cert.MarshalSigningPrivateKeyToPEM(cert.Curve_P256, caPriv)); err == nil {
 		t.Fatal("a P-256 CA key was accepted as a network identity key")
 	}
-}
-
-func TestLoadNetworkIdentityRejectsANonFileRef(t *testing.T) {
-	if _, err := LoadNetworkIdentity("awskms://key/abc", nil); !errors.Is(err, ErrSignerUnavailable) {
-		t.Errorf("error = %v, want ErrSignerUnavailable", err)
+	if _, err := ParseNetworkIdentityPEM([]byte("not pem")); err == nil {
+		t.Error("garbage was accepted as a network identity key")
 	}
 }

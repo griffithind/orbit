@@ -251,17 +251,18 @@ func (s *Service) signNetworkProof(ctx context.Context, net *store.Network, chal
 	return ca.SignNetworkProof(priv, challenge)
 }
 
-// loadNetworkIdentity resolves a signer ref, through the vault when one is
-// configured and from disk otherwise.
+// loadNetworkIdentity resolves a signer ref through the vault.
+//
+// Nil is a wiring mistake, not a mode. Every network's identity key is in the
+// vault, so a service built without a resolver cannot sign a join proof — and
+// saying so names the missing wiring instead of failing as a key that will not
+// load.
 func (s *Service) loadNetworkIdentity(ctx context.Context, ref string) (ed25519.PrivateKey, error) {
-	if s.cfg.NetworkIdentity != nil {
-		return s.cfg.NetworkIdentity(ctx, ref)
+	if s.cfg.NetworkIdentity == nil {
+		return nil, errors.New("this service was built without a network identity resolver, " +
+			"so it cannot prove which network it is; wire enroll.Config.NetworkIdentity")
 	}
-	passphrase, err := ca.CAKeyPassphrase()
-	if err != nil {
-		return nil, err
-	}
-	return ca.LoadNetworkIdentity(ref, passphrase)
+	return s.cfg.NetworkIdentity(ctx, ref)
 }
 
 func (s *Service) networkIdentity(ctx context.Context, net *store.Network) (ed25519.PrivateKey, error) {

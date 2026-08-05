@@ -346,7 +346,11 @@ type UpdateHostRequest struct {
 	Tags         *[]string `json:"tags,omitempty"`
 	IsLighthouse *bool     `json:"is_lighthouse,omitempty"`
 	IsRelay      *bool     `json:"is_relay,omitempty"`
-	StaticAddrs  *[]string `json:"static_addrs,omitempty"`
+	// AdvertisePort overrides the bound port in this membership's advertised
+	// address. The ADDRESSES themselves are a device field — PATCH
+	// /v1/devices/{id} — because a machine has one public address however many
+	// networks it serves.
+	AdvertisePort *int `json:"advertise_port,omitempty"`
 }
 
 type MembershipResponse struct {
@@ -358,6 +362,15 @@ type MembershipResponse struct {
 	Tags         []string `json:"tags,omitempty"`
 	IsLighthouse bool     `json:"is_lighthouse"`
 	IsRelay      bool     `json:"is_relay"`
+
+	// DeviceID is the machine this membership is of.
+	//
+	// Readable for the same reason RoleID is: the facts that moved to the
+	// device — public addresses, posture, when it was last heard from — are
+	// written through /v1/devices/{id}, and a client that can see a membership
+	// but cannot name its device has no path from "this lighthouse is
+	// unreachable" to the endpoint that fixes it.
+	DeviceID string `json:"device_id"`
 
 	// RoleID and RoleName both, and for different readers.
 	//
@@ -372,7 +385,11 @@ type MembershipResponse struct {
 	RoleID   string `json:"role_id,omitempty"`
 	RoleName string `json:"role_name,omitempty"`
 
-	// StaticAddrs is settable through PATCH for the same reason RoleID is
+	// StaticAddrs is DERIVED — the device's public addresses crossed with this
+	// membership's port — and therefore read-only here. Write
+	// device.public_addrs instead.
+	//
+	// Originally settable through PATCH for the same reason RoleID is
 	// readable here — and this one is worse if omitted: a lighthouse whose
 	// static_addrs a read-modify-write silently drops is one every host in the
 	// mesh keeps dialling and none can reach.
@@ -1053,8 +1070,6 @@ type CreateCARequest struct {
 	// CAs, so this is the only blast-radius control there is.
 	Networks []string `json:"networks,omitempty"`
 	Groups   []string `json:"groups,omitempty"`
-	// SignerRef locates the signing key: awskms://…, pkcs11://…, file://…
-	SignerRef string `json:"signer_ref"`
 }
 
 // ActivateCARequest promotes a CA to signing.
@@ -1437,6 +1452,10 @@ type DeviceResponse struct {
 	BlockedAt     *time.Time `json:"blocked_at,omitempty"`
 	BlockedReason string     `json:"blocked_reason,omitempty"`
 
+	// PublicAddrs are where this machine is reachable from outside, if it is a
+	// lighthouse or a relay. Hosts only; the port is per membership.
+	PublicAddrs []string `json:"public_addrs,omitempty"`
+
 	Facts           DeviceFacts   `json:"facts"`
 	FactsObservedAt *time.Time    `json:"facts_observed_at,omitempty"`
 	Posture         DevicePosture `json:"posture"`
@@ -1465,6 +1484,18 @@ type DeviceMembership struct {
 
 type DeviceList struct {
 	Devices []DeviceResponse `json:"devices"`
+}
+
+// SetDeviceAddrsRequest sets where a machine is reachable from outside.
+//
+// One write for every network it serves. These are the addresses other machines
+// dial to reach it as a lighthouse or a relay; the port comes from each
+// membership, because two networks on one machine cannot share a UDP port.
+type SetDeviceAddrsRequest struct {
+	// PublicAddrs are hosts, WITHOUT ports — an address or a name. An entry
+	// carrying a port is refused rather than silently producing `1.2.3.4:80:4242`
+	// in somebody's static_host_map.
+	PublicAddrs []string `json:"public_addrs"`
 }
 
 // BlockDeviceRequest blocks a machine everywhere on this control plane.

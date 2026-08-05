@@ -138,6 +138,7 @@ const (
 	ActionDeviceJoin           = "device.join"
 	ActionMembershipAuthorized = "membership.authorized"
 	ActionMembershipClaimed    = "membership.claimed"
+	ActionDeviceUpdated        = "device.updated"
 	ActionDeviceBlocked        = "device.blocked"
 	ActionDeviceUnblocked      = "device.unblocked"
 	ActionMembershipUpdated    = "membership.updated"

@@ -202,7 +202,7 @@ func (h *harness) addCA(t *testing.T, name string) *store.CA {
 
 	row := store.CA{
 		NetworkID: h.netID, Name: name, Fingerprint: fingerprint,
-		CertPEM: string(pemBytes), SignerRef: "file://" + h.caKey,
+		CertPEM:   string(pemBytes),
 		Curve:     cert.Curve_CURVE25519.String(),
 		NotBefore: caCert.NotBefore(), NotAfter: caCert.NotAfter(),
 	}

@@ -47,9 +47,29 @@ func resetVault(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 
-	if _, err := conn.Exec(ctx, "TRUNCATE orbit.secret, orbit.kek"); err != nil {
-		t.Fatalf("reset the vault: %v", err)
+	truncate := func() {
+		if _, err := conn.Exec(ctx, "TRUNCATE orbit.secret, orbit.kek"); err != nil {
+			t.Fatalf("reset the vault: %v", err)
+		}
 	}
+	truncate()
+
+	// And again on the way out. These cases deliberately re-key the deployment
+	// with passphrases of their own, and the KEK is deployment-wide — so without
+	// this, every harness built AFTER a vault test would find a KEK it cannot
+	// open and fail with ErrWrongKEK, in a test that has nothing to do with
+	// custody. Leaving no KEK at all is the one state setup() can always
+	// recover from: it initialises a fresh one.
+	t.Cleanup(func() {
+		conn, err := pgx.Connect(context.Background(), dsn("ORBIT_TEST_DSN", adminDSN))
+		if err != nil {
+			t.Fatalf("connect as admin: %v", err)
+		}
+		defer conn.Close(context.Background())
+		if _, err := conn.Exec(context.Background(), "TRUNCATE orbit.secret, orbit.kek"); err != nil {
+			t.Fatalf("reset the vault: %v", err)
+		}
+	})
 }
 
 func TestVaultRoundTripsAKey(t *testing.T) {

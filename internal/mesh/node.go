@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -64,7 +65,14 @@ type Config struct {
 	// is the only inbound OVERLAY port the control plane accepts.
 	AgentPort int
 
-	// LighthouseAddrs are this node's public "host:port" entries. Supplying
+	// LighthouseAddrs are this node's public entries, "host" or "host:port".
+	//
+	// The two halves are stored on different nouns — the address on the machine,
+	// the port on the membership (migration 0019) — and splitLighthouseAddrs
+	// below does that. The joined form is still accepted here because it is what
+	// an operator writes and what nebula's static_host_map shows.
+	//
+	// Historically these were "host:port" entries. Supplying
 	// them makes the control plane a lighthouse for its network.
 	//
 	// Opt-in by supplying the address rather than a separate boolean, because a
@@ -134,10 +142,16 @@ func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger)
 		cfg.Name = "orbit-control-" + cfg.Addr.String()
 	}
 
+	hosts, advertisePort, err := splitLighthouseAddrs(cfg.LighthouseAddrs, cfg.ListenPort)
+	if err != nil {
+		return nil, err
+	}
 	issued, err := es.SelfIssue(ctx, cfg.NetworkID, cfg.Addr, cfg.Name, cfg.DeviceKey, enroll.SelfIssueRoles{
-		IsLighthouse: len(cfg.LighthouseAddrs) > 0,
-		IsRelay:      cfg.Relay,
-		StaticAddrs:  cfg.LighthouseAddrs,
+		IsLighthouse:  len(hosts) > 0,
+		IsRelay:       cfg.Relay,
+		PublicAddrs:   hosts,
+		AdvertisePort: advertisePort,
+		ListenPort:    cfg.ListenPort,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mesh: self-issue for network %s: %w", cfg.NetworkID, err)
@@ -260,10 +274,16 @@ func (n *Node) renewIfDue(ctx context.Context) error {
 		return nil
 	}
 
+	hosts, advertisePort, err := splitLighthouseAddrs(n.cfg.LighthouseAddrs, n.cfg.ListenPort)
+	if err != nil {
+		return err
+	}
 	issued, err := n.es.SelfIssue(ctx, n.cfg.NetworkID, n.cfg.Addr, n.cfg.Name, n.cfg.DeviceKey, enroll.SelfIssueRoles{
-		IsLighthouse: len(n.cfg.LighthouseAddrs) > 0,
-		IsRelay:      n.cfg.Relay,
-		StaticAddrs:  n.cfg.LighthouseAddrs,
+		IsLighthouse:  len(hosts) > 0,
+		IsRelay:       n.cfg.Relay,
+		PublicAddrs:   hosts,
+		AdvertisePort: advertisePort,
+		ListenPort:    n.cfg.ListenPort,
 	})
 	if err != nil {
 		return fmt.Errorf("renew control plane certificate: %w", err)
@@ -553,4 +573,53 @@ func inlineInto(rendered, caBundle, certPEM, keyPEM string, cfg Config) (string,
 		return "", fmt.Errorf("re-marshal config: %w", err)
 	}
 	return string(out), nil
+}
+
+// splitLighthouseAddrs separates operator-written entries into the two nouns
+// that own them.
+//
+// An entry may be "203.0.113.10" or "203.0.113.10:4242". The host is this
+// machine's public address and goes on the device; the port says which nebula
+// instance answers there and goes on the membership.
+//
+// A port equal to the bound port is DROPPED rather than stored as an override.
+// Storing it would be a second copy of listen_port that could drift, and the
+// common case — `-lighthouse 203.0.113.10:4242` with `-nebula-port 4242` — is
+// exactly that.
+//
+// Entries must agree on the port. Two different ones cannot both be advertised
+// for one membership, and picking one silently would leave the other half of the
+// fleet dialling somewhere nothing is listening.
+func splitLighthouseAddrs(entries []string, listenPort int) ([]string, *int, error) {
+	var (
+		hosts []string
+		port  *int
+	)
+	for _, e := range entries {
+		if e == "" {
+			continue
+		}
+		host, portStr, err := net.SplitHostPort(e)
+		if err != nil {
+			// No port: the whole entry is a host, and the membership's bound
+			// port applies.
+			hosts = append(hosts, e)
+			continue
+		}
+		n, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("lighthouse address %q: port is not a number", e)
+		}
+		hosts = append(hosts, host)
+		if n == listenPort {
+			continue
+		}
+		if port != nil && *port != n {
+			return nil, nil, fmt.Errorf(
+				"lighthouse addresses disagree on the port (%d and %d); one membership "+
+					"advertises one port, so pick one", *port, n)
+		}
+		port = &n
+	}
+	return hosts, port, nil
 }

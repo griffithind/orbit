@@ -20,7 +20,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -59,8 +58,6 @@ func main() {
 		err = bootstrap(os.Args[2:])
 	case "migrate":
 		err = migrateCmd(os.Args[2:])
-	case "ca":
-		err = caCmd(os.Args[2:])
 	case "token":
 		err = tokenCmd(os.Args[2:])
 	case "version", "-version", "--version":
@@ -114,7 +111,6 @@ func usage() {
   bootstrap  create the first network, CA, role, and admin token
   migrate    apply database migrations (needs the admin DSN, not the app one)
   token      manage API tokens offline (break-glass; see docs/deployment.md)
-  ca         encrypt a CA signing key at rest
   version    print the build version
 
 Run "orbitd <command> -h" for flags.
@@ -167,8 +163,6 @@ func serve(args []string) error {
 			"cap on concurrent UI event streams")
 		deviceKeyPath = fs.String("device-key", agent.DeviceKeyPath(""),
 			"this control plane's own device identity key; generated on first use. It is a machine on its own network like any other, and this is the key that says which one")
-		keyDir = fs.String("key-dir", "/var/lib/orbit",
-			"where POST /v1/networks writes the identity key it generates. Empty refuses that endpoint; networks are then created only by `orbitd bootstrap`")
 		metricsAddr = fs.String("metrics-addr", "127.0.0.1:9464",
 			"Prometheus exposition address; empty disables it. Bind to localhost or the overlay: the output is fleet inventory")
 		meshes meshSpecs
@@ -194,33 +188,27 @@ func serve(args []string) error {
 	}
 	defer st.Close()
 
-	// The vault, if this deployment has one. A control plane whose keys are all
-	// on disk needs no passphrase and gets none — which is what keeps the
-	// single-VM path working unchanged.
+	// The vault. Required, not optional: every private key this control plane
+	// holds is in it, so a deployment without one cannot sign anything.
 	//
-	// When there IS one, the passphrase is checked here, at startup, against a
-	// verifier stored at bootstrap. A replica with a mistyped passphrase that
-	// started cleanly would fail on its first signing operation, which is while
-	// somebody is adding a machine and days after the mistake.
+	// The passphrase is checked HERE, at startup, against a verifier stored at
+	// bootstrap. A replica with a mistyped passphrase that started cleanly would
+	// fail on its first signing operation — while somebody is adding a machine,
+	// days after the mistake, with nothing connecting the two.
 	if err := secrets.ConfigureKDF(); err != nil {
 		return err
 	}
-	signerFactory := ca.FileSignerFactory
-	var vlt *vault.Vault
-	switch v, err := vault.Open(ctx, st); {
-	case err == nil:
-		vlt = v
-		// The vault first: a db:// ref is unambiguous, and trying the file
-		// factory first would make every vault lookup log a failed parse.
-		signerFactory = ca.ChainFactories(vlt.SignerFactory(), ca.FileSignerFactory)
-		log.Info("key vault open; private keys are stored encrypted in the database")
-	case errors.Is(err, store.ErrNoKEK):
-		log.Info("no key vault for this deployment; keys are read from disk")
-	default:
+	vlt, err := vault.Open(ctx, st)
+	if err != nil {
+		if errors.Is(err, store.ErrNoKEK) {
+			return fmt.Errorf("%w\n\nThis database has never been bootstrapped, or was "+
+				"bootstrapped by a version that stored keys in files. Run `orbitd bootstrap`", err)
+		}
 		return fmt.Errorf("open the key vault: %w", err)
 	}
+	log.Info("key vault open; private keys are stored encrypted in the database")
 
-	registry := ca.NewRegistry(signerFactory)
+	registry := ca.NewRegistry(vlt.SignerFactory())
 	defer registry.Close()
 
 	enrollCfg := enroll.Config{
@@ -234,9 +222,7 @@ func serve(args []string) error {
 		// it gets something else, which is exactly the assumption that left this
 		// path inert once already.
 	}
-	if vlt != nil {
-		enrollCfg.NetworkIdentity = vlt.NetworkIdentity
-	}
+	enrollCfg.NetworkIdentity = vlt.NetworkIdentity
 	svc := enroll.NewService(st, registry, enrollCfg)
 
 	// Metrics. Built before anything that reports into it, and served on its
@@ -260,9 +246,14 @@ func serve(args []string) error {
 	apiCfg := api.Config{
 		TrustForwardedFor: *trustXFF,
 		MaxWatchers:       *maxWatch,
-		SignerFactory:     signerFactory,
-		NetworkKeyDir:     *keyDir,
-		Metrics:           mx,
+		SignerFactory:     vlt.SignerFactory(),
+		SealNetworkIdentity: func(ctx context.Context, tx *store.Tx, plaintext []byte) (string, error) {
+			return vlt.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil, plaintext)
+		},
+		SealCAKey: func(ctx context.Context, tx *store.Tx, networkID uuid.UUID, plaintext []byte) (string, error) {
+			return vlt.PutTx(ctx, tx, secrets.KindCASigning, &networkID, plaintext)
+		},
+		Metrics: mx,
 	}
 
 	// Push. The notifier holds a dedicated connection listening for epoch
@@ -547,14 +538,11 @@ func bootstrap(args []string) error {
 		caName  = fs.String("ca-name", "", "CA name (defaults to the network name)")
 		caDays  = fs.Int("ca-days", 90, "CA lifetime in days")
 		certTTL = fs.Duration("cert-ttl", 24*time.Hour, "host certificate lifetime; this is the revocation SLA for a partitioned host")
-		keyPath = fs.String("ca-key", "", "write the CA signing key to this FILE instead of the database. Empty stores it encrypted in Postgres, which is what lets a second replica work without copying key files — see docs/key-custody.md")
 
 		// Separate from -ca-key because they have different lifetimes and
 		// different jobs. The CA key rotates; this one never does, because
 		// rotating it would change the network's ID. Writing them to one file
 		// would make rotating the first mean touching the second.
-		identityPath = fs.String("identity-key", "",
-			"write the network identity key to this FILE instead of the database. Empty stores it encrypted in Postgres alongside the CA key")
 		groupsCS = fs.String("groups", "default", "comma separated groups the CA may delegate")
 
 		// PERMANENT. Nebula refuses a certificate whose curve differs from its
@@ -612,17 +600,10 @@ func bootstrap(args []string) error {
 	}
 	defer st.Close()
 
-	// Both keys are generated here and stored in one of two places.
-	//
-	// BY DEFAULT, THE DATABASE, encrypted under a key encryption key derived
-	// from a passphrase that never touches it. That is what makes a second
-	// replica possible: it needs the passphrase and nothing else, instead of a
-	// copy of every key file kept in step through every rotation. See
-	// docs/key-custody.md.
-	//
-	// -ca-key and -identity-key put them on disk instead, which stays a
-	// first-class answer for a single VM that already works that way — the
-	// signer ref is a string, so a deployment can hold some keys in each.
+	// Both keys go into the vault, sealed under this deployment's KEK. There is
+	// no file option: two custody paths meant two sets of failure modes, two
+	// things to document, and a second replica that worked or did not depending
+	// on which one a network happened to use. See docs/key-custody.md.
 	caPub, caPriv, err := ca.GenerateCAKey(curve)
 	if err != nil {
 		return err
@@ -637,31 +618,6 @@ func bootstrap(args []string) error {
 		return err
 	}
 	identityPEMBytes := ca.MarshalNetworkIdentityPEM(identityPriv)
-
-	passphrase, err := ca.CAKeyPassphrase()
-	if err != nil {
-		return err
-	}
-
-	// Written before anything reaches the database, so a failure to write a key
-	// file leaves no network behind referencing a key that does not exist.
-	var caRef, identityRef string
-	if *keyPath != "" {
-		if caRef, err = writeKeyFile(*keyPath, caPEMBytes, passphrase, log,
-			"CA key written UNENCRYPTED: set ORBIT_CA_KEY_PASSPHRASE_FILE (or "+
-				"ORBIT_CA_KEY_PASSPHRASE) and re-run `orbitd ca encrypt` — a disk "+
-				"snapshot or backup of this host currently yields the mesh's root key"); err != nil {
-			return err
-		}
-	}
-	if *identityPath != "" {
-		if identityRef, err = writeKeyFile(*identityPath, identityPEMBytes, passphrase, log,
-			"network identity key written UNENCRYPTED: anyone with this file can "+
-				"convince a JOINING machine that their control plane is this network. "+
-				"It cannot mint certificates for the existing fleet — that needs the CA key"); err != nil {
-			return err
-		}
-	}
 
 	signer := ca.NewMemorySigner(curve, caPub, caPriv)
 
@@ -703,26 +659,24 @@ func bootstrap(args []string) error {
 	if err := secrets.ConfigureKDF(); err != nil {
 		return err
 	}
-	// The vault, if either key is going into the database. Initialised before
-	// the transaction so a missing passphrase fails before anything is written.
-	var vlt *vault.Vault
-	if caRef == "" || identityRef == "" {
-		if vlt, err = vault.Init(ctx, st); err != nil {
-			return fmt.Errorf("initialise the key vault: %w\n\n"+
-				"Set ORBIT_KEK_PASSPHRASE_FILE (or ORBIT_KEK_PASSPHRASE), or pass "+
-				"-ca-key and -identity-key to keep the keys on disk instead", err)
-		}
+	// The vault. Initialised before the transaction so a missing passphrase
+	// fails before anything is written, rather than leaving a half-created
+	// network behind.
+	vlt, err := vault.Init(ctx, st)
+	if err != nil {
+		return fmt.Errorf("initialise the key vault: %w\n\n"+
+			"Generate one and keep it somewhere your database backups are not:\n"+
+			"  head -c 32 /dev/urandom | base64", err)
 	}
+	var caRef, identityRef string
 
 	err = st.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		// Sealed inside the same transaction as the rows that reference them. A
 		// key stored in a transaction that then rolled back would be ciphertext
 		// nothing points at; a network stored without its key would be a network
 		// that cannot sign.
-		if identityRef == "" {
-			if identityRef, err = vlt.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil, identityPEMBytes); err != nil {
-				return err
-			}
+		if identityRef, err = vlt.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil, identityPEMBytes); err != nil {
+			return err
 		}
 
 		net := store.Network{
@@ -741,10 +695,8 @@ func bootstrap(args []string) error {
 		networkID = net.ID
 		verifiableID = net.NetworkID
 
-		if caRef == "" {
-			if caRef, err = vlt.PutTx(ctx, tx, secrets.KindCASigning, &net.ID, caPEMBytes); err != nil {
-				return err
-			}
+		if caRef, err = vlt.PutTx(ctx, tx, secrets.KindCASigning, &net.ID, caPEMBytes); err != nil {
+			return err
 		}
 
 		caRow := store.CA{
@@ -869,65 +821,6 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
-}
-
-// caCmd holds maintenance on the CA key file.
-func caCmd(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: orbitd ca encrypt -key <path>")
-	}
-
-	switch args[0] {
-	case "encrypt":
-		fs := flag.NewFlagSet("ca encrypt", flag.ExitOnError)
-		keyPath := fs.String("key", "ca.key", "path to the CA signing key")
-		_ = fs.Parse(args[1:])
-
-		passphrase, err := ca.CAKeyPassphrase()
-		if err != nil {
-			return err
-		}
-		if len(passphrase) == 0 {
-			return errors.New("set ORBIT_CA_KEY_PASSPHRASE_FILE or ORBIT_CA_KEY_PASSPHRASE first.\n\n" +
-				"On systemd, the file form pairs with LoadCredentialEncrypted= so the\n" +
-				"passphrase is sealed to this machine's TPM and a stolen disk image is\n" +
-				"useless without it.")
-		}
-
-		if err := ca.EncryptKeyFile(*keyPath, passphrase); err != nil {
-			return err
-		}
-		fmt.Printf("%s is encrypted.\n\nThe same passphrase must be available to orbitd at startup, "+
-			"or it cannot sign.\n", *keyPath)
-		return nil
-
-	default:
-		return fmt.Errorf("unknown ca subcommand %q (want: encrypt)", args[0])
-	}
-}
-
-// writeKeyFile writes a private key to disk and returns its signer ref.
-//
-// Encrypted when a passphrase is available, and loud when it is not: the failure
-// is otherwise invisible — everything works, and the key sits in plaintext in
-// every snapshot and backup of the machine.
-func writeKeyFile(path string, pem, passphrase []byte, log *slog.Logger, plaintextWarning string) (string, error) {
-	if err := os.WriteFile(path, pem, 0o600); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
-	}
-	if len(passphrase) > 0 {
-		if err := ca.EncryptKeyFile(path, passphrase); err != nil {
-			return "", fmt.Errorf("encrypt %s: %w", path, err)
-		}
-		log.Info("key written encrypted", "path", path)
-	} else {
-		log.Warn(plaintextWarning, "path", path)
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	return "file://" + abs, nil
 }
 
 // custodyNote says where the CA key ended up and what that obliges.

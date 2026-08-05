@@ -8,7 +8,6 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/slackhq/nebula/cert"
@@ -215,14 +214,15 @@ func VerifyNetworkProof(id string, identityPublicKey, challenge, proof []byte) e
 // Custody
 //------------------------------------------------------------------------------
 //
-// The private half gets the CA key's treatment: its own file, mode 0600 enforced
-// at load, and the same passphrase. Someone holding it cannot mint a certificate
-// — that needs the CA key — but they can convince every machine that joins
-// afterwards that their control plane is this network, which is close enough to
-// warrant the same care.
+// The private half lives in the vault (internal/secrets), sealed under the
+// deployment's KEK, exactly like the CA key. Someone holding it cannot mint a
+// certificate — that needs the CA key — but they can convince every machine that
+// joins afterwards that their control plane is this network, which is close
+// enough to warrant the same custody.
 //
-// It is deliberately NOT in the database. Migration 0017 carries a tripwire that
-// fails if a column which could hold it is ever added.
+// It is deliberately NOT stored in plaintext. Migration 0017 carries a tripwire
+// that fails if a column which could hold it is ever added, and 0018's tripwire
+// says the same of the table that legitimately holds ciphertext.
 
 // MarshalNetworkIdentityPEM encodes the identity private key for storage.
 //
@@ -240,52 +240,6 @@ func VerifyNetworkProof(id string, identityPublicKey, challenge, proof []byte) e
 // the wrong network's.
 func MarshalNetworkIdentityPEM(priv ed25519.PrivateKey) []byte {
 	return cert.MarshalSigningPrivateKeyToPEM(cert.Curve_CURVE25519, priv)
-}
-
-// LoadNetworkIdentity reads the identity private key from a signer ref.
-//
-// Only `file://` today, and the ref is the same opaque-locator shape
-// orbit.ca.signer_ref uses so that a KMS-backed one is an added case here rather
-// than a change everywhere. The mode check refuses rather than warns, for the
-// reason the CA key's does: a key the whole machine can read is a mistake nobody
-// notices.
-func LoadNetworkIdentity(ref string, passphrase []byte) (ed25519.PrivateKey, error) {
-	path, ok := strings.CutPrefix(ref, "file://")
-	if !ok {
-		return nil, fmt.Errorf("%w: network identity ref %q is not file://",
-			ErrSignerUnavailable, ref)
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("%w: stat %s: %w", ErrSignerUnavailable, path, err)
-	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		return nil, fmt.Errorf("%w: %s is mode %04o, want 0600 (chmod 600 %s)",
-			ErrKeyPermissions, path, mode, path)
-	}
-
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("%w: read %s: %w", ErrSignerUnavailable, path, err)
-	}
-
-	if IsEncryptedKey(b) {
-		if len(passphrase) == 0 {
-			return nil, fmt.Errorf("%w: set ORBIT_CA_KEY_PASSPHRASE or ORBIT_CA_KEY_PASSPHRASE_FILE",
-				ErrPassphraseRequired)
-		}
-		_, raw, _, err := cert.DecryptAndUnmarshalSigningPrivateKey(passphrase, b)
-		if err != nil {
-			return nil, fmt.Errorf("decrypt network identity key %s: %w", path, err)
-		}
-		return checkIdentityKey(raw, path)
-	}
-	key, err := ParseNetworkIdentityPEM(b)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	return key, nil
 }
 
 // ParseNetworkIdentityPEM decodes an identity key from unencrypted PEM.

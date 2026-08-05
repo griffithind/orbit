@@ -113,7 +113,7 @@ var knownScopes = map[string]bool{
 	// than hosts:read on any one network — and devices:block cuts a machine off
 	// everywhere at once. Granting either through a network-scoped name would
 	// be a quiet escalation.
-	"devices:read": true, "devices:block": true,
+	"devices:read": true, "devices:write": true, "devices:block": true,
 	"networks:read": true, "networks:write": true,
 	"roles:read": true, "roles:write": true,
 	"cas:read": true, "cas:write": true,

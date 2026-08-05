@@ -33,14 +33,14 @@ func TestAdminResourceLifecycle(t *testing.T) {
 	// A CA must be constrained. Nebula has no intermediate CAs, so an
 	// unconstrained one can mint any identity in the mesh.
 	if code := h.adminPost(t, ts.URL+"/v1/cas", wire.CreateCARequest{
-		NetworkID: net.ID, Name: "unscoped", SignerRef: "file://" + h.caKey,
+		NetworkID: net.ID, Name: "unscoped",
 	}, nil); code != http.StatusBadRequest {
 		t.Errorf("unconstrained CA creation = %d, want 400", code)
 	}
 
 	var caResp wire.CAResponse
 	if code := h.adminPost(t, ts.URL+"/v1/cas", wire.CreateCARequest{
-		NetworkID: net.ID, Name: "prod-ca", SignerRef: "file://" + h.caKey,
+		NetworkID: net.ID, Name: "prod-ca",
 		Networks: []string{"10.77.0.0/16"}, Groups: []string{"web", "db"}, Days: 30,
 	}, &caResp); code != http.StatusCreated {
 		t.Fatalf("create CA: %d", code)

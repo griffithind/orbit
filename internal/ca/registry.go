@@ -3,7 +3,6 @@ package ca
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -15,9 +14,9 @@ import (
 // References are URLs so that adding a backend does not change any stored data:
 //
 //	file:///var/lib/orbit/ca.key   development and single-operator deployments
-//	awskms://<region>/<key-id>     production
-//	gcpkms://<project>/<loc>/<ring>/<key>
-//	pkcs11://<token>?<params>      HSM
+//	db://<uuid>                    the vault: sealed in Postgres under the KEK
+//	awskms://<region>/<key-id>     not implemented
+//	pkcs11://<token>?<params>      not implemented
 //
 // The file scheme is built in. Everything else is registered by the binary that
 // needs it, so the core does not carry a cloud SDK it may never use.
@@ -40,10 +39,11 @@ type Registry struct {
 	cache map[string]*Issuer
 }
 
+// A nil factory is a programming error rather than a default, and fails on the
+// first issuance rather than here. There is nothing sensible to fall back to:
+// the only backend is the vault, and the vault needs a database handle and a
+// KEK that this package must never hold.
 func NewRegistry(f SignerFactory) *Registry {
-	if f == nil {
-		f = FileSignerFactory
-	}
 	return &Registry{factory: f, cache: map[string]*Issuer{}}
 }
 
@@ -101,53 +101,6 @@ func (r *Registry) Close() error {
 	}
 	r.cache = map[string]*Issuer{}
 	return nil
-}
-
-// FileSignerFactory resolves file:// references.
-func FileSignerFactory(_ context.Context, ref string) (Signer, error) {
-	path, ok := strings.CutPrefix(ref, "file://")
-	if !ok {
-		return nil, fmt.Errorf("unsupported signer scheme in %q (this build only handles file://)", ref)
-	}
-
-	pass, err := CAKeyPassphrase()
-	if err != nil {
-		return nil, err
-	}
-	return NewFileSignerFromPath(path, pass)
-}
-
-// CAKeyPassphrase reads the passphrase for an encrypted CA key.
-//
-// From a file if ORBIT_CA_KEY_PASSPHRASE_FILE is set, otherwise from
-// ORBIT_CA_KEY_PASSPHRASE. The file form exists because it costs nothing and
-// unlocks the good options on a plain VM:
-//
-//	systemd  LoadCredentialEncrypted= puts a TPM-sealed secret in
-//	         $CREDENTIALS_DIRECTORY; point this at it and a stolen disk image
-//	         is useless without that machine's TPM.
-//	docker   /run/secrets/<name> works the same way.
-//
-// Neither keeps the passphrase out of the environment of a process an attacker
-// already controls. Both keep it out of `ps`, out of shell history, and out of
-// anything that dumps the environment into a log.
-//
-// The passphrase never appears in the signer reference, so signer_ref stays
-// safe to store in the database and to print in logs.
-func CAKeyPassphrase() ([]byte, error) {
-	if path := os.Getenv("ORBIT_CA_KEY_PASSPHRASE_FILE"); path != "" {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read ORBIT_CA_KEY_PASSPHRASE_FILE: %w", err)
-		}
-		// Trailing newlines are what a here-doc or `echo >` leaves behind and
-		// are almost never intended as part of the secret.
-		return []byte(strings.TrimRight(string(b), "\r\n")), nil
-	}
-	if v := os.Getenv("ORBIT_CA_KEY_PASSPHRASE"); v != "" {
-		return []byte(v), nil
-	}
-	return nil, nil
 }
 
 // ChainFactories tries each factory in order, returning the first success. Use

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -883,9 +885,46 @@ type TopologyHost struct {
 	ID           uuid.UUID
 	Name         string
 	Addrs        []netip.Addr
-	StaticAddrs  []string
 	IsLighthouse bool
 	IsRelay      bool
+
+	// The pieces StaticAddrs is made of, kept apart because the port's default
+	// is resolved outside this package. See NetworkTopology.
+	PublicAddrs       []string
+	AdvertisePort     *int
+	ListenPort        *int
+	NetworkListenPort *int
+}
+
+// StaticAddrs is what other machines dial to reach this one: every public
+// address of the DEVICE, paired with the port of THIS membership.
+//
+// defaultPort is the control plane's own default, the last of four levels:
+// the membership's advertise_port, its listen_port, the network's, then this.
+// Resolving it here rather than in SQL keeps one implementation — an agent that
+// dialled a port the lighthouse never bound would fail with no error anywhere,
+// just a mesh that does not form.
+//
+// AdvertisePort wins outright when set: it exists for the machine behind
+// port-forwarding, where the port that reaches it is deliberately not the port
+// it binds.
+func (h TopologyHost) StaticAddrs(defaultPort int) []string {
+	port := defaultPort
+	switch {
+	case h.AdvertisePort != nil:
+		port = *h.AdvertisePort
+	case h.ListenPort != nil:
+		port = *h.ListenPort
+	case h.NetworkListenPort != nil:
+		port = *h.NetworkListenPort
+	}
+	out := make([]string, 0, len(h.PublicAddrs))
+	for _, a := range h.PublicAddrs {
+		// JoinHostPort, not concatenation: a bare IPv6 address needs brackets
+		// and nebula rejects the form without them.
+		out = append(out, net.JoinHostPort(a, strconv.Itoa(port)))
+	}
+	return out
 }
 
 // NetworkTopology returns only the lighthouses and relays in a network.
@@ -895,11 +934,20 @@ type TopologyHost struct {
 // table on every request and make a large network quadratically expensive to
 // operate. Lighthouses and relays are a small, slowly-changing subset.
 func (t *Tx) NetworkTopology(ctx context.Context, networkID uuid.UUID) ([]TopologyHost, error) {
+	// The ADDRESSES and the PORT come back separately and are joined in Go.
+	//
+	// They have to be: the port is a three-level default — the membership's, the
+	// network's, then the control plane's — and the last of those is a flag this
+	// package cannot see. Deriving in SQL would resolve two levels and silently
+	// produce nothing for a lighthouse relying on the third.
 	rows, err := t.tx.Query(ctx, `
-		SELECT h.id, h.name, h.static_addrs, h.is_lighthouse, h.is_relay,
+		SELECT h.id, h.name, d.public_addrs, h.advertise_port, h.listen_port, n.listen_port,
+		       h.is_lighthouse, h.is_relay,
 		       coalesce(array(SELECT a.addr FROM orbit.membership_address a
 		                       WHERE a.membership_id = h.id ORDER BY a.addr), '{}')
 		  FROM orbit.membership h
+		  JOIN orbit.device d ON d.id = h.device_id
+		  JOIN orbit.network n ON n.id = h.network_id
 		 WHERE h.network_id = $1
 		   AND (h.is_lighthouse OR h.is_relay)
 		   AND h.state IN ('enrolled', 'active')
@@ -912,7 +960,8 @@ func (t *Tx) NetworkTopology(ctx context.Context, networkID uuid.UUID) ([]Topolo
 	var out []TopologyHost
 	for rows.Next() {
 		var h TopologyHost
-		if err := rows.Scan(&h.ID, &h.Name, &h.StaticAddrs,
+		if err := rows.Scan(&h.ID, &h.Name, &h.PublicAddrs,
+			&h.AdvertisePort, &h.ListenPort, &h.NetworkListenPort,
 			&h.IsLighthouse, &h.IsRelay, &h.Addrs); err != nil {
 			return nil, mapErr(err, "scan topology host")
 		}

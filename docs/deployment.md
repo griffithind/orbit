@@ -239,17 +239,28 @@ the operator states it once, and a lighthouse nobody can reach is worse than
 none because every host keeps dialling it.
 
 A control plane that is its own lighthouse needs a **fixed** UDP port —
-`-nebula-port`, which defaults to 4242 and is what the `static_addrs` on its own
-membership advertise. Nebula refuses `am_lighthouse` with no port rather than
-starting into a state where every host is told to reach it somewhere it is not
-listening, and Orbit checks the same thing first so the error names the flag and
-the membership rather than a nebula config field.
+`-nebula-port`, which defaults to 4242. Nebula refuses `am_lighthouse` with no
+port rather than starting into a state where every host is told to reach it
+somewhere it is not listening, and Orbit checks the same thing first so the
+error names the flag and the membership rather than a nebula config field.
 
-Roles thereafter change through the API and take effect without a restart:
+**The address belongs to the machine, the port to the membership.** What other
+machines dial is derived, not stored: every public address on the `device`,
+paired with that `membership`'s port. So changing where a machine is reachable
+is one command that fixes every network it lights, rather than one edit per
+membership with a wrong one leaving a lighthouse advertising a dead address:
 
 ```bash
-orbit membership set lh-01 -lighthouse -static-addrs 203.0.113.20:4242
+# Where this machine is reachable. Hosts or names, never ports.
+orbit device set-addrs lh-01 203.0.113.20
+
+# What it is, in this network.
+orbit membership set lh-01 -lighthouse
 ```
+
+`-advertise-port` on `membership set` exists for the one case the derivation
+cannot infer: a machine behind port forwarding, where the port that reaches it
+is deliberately not the port it binds. Leave it unset otherwise.
 
 `orbitd` logs the roles actually in force at startup, read from the record — and
 warns if you passed a seed flag it ignored, rather than letting you believe it
@@ -276,8 +287,13 @@ Handing the role to a dedicated host is a normal change, not a migration:
 # 1. Enroll the new lighthouse with its public address.
 # 2. Stand the control plane down. No restart, no flag.
 curl -XPATCH .../v1/memberships/$CONTROL_PLANE_HOST_ID \
-     -d '{"is_lighthouse":false,"static_addrs":[]}'
+     -d '{"is_lighthouse":false}'
 ```
+
+Only the role is cleared. The machine's public address stays on the `device`,
+because it is still true — the control plane is still reachable there, it just
+no longer asks anyone to dial it. Clearing it would be a second, unrelated
+change (`orbit device set-addrs $NAME` with no addresses).
 
 The config epoch advances, every agent stops listing the old address on its next
 poll, and the control plane picks up the new lighthouse the same way — it
@@ -684,19 +700,31 @@ Measured, in `e2e/scale_test.go`:
   `-max-watchers` (5000/network default). Over the cap, agents fall back to
   polling rather than being refused.
 
-**Baseline memory is the number that matters, and the scale test does not
-measure it.** Those figures are MARGINAL costs — what one more network or one
-more watcher adds. The floor underneath them is nebula's userspace network
-stack, and on a real deployment `orbitd` peaked at **2 GB** during startup.
+**Memory, measured.** An earlier version of this section said `orbitd` peaked at
+**2 GB** during startup and that a 1 GB VM would not start. That was wrong, and
+the paragraph said why without drawing the conclusion: the deployment it came
+from was crash-looping on a bug, so the figure was a restart-churn artifact
+rather than a working control plane.
 
-So: **2 vCPU / 4 GB is the smallest sensible control plane**, with Postgres
-sharing it. A 1 GB VM will not start. Two vCPUs rather than one because gvisor's
-packet processing, Postgres, and Go's collector contending for a single core
-produce latency spikes that read as "push is down" when nothing is wrong.
+Measured directly, running the e2e binary with `/usr/bin/time -l`:
 
-Steady-state memory is not yet characterised — the deployment that produced the
-2 GB figure was crash-looping on a bug, so that is a startup peak and may settle.
-Watch it on your own fleet rather than trusting this paragraph.
+| What | Peak RSS |
+|---|---|
+| Two real nebula nodes + a control plane + Postgres pools | **108 MB** |
+| Four networks joined, same process | **242 MB** |
+
+And the marginal cost of a network is **0.36 MB of heap** (`TestMeshJoinCost`
+prints it), so a hundred networks is tens of megabytes, not gigabytes.
+
+So: **2 vCPU / 2 GB is comfortable** with Postgres sharing the box, and the
+constraint is Postgres and headroom rather than nebula. Two vCPUs rather than
+one because gvisor's packet processing, Postgres, and Go's collector contending
+for a single core produce latency spikes that read as "push is down" when
+nothing is wrong.
+
+The number to actually watch is a control plane that is RESTARTING, which is
+what produced the original 2 GB: repeated stack bring-up churns memory in a way
+steady state does not. Alert on restarts, not on RSS.
 
 The lighthouse's bandwidth is what to watch if memberships cannot punch and fall back
 to relaying through it.

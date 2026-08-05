@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -604,21 +602,22 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		ttl = d
 	}
 
-	// The network's identity key, and the ID that commits to it. Generated
-	// before anything is written, because a network without one cannot be
-	// safely joined and half-creating it would leave a row that has to be
-	// cleaned up by hand.
-	if s.cfg.NetworkKeyDir == "" {
+	// The network's identity key, and the ID that commits to it.
+	//
+	// Generated here and sealed inside the same transaction as the network row
+	// below: a key stored by a transaction that then rolled back would be
+	// ciphertext nothing references, and a network stored without its key would
+	// be a network nothing can join.
+	if s.cfg.SealNetworkIdentity == nil {
 		writeErr(w, http.StatusServiceUnavailable,
-			"this server is not configured to create networks: it has nowhere to put the "+
-				"network identity key. Start orbitd with -key-dir, or create the network "+
-				"with `orbitd bootstrap`")
+			"this server cannot create a network: every network needs an identity key, "+
+				"and this server has no key vault to put one in")
 		return
 	}
-	identityPub, identityRef, err := s.writeNetworkIdentity()
+	identityPub, identityPriv, err := ca.GenerateNetworkIdentity()
 	if err != nil {
-		s.log.Error("could not write a network identity key", "dir", s.cfg.NetworkKeyDir, "error", err)
-		writeErr(w, http.StatusInternalServerError, "could not store the network identity key")
+		s.log.Error("could not generate a network identity key", "error", err)
+		writeErr(w, http.StatusInternalServerError, "could not create the network")
 		return
 	}
 
@@ -629,7 +628,6 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		Curve:             cert.Curve_CURVE25519.String(),
 		CertVer:           2,
 		IdentityPublicKey: identityPub,
-		IdentitySignerRef: identityRef,
 	}
 	if req.Curve != "" {
 		if req.Curve != "CURVE25519" && req.Curve != "P256" {
@@ -647,6 +645,11 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		ref, err := s.cfg.SealNetworkIdentity(ctx, tx, ca.MarshalNetworkIdentityPEM(identityPriv))
+		if err != nil {
+			return err
+		}
+		net.IdentitySignerRef = ref
 		if err := tx.CreateNetwork(ctx, &net); err != nil {
 			return err
 		}
@@ -1205,8 +1208,8 @@ func (s *Server) handleCreateCA(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid network_id")
 		return
 	}
-	if req.Name == "" || req.SignerRef == "" {
-		writeErr(w, http.StatusBadRequest, "name and signer_ref are required")
+	if req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "name is required")
 		return
 	}
 	// Nebula has no intermediate CAs, so a CA's constraints are the only thing
@@ -1232,16 +1235,45 @@ func (s *Server) handleCreateCA(w http.ResponseWriter, r *http.Request) {
 		networks = append(networks, p)
 	}
 
-	if s.cfg.SignerFactory == nil {
+	if s.cfg.SealCAKey == nil {
 		writeErr(w, http.StatusServiceUnavailable,
-			"this server is not configured to create certificate authorities")
+			"this server has no key vault, so it cannot create a certificate authority")
 		return
 	}
-	signer, err := s.cfg.SignerFactory(r.Context(), req.SignerRef)
+
+	// The key is GENERATED HERE, not supplied.
+	//
+	// This endpoint used to take a `signer_ref`, which meant an operator placed
+	// a key file somewhere and passed its path — the caller chose the custody,
+	// and rotation had a manual step that could be got wrong silently. Now the
+	// control plane makes the keypair and seals it in the vault, so a rotation
+	// is one API call and the key never exists outside it.
+	//
+	// The curve comes from the network, not the request: nebula refuses a
+	// certificate whose curve differs from its signer's, so a CA on the wrong
+	// curve is one that can never sign for its own network.
+	var net *store.Network
+	if err := s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		net, err = tx.GetNetwork(ctx, networkID)
+		return err
+	}); err != nil {
+		s.notFoundOr(w, err, "network")
+		return
+	}
+	curve, err := ca.ParseCurve(net.Curve)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("signer_ref: %v", err))
+		s.log.Error("network has an unparseable curve", "network", networkID, "curve", net.Curve)
+		writeErr(w, http.StatusInternalServerError, "could not create certificate authority")
 		return
 	}
+	caPub, caPriv, err := ca.GenerateCAKey(curve)
+	if err != nil {
+		s.log.Error("generate CA key failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "could not create certificate authority")
+		return
+	}
+	signer := ca.NewMemorySigner(curve, caPub, caPriv)
 	defer signer.Close()
 
 	now := time.Now()
@@ -1262,10 +1294,19 @@ func (s *Server) handleCreateCA(w http.ResponseWriter, r *http.Request) {
 
 	row := store.CA{
 		NetworkID: networkID, Name: req.Name, Fingerprint: fingerprint,
-		CertPEM: string(pem), SignerRef: req.SignerRef, Curve: signer.Curve().String(),
+		CertPEM: string(pem), Curve: signer.Curve().String(),
 		NotBefore: caCert.NotBefore(), NotAfter: caCert.NotAfter(),
 	}
 	err = s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		// Sealed in the same transaction as the row that references it: a key
+		// stored by a transaction that rolled back is ciphertext nothing points
+		// at, and a CA row without its key is one that can never sign.
+		ref, err := s.cfg.SealCAKey(ctx, tx, networkID,
+			cert.MarshalSigningPrivateKeyToPEM(curve, caPriv))
+		if err != nil {
+			return err
+		}
+		row.SignerRef = ref
 		if err := tx.CreateCA(ctx, &row); err != nil {
 			return err
 		}
@@ -1790,45 +1831,4 @@ func containsStr(haystack []string, needle string) bool {
 		}
 	}
 	return false
-}
-
-// writeNetworkIdentity generates a network identity keypair and stores the
-// private half.
-//
-// Named after the network ID rather than the network's uuid or slug: the id is
-// derived from the key, so the file name cannot disagree with its contents, and
-// a directory of these is self-describing without the database.
-//
-// Mode 0600, and the passphrase if one is configured — the same treatment the CA
-// key gets, because the consequence is comparable: this key cannot mint a
-// certificate, but anyone holding it can convince a JOINING machine that their
-// control plane is this network.
-func (s *Server) writeNetworkIdentity() ([]byte, string, error) {
-	pub, priv, err := ca.GenerateNetworkIdentity()
-	if err != nil {
-		return nil, "", err
-	}
-	networkID, err := ca.NetworkIDFor(pub)
-	if err != nil {
-		return nil, "", err
-	}
-
-	if err := os.MkdirAll(s.cfg.NetworkKeyDir, 0o700); err != nil {
-		return nil, "", err
-	}
-	path := filepath.Join(s.cfg.NetworkKeyDir, "network-"+networkID+".key")
-	if err := os.WriteFile(path, ca.MarshalNetworkIdentityPEM(priv), 0o600); err != nil {
-		return nil, "", err
-	}
-
-	passphrase, err := ca.CAKeyPassphrase()
-	if err != nil {
-		return nil, "", err
-	}
-	if len(passphrase) > 0 {
-		if err := ca.EncryptKeyFile(path, passphrase); err != nil {
-			return nil, "", err
-		}
-	}
-	return pub, "file://" + path, nil
 }

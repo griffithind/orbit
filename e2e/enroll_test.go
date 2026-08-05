@@ -42,7 +42,9 @@ import (
 	"github.com/griffithind/orbit/internal/mesh"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/notify"
+	"github.com/griffithind/orbit/internal/secrets"
 	"github.com/griffithind/orbit/internal/store"
+	"github.com/griffithind/orbit/internal/vault"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -65,6 +67,10 @@ type harness struct {
 	server  *httptest.Server
 	netID   uuid.UUID
 	netName string
+
+	// vault is this deployment's key store. Every private key the control plane
+	// holds is sealed in it — there is no file path any more.
+	vault *vault.Vault
 
 	// netSlug and networkID are this network's two immutable references: the
 	// directory name on every machine, and the verifiable ID a joining machine
@@ -125,6 +131,23 @@ func setupCurve(t *testing.T, curve cert.Curve) *harness {
 	t.Cleanup(st.Close)
 
 	h := &harness{t: t, store: st, curve: curve, membershipDevices: map[string]*device.Identity{}}
+
+	// The vault, exactly as `orbitd bootstrap` and `orbitd serve` build it.
+	// There is no other key path: every private key this control plane holds is
+	// sealed in Postgres under the KEK.
+	//
+	// Init once per database — the KEK is deployment-wide — so every harness
+	// after the first opens the existing one.
+	t.Setenv("ORBIT_KEK_PASSPHRASE", "e2e-deployment-passphrase")
+	if h.vault, err = vault.Open(ctx, st); err != nil {
+		if !errors.Is(err, store.ErrNoKEK) {
+			t.Fatalf("open the key vault: %v", err)
+		}
+		if h.vault, err = vault.Init(ctx, st); err != nil {
+			t.Fatalf("initialise the key vault: %v", err)
+		}
+	}
+
 	h.bootstrap(t)
 	return h
 }
@@ -134,16 +157,12 @@ func setupCurve(t *testing.T, curve cert.Curve) *harness {
 func (h *harness) bootstrap(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	dir := t.TempDir()
 
 	caPub, caPriv, err := ca.GenerateCAKey(h.curve)
 	if err != nil {
 		t.Fatalf("generate ca key: %v", err)
 	}
-	h.caKey = filepath.Join(dir, "ca.key")
-	if err := os.WriteFile(h.caKey, cert.MarshalSigningPrivateKeyToPEM(h.curve, caPriv), 0o600); err != nil {
-		t.Fatalf("write ca key: %v", err)
-	}
+	caKeyPEM := cert.MarshalSigningPrivateKeyToPEM(h.curve, caPriv)
 
 	signer := ca.NewMemorySigner(h.curve, caPub, caPriv)
 	now := time.Now()
@@ -167,8 +186,17 @@ func (h *harness) bootstrap(t *testing.T) {
 	h.token = token
 	h.netName = "e2e-" + uuid.NewString()[:8]
 
+	identityPub, identityPriv, err := ca.GenerateNetworkIdentity()
+	if err != nil {
+		t.Fatalf("generate network identity: %v", err)
+	}
+
 	err = h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		identityPub, identityRef := h.writeNetworkIdentity(t, dir)
+		identityRef, err := h.vault.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil,
+			ca.MarshalNetworkIdentityPEM(identityPriv))
+		if err != nil {
+			return err
+		}
 		net := store.Network{
 			Name:              h.netName,
 			CIDRs:             []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
@@ -181,13 +209,17 @@ func (h *harness) bootstrap(t *testing.T) {
 		if err := tx.CreateNetwork(ctx, &net); err != nil {
 			return err
 		}
+		caRef, err := h.vault.PutTx(ctx, tx, secrets.KindCASigning, &net.ID, caKeyPEM)
+		if err != nil {
+			return err
+		}
 		h.netID = net.ID
 		h.netSlug = net.Slug
 		h.networkID = net.NetworkID
 
 		caRow := store.CA{
 			NetworkID: net.ID, Name: "e2e-ca", Fingerprint: fingerprint,
-			CertPEM: string(caPEM), SignerRef: "file://" + h.caKey,
+			CertPEM: string(caPEM), SignerRef: caRef,
 			Curve:     h.curve.String(),
 			NotBefore: caCert.NotBefore(), NotAfter: caCert.NotAfter(),
 		}
@@ -210,7 +242,7 @@ func (h *harness) bootstrap(t *testing.T) {
 		}
 		h.roleID = role.ID
 
-		_, err := tx.CreateAPIToken(ctx, "e2e", tokenHash, []string{"*"}, nil)
+		_, err = tx.CreateAPIToken(ctx, "e2e", tokenHash, []string{"*"}, nil)
 		return err
 	})
 	if err != nil {
@@ -228,18 +260,20 @@ func (h *harness) bootstrap(t *testing.T) {
 func (h *harness) serve(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 	})
 
 	srv := api.New(h.store, svc, api.Config{
-		NetworkKeyDir: t.TempDir(),
-		Agent:         &api.AgentListener{NetworkID: h.netID},
-		SignerFactory: ca.FileSignerFactory,
+		Agent:               &api.AgentListener{NetworkID: h.netID},
+		SignerFactory:       h.vault.SignerFactory(),
+		SealNetworkIdentity: h.sealNetworkIdentity,
+		SealCAKey:           h.sealCAKey,
 		// Off by default in the harness: most tests enroll many hosts in a
 		// tight loop from one address, which is exactly what the limiter is
 		// meant to stop. TestEnrollmentIsRateLimited opts back in.
@@ -264,16 +298,16 @@ func (h *harness) serve(t *testing.T, nebulaPort int) *httptest.Server {
 func (h *harness) serveOverlay(t *testing.T, n *nebulaNode, port, nebulaPort int) string {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 	})
 	handler := api.New(h.store, svc, api.Config{
-		NetworkKeyDir: t.TempDir(),
-		Agent:         &api.AgentListener{NetworkID: h.netID},
+		Agent: &api.AgentListener{NetworkID: h.netID},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()
 
 	ln, err := n.svc.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -292,18 +326,18 @@ func (h *harness) serveOverlay(t *testing.T, n *nebulaNode, port, nebulaPort int
 func (h *harness) serveOverlayWithPush(t *testing.T, n *nebulaNode, port, nebulaPort int, notifier *notify.Notifier) string {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 	})
 	handler := api.New(h.store, svc, api.Config{
-		NetworkKeyDir: t.TempDir(),
-		Agent:         &api.AgentListener{NetworkID: h.netID},
-		Notifier:      notifier,
-		MaxWatchers:   1000,
+		Agent:       &api.AgentListener{NetworkID: h.netID},
+		Notifier:    notifier,
+		MaxWatchers: 1000,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()
 
 	ln, err := n.svc.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -330,16 +364,16 @@ func overlayHTTPClient(n *nebulaNode) *http.Client {
 func (h *harness) serveRateLimited(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 	})
 	srv := api.New(h.store, svc, api.Config{
-		NetworkKeyDir: t.TempDir(),
-		EnrollLimit:   api.LimiterConfig{PerMinute: 6, Burst: 6, GlobalPerMinute: 600, GlobalBurst: 200},
+		EnrollLimit: api.LimiterConfig{PerMinute: 6, Burst: 6, GlobalPerMinute: 600, GlobalBurst: 200},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	mux := http.NewServeMux()
@@ -906,8 +940,16 @@ type membershipSpec struct {
 	RoleID       string
 	IsLighthouse bool
 	IsRelay      bool
-	StaticAddrs  []string
-	Tags         []string
+	// StaticAddrs are the machine's PUBLIC addresses, with ports, in the form
+	// nebula renders. The helper splits them: the host part becomes the device's
+	// public address and the port is left to the membership, which is where
+	// migration 0019 put each half.
+	StaticAddrs []string
+	Tags        []string
+
+	// advertisePort is derived from StaticAddrs by createHost, not set by a
+	// caller.
+	advertisePort int
 }
 
 // createHost produces a membership the way the product now does it: an operator
@@ -965,13 +1007,29 @@ func (h *harness) createHost(t *testing.T, baseURL string, spec membershipSpec, 
 		t.Fatalf("read %s after join: status %d", spec.Name, status)
 	}
 
-	if spec.IsLighthouse || spec.IsRelay || len(spec.StaticAddrs) > 0 || len(spec.Tags) > 0 {
+	// The addresses go on the DEVICE, before the topology PATCH — a membership
+	// cannot become a lighthouse while its machine has nowhere to be reached.
+	if len(spec.StaticAddrs) > 0 {
+		hosts, ports := splitHostPorts(t, spec.StaticAddrs)
+		var dev wire.DeviceResponse
+		if status := h.adminReq(t, http.MethodPatch,
+			baseURL+"/v1/devices/"+joined.DeviceID+"/addrs",
+			wire.SetDeviceAddrsRequest{PublicAddrs: hosts}, &dev); status != http.StatusOK {
+			t.Fatalf("set public addrs on %s: status %d", spec.Name, status)
+		}
+		// A port that differs from the bound one is what advertise_port is for.
+		if len(ports) > 0 && ports[0] != 0 {
+			spec.advertisePort = ports[0]
+		}
+	}
+
+	if spec.IsLighthouse || spec.IsRelay || len(spec.Tags) > 0 || spec.advertisePort != 0 {
 		req := wire.UpdateHostRequest{
 			IsLighthouse: &spec.IsLighthouse,
 			IsRelay:      &spec.IsRelay,
 		}
-		if len(spec.StaticAddrs) > 0 {
-			req.StaticAddrs = &spec.StaticAddrs
+		if spec.advertisePort != 0 {
+			req.AdvertisePort = &spec.advertisePort
 		}
 		if len(spec.Tags) > 0 {
 			req.Tags = &spec.Tags
@@ -1007,25 +1065,48 @@ func testDeviceKey(t *testing.T) []byte {
 	return id.PublicKey()
 }
 
-// writeNetworkIdentity generates a network identity keypair and writes the
-// private half where the control plane will look for it.
+// sealNetworkIdentity is what POST /v1/networks uses to store the identity key
+// it generates. Wired the way orbitd wires it, so the tests exercise the real
+// path rather than a shortcut around it.
+func (h *harness) sealNetworkIdentity(ctx context.Context, tx *store.Tx, plaintext []byte) (string, error) {
+	return h.vault.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil, plaintext)
+}
+
+// stubSignerRef is a well-formed vault reference for CA rows that are staged
+// directly in the database and never asked to sign.
 //
-// A real file, unlike the store package's own tests, because these exercise the
-// PROOF: a join signs a challenge with this key, and the agent verifies it
-// against the network ID. Faking the ref would test everything about the scheme
-// except the part that makes it worth having.
+// A real reference rather than a placeholder string: `file://` is no longer a
+// scheme anything accepts, and a row carrying one would be testing that the
+// resolver rejects garbage rather than whatever the case is actually about.
+const stubSignerRef = "db://00000000-0000-0000-0000-000000000001"
+
+// sealCAKey is what POST /v1/cas uses to store the signing key it generates.
+func (h *harness) sealCAKey(ctx context.Context, tx *store.Tx, networkID uuid.UUID, plaintext []byte) (string, error) {
+	return h.vault.PutTx(ctx, tx, secrets.KindCASigning, &networkID, plaintext)
+}
+
+// splitHostPorts separates `host:port` entries into the two nouns that own them.
 //
-// Mode 0600 because LoadNetworkIdentity refuses anything looser — the same
-// refusal the CA key gets, and one this harness would otherwise trip over.
-func (h *harness) writeNetworkIdentity(t *testing.T, dir string) ([]byte, string) {
+// The host is the machine's public address (a device fact) and the port is which
+// nebula instance answers there (a membership fact). Tests still write the
+// joined form because that is what a reader recognises from nebula's
+// static_host_map; this is where it comes apart.
+func splitHostPorts(t *testing.T, entries []string) (hosts []string, ports []int) {
 	t.Helper()
-	pub, priv, err := ca.GenerateNetworkIdentity()
-	if err != nil {
-		t.Fatalf("generate network identity: %v", err)
+	for _, e := range entries {
+		host, port, err := net.SplitHostPort(e)
+		if err != nil {
+			// No port: the whole thing is a host.
+			hosts = append(hosts, e)
+			ports = append(ports, 0)
+			continue
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil {
+			t.Fatalf("static addr %q has a non-numeric port", e)
+		}
+		hosts = append(hosts, host)
+		ports = append(ports, n)
 	}
-	path := filepath.Join(dir, "network-identity.key")
-	if err := os.WriteFile(path, ca.MarshalNetworkIdentityPEM(priv), 0o600); err != nil {
-		t.Fatalf("write network identity: %v", err)
-	}
-	return pub, "file://" + path
+	return hosts, ports
 }

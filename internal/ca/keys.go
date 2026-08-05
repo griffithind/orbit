@@ -91,7 +91,7 @@ func GenerateHostKey(curve cert.Curve) (pub, rawPriv []byte, err error) {
 }
 
 // memorySigner is a Signer backed by raw key bytes held in memory. It is the
-// development and test implementation; FileSigner wraps the same logic with PEM
+// development and test implementation; PEMSigner wraps the same logic with PEM
 // loading, and KMSSigner replaces it entirely in production.
 type memorySigner struct {
 	curve cert.Curve

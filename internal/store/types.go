@@ -176,8 +176,24 @@ type Membership struct {
 	Tags         []string
 	IsLighthouse bool
 	IsRelay      bool
-	StaticAddrs  []string
-	State        string
+
+	// StaticAddrs is DERIVED, not stored: the device's public addresses crossed
+	// with this membership's advertised port. Read-only — writing a machine's
+	// address means writing device.public_addrs, which fixes every network it is
+	// a lighthouse for at once.
+	//
+	// Kept on this struct because everything that renders or displays a
+	// membership wants the joined form, and computing it at each call site is
+	// how two of them come to disagree.
+	StaticAddrs []string
+
+	// AdvertisePort overrides ListenPort in StaticAddrs. Nil is the common case.
+	//
+	// It exists for port forwarding: a machine that binds 4242 but is reached on
+	// 14242 would otherwise advertise the port it binds rather than the one that
+	// reaches it, and nothing could connect.
+	AdvertisePort *int
+	State         string
 
 	// AppliedConfigEpoch and AppliedBlocklistEpoch are reported by the agent
 	// after a successful apply, not after a fetch. Convergence is measured from

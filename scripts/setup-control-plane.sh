@@ -205,7 +205,7 @@ with an admin token:
 
   docker compose run --rm -e ORBIT_TOKEN=<token> orbit membership ls
   docker compose run --rm -e ORBIT_TOKEN=<token> \
-      orbit membership set <control-plane-name> -static-addrs ${PUBLIC_IP}:4242
+      orbit device set-addrs <control-plane-name> ${PUBLIC_IP}
 
 Machines that already joined against the old address cannot receive that
 correction over an overlay they never reached; re-run 'orbit agent join' on

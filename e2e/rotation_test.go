@@ -16,7 +16,9 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/sched"
+	"github.com/griffithind/orbit/internal/secrets"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -40,7 +42,7 @@ func (h *harness) createCA(t *testing.T, ts, name string) wire.CAResponse {
 	t.Helper()
 	var ca wire.CAResponse
 	if code := h.adminPost(t, ts+"/v1/cas", wire.CreateCARequest{
-		NetworkID: h.netID.String(), Name: name, SignerRef: "file://" + h.caKey,
+		NetworkID: h.netID.String(), Name: name,
 		Networks: []string{"10.42.0.0/16"}, Groups: []string{"default"}, Days: 30,
 	}, &ca); code != http.StatusCreated {
 		t.Fatalf("create CA %s: %d", name, code)
@@ -291,7 +293,7 @@ func TestSweepRetiresExpiredCAs(t *testing.T) {
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		c := store.CA{
 			NetworkID: h.netID, Name: "long-expired", Fingerprint: uuid.NewString(),
-			CertPEM: "pem", SignerRef: "file://k", Curve: "CURVE25519",
+			CertPEM: "pem", SignerRef: stubSignerRef, Curve: "CURVE25519",
 			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-24 * time.Hour),
 			State: store.CARetiring,
 		}
@@ -352,7 +354,15 @@ func TestSweepLeavesAnExpiredActiveCAAlone(t *testing.T) {
 	err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
 		// A network of its own: ca_one_active_per_network means an expired
 		// active CA cannot be staged alongside the harness's live one.
-		identityPub, identityRef := h.writeNetworkIdentity(t, t.TempDir())
+		identityPub, identityPriv, err := ca.GenerateNetworkIdentity()
+		if err != nil {
+			return err
+		}
+		identityRef, err := h.vault.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil,
+			ca.MarshalNetworkIdentityPEM(identityPriv))
+		if err != nil {
+			return err
+		}
 		net := store.Network{
 			Name:              "expired-signer-" + uuid.NewString()[:8],
 			CIDRs:             []netip.Prefix{netip.MustParsePrefix("10.43.0.0/16")},
@@ -366,7 +376,7 @@ func TestSweepLeavesAnExpiredActiveCAAlone(t *testing.T) {
 
 		active := store.CA{
 			NetworkID: net.ID, Name: "expired-signer", Fingerprint: uuid.NewString(),
-			CertPEM: activePEM, SignerRef: "file://k", Curve: "CURVE25519",
+			CertPEM: activePEM, SignerRef: stubSignerRef, Curve: "CURVE25519",
 			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-2 * time.Hour),
 			State: store.CAActive,
 		}
@@ -377,7 +387,7 @@ func TestSweepLeavesAnExpiredActiveCAAlone(t *testing.T) {
 
 		pending := store.CA{
 			NetworkID: net.ID, Name: "expired-pending", Fingerprint: uuid.NewString(),
-			CertPEM: "pending-pem", SignerRef: "file://k", Curve: "CURVE25519",
+			CertPEM: "pending-pem", SignerRef: stubSignerRef, Curve: "CURVE25519",
 			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-2 * time.Hour),
 			State: store.CAPending,
 		}

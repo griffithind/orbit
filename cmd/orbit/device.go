@@ -20,13 +20,14 @@ import (
 // state, and asking "is it encrypted" three times and getting three answers is
 // the failure the device noun exists to remove. See docs/model.md §3.
 
-const deviceVerbs = "ls, show, block, unblock"
+const deviceVerbs = "ls, show, set-addrs, block, unblock"
 
 func deviceCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return subUsage("device",
 			"ls        list every machine this control plane knows",
 			"show      one machine: its posture, and the networks it is on",
+			"set-addrs where this machine is reachable from outside (lighthouse or relay)",
 			"block     refuse a machine everywhere on this control plane",
 			"unblock   allow a blocked machine again")
 	}
@@ -35,6 +36,8 @@ func deviceCmd(ctx context.Context, args []string) error {
 		return deviceLs(ctx, args[1:])
 	case "show":
 		return deviceShow(ctx, args[1:])
+	case "set-addrs":
+		return deviceSetAddrs(ctx, args[1:])
 	case "block":
 		return deviceBlock(ctx, args[1:], false)
 	case "unblock":
@@ -289,4 +292,93 @@ func postureSummary(p wire.DevicePosture, observed *time.Time) string {
 		return "ok"
 	}
 	return strings.Join(missing, " ")
+}
+
+// resolveDevice turns what an operator typed into a device id.
+//
+// A device uuid, or a membership NAME. The name form exists because the uuid is
+// not a handle anybody holds: an operator standing up a lighthouse knows it as
+// "lh-01", and telling them to run `orbit device ls`, find the row, and paste a
+// uuid in order to record its public address is a step that earns nothing. A
+// name resolves within the selected network and then hops to the machine, which
+// is the same hop the model makes.
+func (o *options) resolveDevice(ctx context.Context, ref string) (uuid.UUID, error) {
+	if id, err := uuid.Parse(ref); err == nil {
+		return id, nil
+	}
+	network, err := o.resolveNetwork(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	networkID, err := uuid.Parse(network.ID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	membershipID, err := o.client.ResolveHost(ctx, networkID, ref)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	m, err := o.client.GetHost(ctx, membershipID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	id, err := uuid.Parse(m.Value.DeviceID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("membership %q reports device id %q, which is not a uuid", ref, m.Value.DeviceID)
+	}
+	return id, nil
+}
+
+// deviceSetAddrs records where a machine is reachable from outside.
+//
+// On the MACHINE, not on a membership, and that is the point. A lighthouse
+// serving three networks has one public address; this sets it once and every
+// network's config epoch moves. Setting it per membership was how a partial edit
+// left half the fleet dialling somewhere nothing was listening.
+func deviceSetAddrs(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("device set-addrs", flag.ExitOnError)
+	var o options
+	o.bind(fs)
+	clear := fs.Bool("clear", false, "remove every public address, so this machine is only found by hole punching")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := o.load(); err != nil {
+		return err
+	}
+	if (fs.NArg() < 2) == !*clear {
+		return usageErrorf("usage: orbit device set-addrs <machine> <addr>...\n" +
+			"       orbit device set-addrs <machine> -clear\n\n" +
+			"<machine> is a device uuid from `orbit device ls`, or a membership name in\n" +
+			"the selected network.\n\n" +
+			"Addresses are hosts WITHOUT ports — 203.0.113.10, or a name. The port comes\n" +
+			"from each membership, because two networks on one machine cannot share one.")
+	}
+	id, err := o.resolveDevice(ctx, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	addrs := fs.Args()[1:]
+	if *clear {
+		addrs = nil
+	}
+
+	res, err := o.client.SetDeviceAddrs(ctx, id, addrs)
+	if err != nil {
+		return err
+	}
+	if o.json {
+		return emitJSON(res.Raw)
+	}
+
+	if len(addrs) == 0 {
+		fmt.Fprintf(out, "cleared the public addresses of %s\n", res.Value.ID)
+	} else {
+		fmt.Fprintf(out, "%s is reachable at %s\n", res.Value.ID, strings.Join(addrs, ", "))
+	}
+	if len(res.Value.Memberships) > 0 {
+		fmt.Fprintf(errOut, "\nEvery network this machine is on re-renders; watch it land:\n\n  orbit converge -wait 2m\n")
+	}
+	return nil
 }

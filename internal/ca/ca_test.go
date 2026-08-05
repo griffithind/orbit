@@ -454,9 +454,9 @@ func TestFileSignerMatchesMemorySigner(t *testing.T) {
 			}
 
 			pemBytes := cert.MarshalSigningPrivateKeyToPEM(curve, priv)
-			fs, err := NewFileSignerFromPEM(pemBytes)
+			fs, err := NewPEMSigner(pemBytes)
 			if err != nil {
-				t.Fatalf("NewFileSignerFromPEM: %v", err)
+				t.Fatalf("NewPEMSigner: %v", err)
 			}
 			defer fs.Close()
 
@@ -465,7 +465,7 @@ func TestFileSignerMatchesMemorySigner(t *testing.T) {
 				t.Fatalf("Public: %v", err)
 			}
 			if string(got) != string(pub) {
-				t.Fatalf("FileSigner public key does not match generated key")
+				t.Fatalf("PEMSigner public key does not match generated key")
 			}
 
 			// And it can actually mint a verifiable certificate.

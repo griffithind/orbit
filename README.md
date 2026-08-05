@@ -248,10 +248,11 @@ how long you have to restore a broken control plane before hosts stop renewing.
 For a single VM with no standby, 7 days is the right default. Twelve hours is
 not enough time to notice an outage, get to a computer, and restore a database.
 
-Size the control plane at **2 vCPU / 4 GB or better**: `orbitd` carries Nebula's
-userspace network stack and has been observed peaking at 2 GB during startup, so
-a 1 GB VM will not start. [docs/deployment.md](docs/deployment.md) §9 has the
-detail and says plainly what has and has not been measured.
+Size the control plane at **2 vCPU / 2 GB**, with Postgres sharing it. Nebula's
+userspace stack is cheap — 108 MB peak for a process running two real nodes, and
+0.36 MB of heap per additional network, both measured.
+[docs/deployment.md](docs/deployment.md) §9 has the numbers and how they were
+taken.
 
 ---
 

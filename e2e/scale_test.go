@@ -32,12 +32,13 @@ func TestMeshJoinCost(t *testing.T) {
 	const networks = 4
 
 	h := setup(t)
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: 0,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      0,
 	})
 
 	settle := func() (goroutines int, heapMB float64) {

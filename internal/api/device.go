@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/griffithind/orbit/internal/store"
@@ -146,6 +148,7 @@ func deviceResponse(d *store.Device, hosts []store.Membership) wire.DeviceRespon
 		KeyFingerprint: d.KeyFingerprint,
 		KeyBacking:     d.KeyBacking,
 		Hostname:       d.Hostname,
+		PublicAddrs:    d.PublicAddrs,
 		Blocked:        d.Blocked(),
 		BlockedAt:      d.BlockedAt,
 		BlockedReason:  d.BlockedReason,
@@ -191,6 +194,82 @@ func fmtMeta(fingerprint, reason string) []byte {
 		Fingerprint string `json:"fingerprint"`
 		Reason      string `json:"reason,omitempty"`
 	}{fingerprint, reason})
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// handleSetDeviceAddrs records where a machine is reachable from outside.
+//
+// A DEVICE endpoint, not a membership one, and that is the whole point of the
+// split in migration 0019. A machine has one public address however many
+// networks it is a lighthouse for; setting it here fixes all of them in one
+// write and bumps every affected network's config epoch.
+//
+// Before, the address lived on each membership, so a machine serving three
+// networks held it three times — and a partial edit left part of the fleet
+// dialling somewhere nothing was listening.
+func (s *Server) handleSetDeviceAddrs(w http.ResponseWriter, r *http.Request) {
+	identity := identityFrom(r.Context())
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var req wire.SetDeviceAddrsRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	for _, a := range req.PublicAddrs {
+		// Ports are refused rather than stripped. Stripping would silently
+		// discard something the caller meant, and the port they wanted is a
+		// different field on a different noun — saying so is the useful answer.
+		if _, _, err := net.SplitHostPort(a); err == nil {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+				"public_addrs entry %q carries a port. Addresses belong to the machine and "+
+					"ports to each membership — set the port with `advertise_port` on the "+
+					"membership if it differs from the bound one", a))
+			return
+		}
+		if a == "" {
+			writeErr(w, http.StatusBadRequest, "public_addrs entries cannot be empty")
+			return
+		}
+	}
+
+	var out wire.DeviceResponse
+	err := s.store.Tx(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		if err := tx.SetDevicePublicAddrs(ctx, id, req.PublicAddrs); err != nil {
+			return err
+		}
+		d, err := tx.GetDevice(ctx, id)
+		if err != nil {
+			return err
+		}
+		hosts, err := tx.DeviceHosts(ctx, id)
+		if err != nil {
+			return err
+		}
+		out = deviceResponse(d, hosts)
+		return tx.AppendAudit(ctx, store.AuditEntry{
+			ActorType: identity.Kind, ActorID: identity.Subject, ActorDisplay: identity.Display,
+			Action:     store.ActionDeviceUpdated,
+			TargetType: "device", TargetID: id.String(),
+			Meta: fmtAddrsMeta(req.PublicAddrs),
+		})
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "device")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func fmtAddrsMeta(addrs []string) []byte {
+	b, err := json.Marshal(struct {
+		PublicAddrs []string `json:"public_addrs"`
+	}{addrs})
 	if err != nil {
 		return nil
 	}

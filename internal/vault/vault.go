@@ -142,13 +142,15 @@ func (v *Vault) get(ctx context.Context, ref string, want secrets.Kind) ([]byte,
 
 // SignerFactory resolves `db://` refs into CA signers.
 //
-// Chained after ca.FileSignerFactory by the caller, so a deployment can hold
-// some keys in the vault and some on disk — which is what makes moving between
-// them a change to one row rather than a migration.
+// The only factory there is. `file://` was removed rather than deprecated: two
+// custody paths meant two sets of failure modes, two things to document, and a
+// second replica that worked or did not depending on which one a network
+// happened to use. See docs/key-custody.md.
 func (v *Vault) SignerFactory() ca.SignerFactory {
 	return func(ctx context.Context, ref string) (ca.Signer, error) {
 		if !secrets.IsRef(ref) {
-			return nil, fmt.Errorf("not a vault reference: %q", ref)
+			return nil, fmt.Errorf("%q is not a vault reference; keys are stored in the "+
+				"database and `file://` is no longer supported", ref)
 		}
 		pem, err := v.get(ctx, ref, secrets.KindCASigning)
 		if err != nil {
@@ -158,25 +160,12 @@ func (v *Vault) SignerFactory() ca.SignerFactory {
 		// paths converge on one parser. Storing a different encoding for the
 		// vault would have meant two, and a bug in either would look like a
 		// corrupt key.
-		return ca.NewFileSignerFromPEM(pem)
+		return ca.NewPEMSigner(pem)
 	}
 }
 
 // NetworkIdentity resolves a signer ref into a network identity private key.
-//
-// Handles BOTH schemes, unlike SignerFactory, which is chained. There is no
-// chaining mechanism on this path and inventing one for two cases would be more
-// machinery than the branch it replaces — and a deployment genuinely can hold
-// one network's key in the vault and another's on disk, because the ref is per
-// network.
 func (v *Vault) NetworkIdentity(ctx context.Context, ref string) (ed25519.PrivateKey, error) {
-	if !secrets.IsRef(ref) {
-		pass, err := ca.CAKeyPassphrase()
-		if err != nil {
-			return nil, err
-		}
-		return ca.LoadNetworkIdentity(ref, pass)
-	}
 	pem, err := v.get(ctx, ref, secrets.KindNetworkIdentity)
 	if err != nil {
 		return nil, err

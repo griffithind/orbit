@@ -94,18 +94,28 @@ type Config struct {
 	// tests and metric-less deployments need no branching at the call sites.
 	Metrics *metrics.Metrics
 
-	// NetworkKeyDir is where POST /v1/networks writes the identity key it
-	// generates. Empty refuses that endpoint rather than inventing a location.
+	// SealNetworkIdentity stores a new network's identity key and returns the
+	// signer ref naming it. Nil refuses POST /v1/networks.
 	//
-	// A network's ID commits to a key, so creating a network means creating a
-	// keypair and putting the private half somewhere durable — which the API
-	// server cannot guess. `orbitd bootstrap` takes an explicit path for the
-	// same reason.
+	// A function rather than a *vault.Vault, for the reason SignerFactory and
+	// PolicySource are functions: internal/api would otherwise import the vault,
+	// and every test of this package would need a database and a KEK to
+	// construct a server.
 	//
-	// THIS IS THE PART docs/key-custody.md §4.1 REPLACES. Storing the key
-	// encrypted in Postgres removes the directory, the per-replica file copy,
-	// and this field with it.
-	NetworkKeyDir string
+	// It takes the caller's transaction because the key and the network row are
+	// one fact. A key sealed by a transaction that then rolled back is
+	// ciphertext nothing references; a network without its key is a network
+	// nothing can join.
+	SealNetworkIdentity func(ctx context.Context, tx *store.Tx, plaintext []byte) (string, error)
+
+	// SealCAKey does the same for a CA signing key created by POST /v1/cas.
+	// Nil refuses that endpoint.
+	//
+	// Separate from SealNetworkIdentity because the two are different kinds of
+	// secret and the kind is authenticated into the ciphertext — one function
+	// taking a kind would let a caller pass the wrong one, which is exactly the
+	// substitution the binding exists to prevent.
+	SealCAKey func(ctx context.Context, tx *store.Tx, networkID uuid.UUID, plaintext []byte) (string, error)
 }
 
 type Server struct {
@@ -281,6 +291,10 @@ func (s *Server) adminRoutes() []route {
 		// the noun exists.
 		a("GET /v1/devices", "devices:read", s.handleListDevices),
 		a("GET /v1/devices/{id}", "devices:read", s.handleGetDevice),
+		// devices:write, not devices:block: setting where a machine is reachable
+		// is an ordinary configuration change, and a token trusted to do it must
+		// not thereby be able to cut machines off the network.
+		a("PATCH /v1/devices/{id}/addrs", "devices:write", s.handleSetDeviceAddrs),
 		a("POST /v1/devices/{id}/block", "devices:block", s.handleBlockDevice),
 		a("POST /v1/devices/{id}/unblock", "devices:block", s.handleUnblockDevice),
 		a("GET /v1/networks/{id}/convergence", "networks:read", s.handleConvergence),

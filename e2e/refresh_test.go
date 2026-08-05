@@ -31,12 +31,13 @@ import (
 func (h *harness) joinControlPlane(t *testing.T, addr string, agentPort int) (*mesh.Node, *enroll.Service) {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: freeUDPPort(t),
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      freeUDPPort(t),
 	})
 
 	node, err := mesh.Join(context.Background(), svc, mesh.Config{
@@ -220,10 +221,11 @@ func TestControlPlaneAsLighthouse(t *testing.T) {
 	ctx := context.Background()
 
 	cpPort := freeUDPPort(t)
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths: nebulacfg.DefaultPaths(), ListenPort: freeUDPPort(t),
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(), ListenPort: freeUDPPort(t),
 	})
 
 	public := fmt.Sprintf("127.0.0.1:%d", cpPort)
@@ -253,7 +255,7 @@ func TestControlPlaneAsLighthouse(t *testing.T) {
 		[]string{fmt.Sprintf("127.0.0.1:%d", lhPort)})
 
 	err = h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
-		return tx.SetHostRoles(ctx, node.MembershipID(), false, false, nil)
+		return tx.SetMembershipRoles(ctx, node.MembershipID(), false, false, nil)
 	})
 	if err != nil {
 		t.Fatalf("stand down as lighthouse: %v", err)
@@ -282,10 +284,11 @@ func TestLighthouseRoleChangesWithoutRestart(t *testing.T) {
 	cpPort := freeUDPPort(t)
 	public := fmt.Sprintf("127.0.0.1:%d", cpPort)
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths: nebulacfg.DefaultPaths(), ListenPort: freeUDPPort(t),
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(), ListenPort: freeUDPPort(t),
 	})
 
 	node, err := mesh.Join(ctx, svc, mesh.Config{
@@ -316,7 +319,7 @@ func TestLighthouseRoleChangesWithoutRestart(t *testing.T) {
 
 	no := false
 	if code := h.adminReq(t, http.MethodPatch, ts.URL+"/v1/memberships/"+node.MembershipID().String(),
-		wire.UpdateHostRequest{IsLighthouse: &no, StaticAddrs: &[]string{}}, nil); code != http.StatusOK {
+		wire.UpdateHostRequest{IsLighthouse: &no}, nil); code != http.StatusOK {
 		t.Fatalf("stand down via API: %d", code)
 	}
 

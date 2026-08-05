@@ -38,17 +38,19 @@ import (
 func (h *harness) servePublicOnly(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 	})
 	srv := api.New(h.store, svc, api.Config{
-		NetworkKeyDir:      t.TempDir(),
-		SignerFactory:      ca.FileSignerFactory,
-		DisableEnrollLimit: true,
+		SignerFactory:       h.vault.SignerFactory(),
+		SealNetworkIdentity: h.sealNetworkIdentity,
+		SealCAKey:           h.sealCAKey,
+		DisableEnrollLimit:  true,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	mux := http.NewServeMux()
@@ -120,12 +122,13 @@ func TestControlPlaneJoinsOverlay(t *testing.T) {
 	// API on agentPort and accepting nothing else inbound.
 	const agentPort = 8446
 	cpPort := freeUDPPort(t)
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	cpSvc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: cpPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      cpPort,
 	})
 
 	node, err := mesh.Join(context.Background(), cpSvc, mesh.Config{
@@ -153,8 +156,7 @@ func TestControlPlaneJoinsOverlay(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	api.New(h.store, cpSvc, api.Config{
-		NetworkKeyDir: t.TempDir(),
-		Agent:         &api.AgentListener{NetworkID: node.NetworkID()},
+		Agent: &api.AgentListener{NetworkID: node.NetworkID()},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil))).AgentRoutes(mux)
 
 	srv := &http.Server{Handler: mux}
@@ -220,12 +222,13 @@ func TestEnrollmentAdvertisesLiveReplicas(t *testing.T) {
 	h := setup(t)
 	ctx := context.Background()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: freeUDPPort(t),
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      freeUDPPort(t),
 	})
 
 	srv := api.New(h.store, svc, api.Config{DisableEnrollLimit: true},

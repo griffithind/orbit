@@ -478,11 +478,11 @@ func membershipSet(ctx context.Context, args []string) error {
 	var o options
 	o.bind(fs)
 	var (
-		role       = fs.String("role", "", "role name or uuid")
-		tags       = fs.String("tags", "", "comma separated tags, replacing the current set")
-		lighthouse = fs.Bool("lighthouse", false, "act as a lighthouse; requires static addresses")
-		relay      = fs.Bool("relay", false, "act as a relay")
-		static     = fs.String("static-addrs", "", "comma separated public host:port entries")
+		role          = fs.String("role", "", "role name or uuid")
+		tags          = fs.String("tags", "", "comma separated tags, replacing the current set")
+		lighthouse    = fs.Bool("lighthouse", false, "act as a lighthouse; the machine needs public addresses (`orbit device set-addrs`)")
+		relay         = fs.Bool("relay", false, "act as a relay")
+		advertisePort = fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound port (NAT forwarding). The ADDRESSES are a machine fact: `orbit device set-addrs`")
 	)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -502,7 +502,7 @@ func membershipSet(ctx context.Context, args []string) error {
 	supplied := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
 	if len(supplied) == 0 || onlyGlobals(supplied) {
-		return usageErrorf("nothing to change; set -role, -tags, -lighthouse, -relay, or -static-addrs")
+		return usageErrorf("nothing to change; set -role, -tags, -lighthouse, -relay, or -advertise-port")
 	}
 
 	network, err := o.resolveNetwork(ctx)
@@ -537,9 +537,8 @@ func membershipSet(ctx context.Context, args []string) error {
 	if supplied["relay"] {
 		req.IsRelay = relay
 	}
-	if supplied["static-addrs"] {
-		s := csvList(*static)
-		req.StaticAddrs = &s
+	if supplied["advertise-port"] {
+		req.AdvertisePort = advertisePort
 	}
 
 	o.announce(fmt.Sprintf("Updating host %q in network %s", fs.Arg(0), network.Name))

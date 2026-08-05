@@ -191,6 +191,7 @@ api_token(id, name, token_hash, scopes[], expires_at, last_used_at, revoked_at)
 audit_log(id, actor_type, actor_id, action, target, meta, source_ip, at)
 
 device(id, key_fingerprint, public_key, key_backing, hostname,
+       public_addrs[],
        blocked_at, blocked_reason, first_seen_at, last_seen_at,
        os, os_version, kernel, arch, agent_version, nebula_version,
        facts_observed_at,
@@ -205,7 +206,7 @@ network(id, name, slug, cidrs[], cert_version, curve, cert_ttl,
  ├─ control_plane(network_id, membership_id, addr, agent_port, last_seen_at)
  ├─ blocklist_entry(id, network_id, fingerprint, reason, epoch, not_after)
  └─ membership(id, network_id, device_id, name, role_id, tags[],
-         is_lighthouse, is_relay, static_addrs[], state,
+         is_lighthouse, is_relay, listen_port, advertise_port, state,
          applied_config_epoch, applied_blocklist_epoch)
      ├─ membership_address(network_id, membership_id, addr)
      ├─ certificate(id, membership_id, ca_id, fingerprint, pem, cert_version,
@@ -216,8 +217,12 @@ network(id, name, slug, cidrs[], cert_version, curve, cert_ttl,
 ```
 
 **`device` is the only table not under `network`, and that is the point.** A
-machine is one thing across every network it joins, so its posture, its OS and
-the moment it was last heard from are recorded once. A `membership` is that
+machine is one thing across every network it joins, so its posture, its OS, its
+public addresses and the moment it was last heard from are recorded once.
+`public_addrs` is the clearest case: a machine that is a lighthouse on three
+networks has one public address, and what other machines dial is derived as
+`device.public_addrs × membership.advertise_port ?? listen_port` at render time
+rather than stored three times and edited three times. A `membership` is that
 machine *in* a network — `device_id` is `NOT NULL`, so the row's definition is
 literally "this device, in that network". See [model.md](model.md), which is the
 shorter document and the one to read first.

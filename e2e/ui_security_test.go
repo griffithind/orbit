@@ -55,13 +55,14 @@ func (h *harness) serveWeb(t *testing.T) *uiHarness {
 func (h *harness) serveWebWith(t *testing.T, notifier *notify.Notifier) *uiHarness {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: 4242,
-		EnrollURL:  "https://orbit.example.com/enroll/v1/enroll",
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      4242,
+		EnrollURL:       "https://orbit.example.com/enroll/v1/enroll",
 	})
 
 	ui, err := web.New(h.store, svc, web.StoreSessions(h.store), web.Config{Notifier: notifier},

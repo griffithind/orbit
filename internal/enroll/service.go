@@ -708,7 +708,7 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		}
 		if th.IsLighthouse {
 			lighthouses = append(lighthouses, nebulacfg.Lighthouse{
-				VpnAddr: th.Addrs[0], StaticAddrs: th.StaticAddrs,
+				VpnAddr: th.Addrs[0], StaticAddrs: th.StaticAddrs(s.cfg.ListenPort),
 			})
 		}
 		if th.IsRelay {
@@ -952,9 +952,37 @@ type SelfIssued struct {
 type SelfIssueRoles struct {
 	IsLighthouse bool
 	IsRelay      bool
-	// StaticAddrs are the public "host:port" entries other hosts dial. A
-	// lighthouse without them is unreachable and is skipped when rendering.
-	StaticAddrs []string
+	// PublicAddrs are the public HOSTS other machines dial — no ports. The port
+	// comes from this membership's listen port, because two networks on one
+	// machine cannot share one; see migration 0019.
+	//
+	// A lighthouse without them is unreachable and is skipped when rendering.
+	PublicAddrs []string
+
+	// AdvertisePort overrides the bound port, for a control plane behind port
+	// forwarding.
+	AdvertisePort *int
+
+	// ListenPort is the UDP port this node's nebula actually binds.
+	//
+	// It has to be recorded, not inferred. What other machines dial is derived
+	// as (device public address) : (this membership's port), so a membership
+	// with no listen_port falls through to the network's default and then the
+	// control plane's — and a control plane started on a port that is neither
+	// would advertise itself somewhere nothing is listening. That used to be
+	// invisible because static_addrs stored the "host:port" string whole.
+	ListenPort int
+}
+
+// listenPortOf returns the port to record, or nil when the caller did not say.
+//
+// Zero is not a port, and storing it would mean "bind port 0" to every reader.
+func listenPortOf(roles SelfIssueRoles) *int {
+	if roles.ListenPort <= 0 {
+		return nil
+	}
+	p := roles.ListenPort
+	return &p
 }
 
 // deviceKey is the control plane's own device public key, DER SPKI.
@@ -1013,11 +1041,26 @@ func (s *Service) SelfIssue(ctx context.Context, networkID uuid.UUID, addr netip
 				Tags:         []string{"orbit-control-plane"},
 				IsLighthouse: roles.IsLighthouse,
 				IsRelay:      roles.IsRelay,
-				StaticAddrs:  roles.StaticAddrs,
 				DeviceID:     &self.ID,
+				// Both ports, so this membership's advertised address can be
+				// derived without reaching for a default that is not this
+				// node's. Nil AdvertisePort is the common case and means "the
+				// port we bind is the port that reaches us".
+				ListenPort:    listenPortOf(roles),
+				AdvertisePort: roles.AdvertisePort,
 			}
 			if err := tx.CreateHost(ctx, host); err != nil {
 				return fmt.Errorf("create control plane host: %w", err)
+			}
+			// The addresses go on the DEVICE, because that is what they are:
+			// this machine's public addresses, shared by every network it
+			// lights. Seeded only at creation, like the roles above — after
+			// that the record is the source of truth and `orbit device
+			// set-addrs` is how it changes.
+			if len(roles.PublicAddrs) > 0 {
+				if err := tx.SetDevicePublicAddrs(ctx, self.ID, roles.PublicAddrs); err != nil {
+					return fmt.Errorf("seed control plane public addresses: %w", err)
+				}
 			}
 			created = true
 		case err != nil:

@@ -613,25 +613,35 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		}
 
 		lighthouse, relay := host.IsLighthouse, host.IsRelay
-		static := host.StaticAddrs
+		advertisePort := host.AdvertisePort
 		if req.IsLighthouse != nil {
 			lighthouse = *req.IsLighthouse
 		}
 		if req.IsRelay != nil {
 			relay = *req.IsRelay
 		}
-		if req.StaticAddrs != nil {
-			static = *req.StaticAddrs
+		if req.AdvertisePort != nil {
+			advertisePort = req.AdvertisePort
 		}
 
-		// A lighthouse nobody can reach is worse than none: every host keeps
+		// A lighthouse nobody can reach is worse than none: every machine keeps
 		// dialling it. Refuse rather than publish an address list that cannot
 		// work.
-		if lighthouse && len(static) == 0 {
-			return errLighthouseNeedsAddr
+		//
+		// The addresses live on the DEVICE now, so this reads the machine rather
+		// than the membership — and the fix an operator is pointed at is
+		// `orbit device set-addrs`, which repairs every network at once.
+		if lighthouse && len(host.StaticAddrs) == 0 && req.AdvertisePort == nil {
+			dev, err := tx.GetDevice(ctx, *host.DeviceID)
+			if err != nil {
+				return err
+			}
+			if len(dev.PublicAddrs) == 0 {
+				return errLighthouseNeedsAddr
+			}
 		}
 
-		if err := tx.SetHostRoles(ctx, membershipID, lighthouse, relay, static); err != nil {
+		if err := tx.SetMembershipRoles(ctx, membershipID, lighthouse, relay, advertisePort); err != nil {
 			return err
 		}
 		if req.RoleID != nil || req.Tags != nil {
@@ -1679,6 +1689,9 @@ func membershipResponse(h *store.Membership, net *store.Network) wire.Membership
 	}
 	if h.RoleID != nil {
 		out.RoleID = h.RoleID.String()
+	}
+	if h.DeviceID != nil {
+		out.DeviceID = h.DeviceID.String()
 	}
 	if h.ListenPort != nil {
 		out.ListenPort = *h.ListenPort

@@ -33,3 +33,12 @@ func (c *Client) UnblockDevice(ctx context.Context, id uuid.UUID) (Result[wire.D
 	return send[wire.DeviceResponse](ctx, c, http.MethodPost,
 		"/v1/devices/"+id.String()+"/unblock", nil, nil)
 }
+
+// SetDeviceAddrs records where a machine is reachable from outside.
+//
+// One call fixes every network the machine is a lighthouse for, because the
+// address belongs to the machine and only the port belongs to a membership.
+func (c *Client) SetDeviceAddrs(ctx context.Context, id uuid.UUID, addrs []string) (Result[wire.DeviceResponse], error) {
+	return send[wire.DeviceResponse](ctx, c, http.MethodPatch,
+		"/v1/devices/"+id.String()+"/addrs", nil, wire.SetDeviceAddrsRequest{PublicAddrs: addrs})
+}

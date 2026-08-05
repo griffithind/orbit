@@ -233,11 +233,17 @@ func TestHostResponseCarriesWhatPatchAccepts(t *testing.T) {
 
 	// The round trip: change one field, write back everything the response gave
 	// us, and lose nothing.
+	//
+	// static_addrs is deliberately NOT written back — it is derived from the
+	// device's public addresses now, and read-only here. That it SURVIVES a
+	// membership PATCH that never mentions it is the property worth asserting:
+	// a field that could be silently dropped by a read-modify-write is exactly
+	// what moving it to the device was meant to prevent.
 	tags := []string{"edge", "retagged"}
-	roleID, static := got.RoleID, got.StaticAddrs
+	roleID := got.RoleID
 	var updated wire.MembershipResponse
 	if code := h.adminReq(t, http.MethodPatch, ts.URL+"/v1/memberships/"+created.ID,
-		wire.UpdateHostRequest{Tags: &tags, RoleID: &roleID, StaticAddrs: &static},
+		wire.UpdateHostRequest{Tags: &tags, RoleID: &roleID},
 		&updated); code != http.StatusOK {
 		t.Fatalf("patch host: %d", code)
 	}
@@ -245,7 +251,7 @@ func TestHostResponseCarriesWhatPatchAccepts(t *testing.T) {
 		t.Errorf("read-modify-write dropped the role: %q", updated.RoleID)
 	}
 	if len(updated.StaticAddrs) != 1 {
-		t.Errorf("read-modify-write dropped static_addrs: %v", updated.StaticAddrs)
+		t.Errorf("a membership PATCH lost the machine's derived address: %v", updated.StaticAddrs)
 	}
 	if fmt.Sprint(updated.Tags) != fmt.Sprint(tags) {
 		t.Errorf("tags = %v, want %v", updated.Tags, tags)

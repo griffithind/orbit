@@ -35,12 +35,13 @@ import (
 func (h *harness) servePublicWithHealth(t *testing.T, nebulaPort int) *httptest.Server {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 	})
 	srv := api.New(h.store, svc, api.Config{DisableEnrollLimit: true},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -60,12 +61,13 @@ func (h *harness) servePublicWithHealth(t *testing.T, nebulaPort int) *httptest.
 func (h *harness) servePublicWithNotifier(t *testing.T, nebulaPort int, notifier *notify.Notifier) *httptest.Server {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 	})
 	// No Metrics, deliberately: that is the configuration in which the old
 	// implementation had nowhere to read the live state from and answered with

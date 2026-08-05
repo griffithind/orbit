@@ -33,15 +33,15 @@ func (t *Tx) CreateHost(ctx context.Context, h *Membership) error {
 
 	err := t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.membership (network_id, name, role_id, tags,
-		                        is_lighthouse, is_relay, static_addrs, state,
+		                        is_lighthouse, is_relay, state,
 		                        listen_port, tun_dev, config_mode, config_overrides,
-		                        device_id)
+		                        device_id, advertise_port)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, created_at`,
 		h.NetworkID, h.Name, h.RoleID, nonNil(h.Tags),
-		h.IsLighthouse, h.IsRelay, nonNil(h.StaticAddrs), h.State,
+		h.IsLighthouse, h.IsRelay, h.State,
 		h.ListenPort, nullIfEmpty(h.TunDev), nullIfEmpty(h.ConfigMode), h.Overrides,
-		h.DeviceID,
+		h.DeviceID, h.AdvertisePort,
 	).Scan(&h.ID, &h.CreatedAt)
 	if err != nil {
 		return mapErr(err, "create host")
@@ -82,7 +82,24 @@ func (t *Tx) CreateHostAllocating(ctx context.Context, net *Network, h *Membersh
 }
 
 const membershipCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
-	h.is_lighthouse, h.is_relay, h.static_addrs, h.state,
+	h.is_lighthouse, h.is_relay,
+	-- static_addrs, DERIVED FOR DISPLAY. The device holds the addresses and the
+	-- membership holds the port, so what other machines dial is the cross
+	-- product — computed rather than stored, because storing it is what let a
+	-- machine's public address drift between the networks it serves.
+	--
+	-- This is NOT the value agents receive. TopologyHost.StaticAddrs is, and it
+	-- resolves one level more: the control plane's own default port, a flag this
+	-- process cannot see. When all three levels here are NULL the address is
+	-- emitted WITHOUT a port rather than with a guessed one — the same honesty
+	-- the web view already applies to ListenPortLabel, and better than printing
+	-- :4242 as fact when orbitd was started with something else.
+	coalesce(array(
+	    SELECT CASE WHEN p.port IS NULL THEN pa ELSE pa || ':' || p.port::text END
+	      FROM unnest(d.public_addrs) AS pa,
+	           LATERAL (SELECT coalesce(h.advertise_port, h.listen_port, n.listen_port) AS port) p
+	), '{}'),
+	h.state,
 	h.applied_config_epoch, h.applied_blocklist_epoch,
 	d.last_seen_at, coalesce(d.nebula_version, ''), coalesce(d.agent_version, ''),
 	h.created_at, coalesce(r.name, ''),
@@ -90,7 +107,7 @@ const membershipCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
 	               ORDER BY a.addr), '{}'),
 	h.listen_port, coalesce(h.tun_dev, ''), coalesce(h.config_mode, ''),
 	h.config_overrides, h.restart_required_epoch, h.addr_changed_at,
-	h.device_id`
+	h.device_id, h.advertise_port`
 
 // membershipFrom is the FROM clause membershipCols is written against; the two travel
 // together because membershipCols selects the role name out of it.
@@ -108,6 +125,7 @@ const membershipCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
 // constraint exists to remove.
 const membershipFrom = `FROM orbit.membership h
 	JOIN orbit.device d ON d.id = h.device_id
+	JOIN orbit.network n ON n.id = h.network_id
 	LEFT JOIN orbit.role r ON (r.network_id, r.id) = (h.network_id, h.role_id)`
 
 func scanHost(row interface{ Scan(...any) error }) (*Membership, error) {
@@ -118,7 +136,7 @@ func scanHost(row interface{ Scan(...any) error }) (*Membership, error) {
 		&h.LastSeenAt, &h.NebulaVersion, &h.AgentVersion, &h.CreatedAt,
 		&h.RoleName, &h.Addrs,
 		&h.ListenPort, &h.TunDev, &h.ConfigMode, &h.Overrides,
-		&h.RestartRequiredEpoch, &h.AddrChangedAt, &h.DeviceID)
+		&h.RestartRequiredEpoch, &h.AddrChangedAt, &h.DeviceID, &h.AdvertisePort)
 	if err != nil {
 		return nil, err
 	}
@@ -294,8 +312,10 @@ func (t *Tx) ListHosts(ctx context.Context, f MembershipFilter) (MembershipPage,
 	}
 
 	rows, err := t.tx.Query(ctx,
-		`SELECT `+membershipCols+` `+membershipFrom+`
-		  JOIN orbit.network n ON n.id = h.network_id`+membershipFilterWhere+`
+		// membershipFrom already joins orbit.network as n — membershipCols needs
+		// it to resolve the port default — so the filter's own join would be a
+		// duplicate alias.
+		`SELECT `+membershipCols+` `+membershipFrom+membershipFilterWhere+`
 		   AND ($7::text IS NULL OR (h.name, h.id) > ($7, $8::uuid))
 		 ORDER BY h.name, h.id
 		 LIMIT $9`,
@@ -870,26 +890,30 @@ func (t *Tx) LatestCertificate(ctx context.Context, membershipID uuid.UUID) (*Ce
 	return c, nil
 }
 
-// SetHostRoles updates a host's data-plane roles and advertised addresses.
+// SetMembershipRoles updates a membership's data-plane roles and advertised port.
 //
 // Bumps the config epoch when anything changed, because these are exactly the
-// fields other hosts render into their static_host_map and relay list. A change
-// nobody is told about is a lighthouse half the mesh still dials and half does
-// not.
-func (t *Tx) SetHostRoles(ctx context.Context, membershipID uuid.UUID, isLighthouse, isRelay bool, staticAddrs []string) error {
+// fields other machines render into their static_host_map and relay list. A
+// change nobody is told about is a lighthouse half the mesh still dials and half
+// does not.
+//
+// The ADDRESSES are not here. They belong to the device — see migration 0019 —
+// so changing where a machine is reachable is SetDevicePublicAddrs, which fixes
+// every network it serves at once instead of one membership at a time.
+func (t *Tx) SetMembershipRoles(ctx context.Context, membershipID uuid.UUID, isLighthouse, isRelay bool, advertisePort *int) error {
 	var networkID uuid.UUID
 	err := t.tx.QueryRow(ctx, `
 		UPDATE orbit.membership
-		   SET is_lighthouse = $2, is_relay = $3, static_addrs = $4
+		   SET is_lighthouse = $2, is_relay = $3, advertise_port = $4
 		 WHERE id = $1
-		   AND (is_lighthouse, is_relay, static_addrs) IS DISTINCT FROM ($2, $3, $4::text[])
+		   AND (is_lighthouse, is_relay, advertise_port) IS DISTINCT FROM ($2, $3, $4::int)
 		RETURNING network_id`,
-		membershipID, isLighthouse, isRelay, nonNil(staticAddrs)).Scan(&networkID)
+		membershipID, isLighthouse, isRelay, advertisePort).Scan(&networkID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // unchanged; no epoch bump, no needless config churn
 		}
-		return mapErr(err, "set host roles")
+		return mapErr(err, "set membership roles")
 	}
 	_, err = t.BumpEpoch(ctx, networkID, EpochConfig)
 	return err

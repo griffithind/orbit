@@ -45,12 +45,13 @@ import (
 func servePolicy(t *testing.T, h *harness, nebulaPort int, doc []byte) *httptest.Server {
 	t.Helper()
 
-	registry := ca.NewRegistry(ca.FileSignerFactory)
+	registry := ca.NewRegistry(h.vault.SignerFactory())
 	t.Cleanup(func() { registry.Close() })
 
 	svc := enroll.NewService(h.store, registry, enroll.Config{
-		Paths:      nebulacfg.DefaultPaths(),
-		ListenPort: nebulaPort,
+		NetworkIdentity: h.vault.NetworkIdentity,
+		Paths:           nebulacfg.DefaultPaths(),
+		ListenPort:      nebulaPort,
 		Policy: func(ctx context.Context, tx *store.Tx, networkID uuid.UUID) ([]byte, []policy.Membership, error) {
 			page, err := tx.ListHosts(ctx, store.MembershipFilter{
 				NetworkID: networkID, Limit: store.MembershipPageMax,
@@ -73,11 +74,12 @@ func servePolicy(t *testing.T, h *harness, nebulaPort int, doc []byte) *httptest
 	})
 
 	srv := api.New(h.store, svc, api.Config{
-		NetworkKeyDir:      t.TempDir(),
-		Agent:              &api.AgentListener{NetworkID: h.netID},
-		SignerFactory:      ca.FileSignerFactory,
-		DisableEnrollLimit: true,
-		TrustForwardedFor:  true,
+		Agent:               &api.AgentListener{NetworkID: h.netID},
+		SignerFactory:       h.vault.SignerFactory(),
+		SealNetworkIdentity: h.sealNetworkIdentity,
+		SealCAKey:           h.sealCAKey,
+		DisableEnrollLimit:  true,
+		TrustForwardedFor:   true,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ts := httptest.NewServer(srv.Handler())
