@@ -73,9 +73,6 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 	if n.CertTTL == 0 {
 		n.CertTTL = 24 * time.Hour
 	}
-	if n.ConfigMode == "" {
-		n.ConfigMode = ConfigModeAuthoritative
-	}
 	if len(n.Overrides) == 0 {
 		n.Overrides = []byte(`{}`)
 	}
@@ -119,12 +116,12 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 
 	err = t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.network (slug, name, cidrs, cert_version, curve, cert_ttl,
-		                           listen_port, config_mode, config_overrides,
+		                           listen_port, config_overrides,
 		                           identity_public_key, network_id, identity_signer_ref)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, config_epoch, blocklist_epoch, created_at`,
 		n.Slug, n.Name, nonNil(n.CIDRs), n.CertVer, n.Curve, n.CertTTL,
-		n.ListenPort, n.ConfigMode, n.Overrides,
+		n.ListenPort, n.Overrides,
 		n.IdentityPublicKey, n.NetworkID, n.IdentitySignerRef,
 	).Scan(&n.ID, &n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt)
 	if err != nil {
@@ -134,14 +131,14 @@ func (t *Tx) CreateNetwork(ctx context.Context, n *Network) error {
 }
 
 const networkCols = `id, slug, name, cidrs, cert_version, curve, cert_ttl,
-	listen_port, config_mode, config_overrides, firewall_source,
+	listen_port, config_overrides, firewall_source,
 	config_epoch, blocklist_epoch, created_at,
 	identity_public_key, network_id, identity_signer_ref`
 
 func scanNetwork(row interface{ Scan(...any) error }) (*Network, error) {
 	var n Network
 	err := row.Scan(&n.ID, &n.Slug, &n.Name, &n.CIDRs, &n.CertVer, &n.Curve, &n.CertTTL,
-		&n.ListenPort, &n.ConfigMode, &n.Overrides, &n.FirewallSource,
+		&n.ListenPort, &n.Overrides, &n.FirewallSource,
 		&n.ConfigEpoch, &n.BlocklistEpoch, &n.CreatedAt,
 		&n.IdentityPublicKey, &n.NetworkID, &n.IdentitySignerRef)
 	if err != nil {
@@ -250,7 +247,7 @@ func (t *Tx) UpdateNetworkName(ctx context.Context, id uuid.UUID, name string) (
 // Nothing is marked when nothing changed. A PATCH that restates the current
 // values must not restart a fleet, which is the same argument RoleChange.Changed
 // makes about waking one.
-func (t *Tx) UpdateNetworkInstanceDefaults(ctx context.Context, id uuid.UUID, listenPort *int, configMode *string) (*Network, error) {
+func (t *Tx) UpdateNetworkInstanceDefaults(ctx context.Context, id uuid.UUID, listenPort *int) (*Network, error) {
 	before, err := t.GetNetwork(ctx, id)
 	if err != nil {
 		return nil, err
@@ -260,16 +257,11 @@ func (t *Tx) UpdateNetworkInstanceDefaults(ctx context.Context, id uuid.UUID, li
 	if listenPort != nil {
 		port = listenPort
 	}
-	mode := before.ConfigMode
-	if configMode != nil {
-		mode = *configMode
-	}
-
 	after, err := scanNetwork(t.tx.QueryRow(ctx, `
-		UPDATE orbit.network SET listen_port = $2, config_mode = $3
+		UPDATE orbit.network SET listen_port = $2
 		 WHERE id = $1
-		   AND (listen_port, config_mode) IS DISTINCT FROM ($2::int, $3::text)
-		RETURNING `+networkCols, id, port, mode))
+		   AND listen_port IS DISTINCT FROM $2::int
+		RETURNING `+networkCols, id, port))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return before, nil // unchanged; no epoch bump, no fleet-wide restart
 	}

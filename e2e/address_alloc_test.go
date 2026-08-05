@@ -171,10 +171,6 @@ func TestHostReportsItsInstanceResources(t *testing.T) {
 	if code := h.adminReq(t, http.MethodGet, ts.URL+"/v1/memberships/"+created.ID, nil, &got); code != http.StatusOK {
 		t.Fatalf("get host: %d", code)
 	}
-	if got.ConfigMode == "" {
-		t.Error("config_mode is empty, so a reader cannot tell whether the reported " +
-			"policy is complete or a lower bound")
-	}
 	if got.TunDev == "" {
 		t.Error("tun_dev is empty, so nothing says which interface this host takes")
 	}

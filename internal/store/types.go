@@ -37,23 +37,6 @@ const (
 	// claim the method works. Adding one back is an ALTER and a handler, the
 	// same work it always was.
 	MethodCode = "code"
-
-	// Config layouts. These mirror the CHECK constraints in
-	// migrations/0008_instance_resources.sql.
-	//
-	// ConfigModeAuthoritative renders one complete nebula.yml that nebula is
-	// pointed at directly. ConfigModeFragment renders config.d/50-orbit.yml into
-	// a directory nebula merges, which is the escape hatch for a host that
-	// genuinely carries operator-authored nebula configuration.
-	//
-	// The difference is not cosmetic and is why the mode is stored rather than
-	// inferred: nebula merges a config DIRECTORY with mergo.WithAppendSlice, so
-	// firewall rules across files CONCATENATE. In fragment mode Orbit can
-	// neither see nor remove a rule an operator wrote, so any policy it reports
-	// is a lower bound. In authoritative mode the rendered file is the whole
-	// policy. A caller has to be able to tell which of those it is being handed.
-	ConfigModeAuthoritative = "authoritative"
-	ConfigModeFragment      = "fragment"
 )
 
 type Network struct {
@@ -103,9 +86,6 @@ type Network struct {
 	// Per network rather than per host because the collision this can actually
 	// prevent is between two networks sharing a machine; see the migration.
 	ListenPort *int
-
-	// ConfigMode is the layout new hosts of this network inherit.
-	ConfigMode string
 
 	// FirewallSource is where this network's firewall rules come from:
 	// FirewallSourceRole (per-role rules, the default and what every network
@@ -202,7 +182,7 @@ type Membership struct {
 	AppliedConfigEpoch    int64
 	AppliedBlocklistEpoch int64
 
-	// ListenPort, TunDev, ConfigMode, and Overrides are this instance's
+	// ListenPort, TunDev, and Overrides are this instance's
 	// resources. A zero value inherits the network's, and the network's zero
 	// value inherits the control plane's default — one rule at three levels, so
 	// a deployment that sets none behaves exactly as it did before they existed.
@@ -212,7 +192,6 @@ type Membership struct {
 	// share a UDP port or a tun device.
 	ListenPort *int
 	TunDev     string
-	ConfigMode string
 	Overrides  []byte
 
 	// RestartRequiredEpoch names a generation this membership must RESTART for rather

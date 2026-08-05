@@ -72,10 +72,7 @@ import (
 
 // Render modes. These mirror store.ConfigMode* and the CHECK constraint in
 // migrations/0008_instance_resources.sql.
-const (
-	ModeAuthoritative = "authoritative"
-	ModeFragment      = "fragment"
-)
+const ()
 
 // Paths locates the files the agent manages alongside the configuration. They
 // are absolute paths on the managed host, not on the control plane.
@@ -204,10 +201,6 @@ type Lighthouse struct {
 
 // Input is everything needed to render a host's configuration.
 type Input struct {
-	// Mode selects the layout. Empty means ModeAuthoritative, which is the
-	// default for new hosts.
-	Mode string
-
 	Paths Paths
 
 	// AmLighthouse and AmRelay come from the host record.
@@ -442,16 +435,6 @@ func (m staticHostMap) MarshalYAML() (any, error) {
 	return node, nil
 }
 
-const fragmentHeader = `# Managed by Orbit. Do not edit.
-#
-# This file is regenerated on every configuration change and overwritten
-# without warning. Put local settings in another file in this directory
-# (for example 00-base.yml); nebula merges them all.
-#
-# Note that nebula APPENDS list values across files rather than replacing
-# them, so firewall rules here are added to yours, not substituted for them.
-`
-
 const authoritativeHeader = `# Managed by Orbit. Do not edit.
 #
 # This is the COMPLETE nebula configuration for this network. Nebula is
@@ -490,31 +473,22 @@ func Render(in Input) ([]byte, error) {
 	if in.Paths.CA == "" || in.Paths.Cert == "" || in.Paths.Key == "" {
 		return nil, fmt.Errorf("incomplete paths: %+v", in.Paths)
 	}
-	if in.Mode == "" {
-		in.Mode = ModeAuthoritative
-	}
-	if in.Mode != ModeAuthoritative && in.Mode != ModeFragment {
-		return nil, fmt.Errorf("unknown config mode %q: want %q or %q",
-			in.Mode, ModeAuthoritative, ModeFragment)
-	}
 	if in.ListenHost == "" {
 		// "::" listens on both families where the platform supports it, which
 		// is what a v2-certificate mesh needs.
 		in.ListenHost = "::"
 	}
-	if in.Mode == ModeAuthoritative {
-		if in.LighthouseInterval == 0 {
-			in.LighthouseInterval = defaultLighthouseInterval
-		}
-		if in.TunMTU == 0 {
-			in.TunMTU = defaultTunMTU
-		}
-		if in.LogLevel == "" {
-			in.LogLevel = defaultLogLevel
-		}
-		if in.LogFormat == "" {
-			in.LogFormat = defaultLogFormat
-		}
+	if in.LighthouseInterval == 0 {
+		in.LighthouseInterval = defaultLighthouseInterval
+	}
+	if in.TunMTU == 0 {
+		in.TunMTU = defaultTunMTU
+	}
+	if in.LogLevel == "" {
+		in.LogLevel = defaultLogLevel
+	}
+	if in.LogFormat == "" {
+		in.LogFormat = defaultLogFormat
 	}
 
 	fw := in.Firewall
@@ -522,7 +496,7 @@ func Render(in Input) ([]byte, error) {
 		fw = DefaultFirewall()
 	}
 	if in.Policy != nil {
-		fw = FirewallFromPolicy(*in.Policy, in.Mode)
+		fw = FirewallFromPolicy(*in.Policy)
 	}
 
 	shm := staticHostMap{}
@@ -624,9 +598,5 @@ func Render(in Input) ([]byte, error) {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 
-	header := authoritativeHeader
-	if in.Mode == ModeFragment {
-		header = fragmentHeader
-	}
-	return append([]byte(header), body...), nil
+	return append([]byte(authoritativeHeader), body...), nil
 }

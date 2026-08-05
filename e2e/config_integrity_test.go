@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"encoding/base64"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -217,4 +218,82 @@ func networkKeyOf(t *testing.T, dir string) []byte {
 		t.Fatalf("the pinned network key is not base64: %v", err)
 	}
 	return key
+}
+
+// Editing nebula.yml does not change what nebula runs. It is not read.
+//
+// This is the property the signature exists to deliver, and it is stronger than
+// the one above. TestAnEditedConfigIsDetected shows the agent NOTICES an edit;
+// this shows the edit was never load-bearing. Nebula is handed the verified
+// bytes in memory (Applier.VerifiedConfig), so nebula.yml is a record for people
+// to read — root can rewrite it, and can SIGHUP nebula, and nothing changes.
+//
+// Before this, the agent verified the file and nebula independently re-read it,
+// which made verification advisory: an edit between the check and the read won.
+func TestEditingTheConfigFileChangesNothing(t *testing.T) {
+	h := setup(t)
+	ts := h.serve(t, freeUDPPort(t))
+
+	host := h.createAndEnroll(t, ts, "inlined", "10.42.81.4", false, false, nil)
+	layout := agent.DefaultLayout(host.dir)
+	applier := &agent.Applier{
+		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	key := networkKeyOf(t, host.dir)
+
+	before, err := applier.VerifiedConfig(key, host.id)
+	if err != nil {
+		t.Fatalf("verified config: %v", err)
+	}
+	// The material is INLINED, not referenced: nebula is given no path it could
+	// follow to a file somebody else controls.
+	if !strings.Contains(before, "BEGIN NEBULA CERTIFICATE") {
+		t.Error("the certificate was not inlined; nebula would read it from a path")
+	}
+	if strings.Contains(before, layout.Paths.Key) {
+		t.Errorf("the config still names the key file %s", layout.Paths.Key)
+	}
+
+	// Root rewrites nebula.yml, thoroughly.
+	if err := os.WriteFile(layout.ConfigPath(),
+		[]byte("listen:\n  port: 1\nfirewall:\n  inbound: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := applier.VerifiedConfig(key, host.id)
+	if err != nil {
+		t.Fatalf("verified config after the edit: %v", err)
+	}
+	if after != before {
+		t.Error("editing nebula.yml changed what nebula would load; it must not be read at all")
+	}
+}
+
+// Rewriting the SIGNED original is refused rather than run.
+//
+// nebula.yml is inert, so the only file worth attacking is nebula.signed.yml —
+// and that one is checked against the control plane's signature before a single
+// byte reaches nebula.
+func TestATamperedSignedConfigIsNeverLoaded(t *testing.T) {
+	h := setup(t)
+	ts := h.serve(t, freeUDPPort(t))
+
+	host := h.createAndEnroll(t, ts, "tampered-source", "10.42.81.9", false, false, nil)
+	layout := agent.DefaultLayout(host.dir)
+	applier := &agent.Applier{
+		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	key := networkKeyOf(t, host.dir)
+
+	signed := readFile(t, layout.SignedConfigPath())
+	if err := os.WriteFile(layout.SignedConfigPath(),
+		[]byte(signed+"\n# forged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := applier.VerifiedConfig(key, host.id); err == nil {
+		t.Fatal("a tampered signed configuration was handed to nebula")
+	}
 }

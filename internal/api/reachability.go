@@ -110,11 +110,11 @@ func (s *Server) handleReachability(w http.ResponseWriter, r *http.Request) {
 			Management: s.managementFloor(ctx, tx, net.ID),
 		}
 
-		srcRules, err := compiledRules(c, doc, src.ID, net.ConfigMode)
+		srcRules, err := compiledRules(c, doc, src.ID)
 		if err != nil {
 			return err
 		}
-		dstRules, err := compiledRules(c, doc, dst.ID, net.ConfigMode)
+		dstRules, err := compiledRules(c, doc, dst.ID)
 		if err != nil {
 			return err
 		}
@@ -138,11 +138,6 @@ func (s *Server) handleReachability(w http.ResponseWriter, r *http.Request) {
 		})
 		out.Allowed = out.Outbound.Allowed && out.Inbound.Allowed
 
-		if net.ConfigMode == store.ConfigModeFragment {
-			out.Note = "this network is in fragment mode, where nebula concatenates " +
-				"firewall lists and Orbit cannot remove an operator's rules: the outbound " +
-				"half is Orbit's allow-all, and policy is enforced at the receiver."
-		}
 		return nil
 	})
 	if err != nil {
@@ -165,12 +160,12 @@ type tables struct{ inbound, outbound []fwmatch.Rule }
 
 // compiledRules compiles one host and hands the result back through nebula's
 // parser, so the server matches with exactly the code the agent matches with.
-func compiledRules(c policy.Compiler, doc policy.Document, membershipID, mode string) (tables, error) {
+func compiledRules(c policy.Compiler, doc policy.Document, membershipID string) (tables, error) {
 	rs, err := c.Membership(doc, membershipID)
 	if err != nil {
 		return tables{}, fmt.Errorf("%w: %s", errPolicyWouldNotCompile, err.Error())
 	}
-	yamlDoc, err := nebulacfg.FirewallYAML(nebulacfg.FirewallFromPolicy(rs, mode))
+	yamlDoc, err := nebulacfg.FirewallYAML(nebulacfg.FirewallFromPolicy(rs))
 	if err != nil {
 		return tables{}, err
 	}

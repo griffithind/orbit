@@ -162,17 +162,12 @@ func TestValidateNetwork(t *testing.T) {
 	}
 }
 
-// TestLayoutModes pins the contract the control-plane renderer and the systemd
+// TestLayoutPaths pins the contract the control-plane renderer and the systemd
 // units are both written against.
-func TestLayoutModes(t *testing.T) {
+func TestLayoutPaths(t *testing.T) {
 	auth := DefaultLayout("/var/lib/orbit/prod")
 	if got := auth.ConfigPath(); got != "/var/lib/orbit/prod/nebula.yml" {
-		t.Errorf("authoritative config = %q", got)
-	}
-	// The FILE, not a directory: pointing nebula at a directory is what brings
-	// the merge back.
-	if got := auth.NebulaConfigArg(); got != "/var/lib/orbit/prod/nebula.yml" {
-		t.Errorf("authoritative -config = %q", got)
+		t.Errorf("config = %q", got)
 	}
 	if auth.Network != "prod" {
 		t.Errorf("network = %q, want prod", auth.Network)
@@ -182,14 +177,6 @@ func TestLayoutModes(t *testing.T) {
 	}
 	if got := auth.PreviousDir(); got != "/var/lib/orbit/prod/.previous" {
 		t.Errorf("previous dir = %q", got)
-	}
-
-	frag := FragmentLayout("/var/lib/orbit/prod")
-	if got := frag.ConfigPath(); got != "/var/lib/orbit/prod/config.d/50-orbit.yml" {
-		t.Errorf("fragment config = %q", got)
-	}
-	if got := frag.NebulaConfigArg(); got != "/var/lib/orbit/prod/config.d" {
-		t.Errorf("fragment -config = %q, want the directory", got)
 	}
 }
 

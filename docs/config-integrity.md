@@ -205,6 +205,35 @@ that number. With this, it reports the divergence instead.
 
 ---
 
+## 7a. Nebula never reads the file
+
+Everything above detects an edit. This prevents one.
+
+The agent used to verify the config and write it, and nebula would then
+**independently re-read that file** (`config.C.Load`). Verification was therefore
+advisory: an edit between the check and the read won, root could `SIGHUP` nebula
+without the agent involved, and stopping the agent stopped the checking.
+
+Nebula is now given no path. `Applier.VerifiedConfig` reads the signed original,
+verifies it against the pinned network key, inlines `pki.ca`, `pki.cert` and
+`pki.key` as PEM, and hands nebula the bytes (`config.C.LoadString`) — on every
+start and every reload. `nebula.yml` on disk is a record for people to read.
+Editing it changes nothing, because nothing reads it.
+
+This is what `internal/mesh` already did for the control plane. The agent was the
+half still reading a file.
+
+`TestEditingTheConfigFileChangesNothing` asserts the file is inert;
+`TestATamperedSignedConfigIsNeverLoaded` asserts the signed original is checked
+before a byte reaches nebula.
+
+**The ceiling is unchanged.** Root can still stop the agent and run its own
+nebula with the key file, replace the agent binary, or ptrace it. What this
+guarantees is narrower and worth having: *Orbit's nebula only ever runs
+control-plane-authored configuration.*
+
+---
+
 ## 8. What this unlocks
 
 Item 2 of this refactor asked whether the control plane ↔ agent channel should
@@ -260,6 +289,7 @@ When no host in a fleet is unpinned, the branch can go.
 
 | Piece | Code |
 |---|---|
+| Nebula loads verified bytes, never a path | `agent.Applier.VerifiedConfig`, `agent.Embedded.Config` |
 | Envelope, canonical encoding, sign and verify | `internal/ca/configsig.go` |
 | Control plane signs every generation | `enroll.Service.signMaterial` |
 | The pinned key, write-once | `agent.State.NetworkKey` |

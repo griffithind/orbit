@@ -127,9 +127,15 @@ func Explain(eng *Embedded, layout Layout, req ExplainRequest) (Explanation, err
 		ex.Handshaking = !ex.TunnelUp
 	}
 
-	// Policy, from the configuration nebula is loaded with rather than from
-	// anything Orbit believes it sent.
-	inbound, outbound, err := fwmatch.LoadRules(eng.ConfigArg)
+	// Policy, from the configuration nebula is actually loaded with rather than
+	// from anything Orbit believes it sent — and from the same verified source
+	// nebula got, not from the file on disk, or `orbit why` would explain a
+	// config that is not running.
+	yamlCfg, err := eng.Config()
+	if err != nil {
+		return ex, err
+	}
+	inbound, outbound, err := fwmatch.LoadRulesFromString(yamlCfg)
 	if err != nil {
 		return ex, err
 	}

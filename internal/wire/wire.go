@@ -66,12 +66,6 @@ type EnrollResponse struct {
 	RenewAfter time.Time `json:"renew_after"`
 	NotAfter   time.Time `json:"not_after"`
 
-	// ConfigMode and NetworkSlug tell the agent which layout Config is and which
-	// directory it belongs in — see StateResponse for both. They are on the
-	// enrollment response as well because the very first write happens here,
-	// before any state poll, and an agent that guessed would create the wrong
-	// layout once and then keep both.
-	ConfigMode  string `json:"config_mode,omitempty"`
 	NetworkSlug string `json:"network_slug,omitempty"`
 
 	// ConfigSig proves the control plane produced Config and CABundle.
@@ -149,15 +143,6 @@ type StateResponse struct {
 	// The second condition is what keeps an agent that is still catching up from
 	// restarting into a configuration it has not installed yet.
 	RestartRequiredEpoch int64 `json:"restart_required_epoch,omitempty"`
-
-	// ConfigMode is "authoritative" (Config is a complete nebula.yml, and nebula
-	// is pointed at that file) or "fragment" (Config is a 50-orbit.yml merged
-	// with whatever else is in the config directory).
-	//
-	// On the wire rather than inferred from the file's shape, because the agent
-	// has to decide WHERE to write it and what to point nebula at, and guessing
-	// from content is how a host ends up with both layouts on disk.
-	ConfigMode string `json:"config_mode,omitempty"`
 
 	// NetworkSlug is the immutable per-network directory name under
 	// /var/lib/orbit. Sent so the agent never has to derive a path from a value
@@ -420,7 +405,6 @@ type MembershipResponse struct {
 	// level supplied the value is visible from the network response.
 	ListenPort int    `json:"listen_port,omitempty"`
 	TunDev     string `json:"tun_dev,omitempty"`
-	ConfigMode string `json:"config_mode,omitempty"`
 
 	// RestartRequiredEpoch is the generation this host must restart nebula for,
 	// and 0 means none ever has been. A value greater than
@@ -688,9 +672,6 @@ type CreateNetworkRequest struct {
 	// ones, which is the entire reason this is per network rather than a
 	// process-wide flag.
 	ListenPort int `json:"listen_port,omitempty"`
-
-	// ConfigMode is "authoritative" (default) or "fragment"; see NetworkResponse.
-	ConfigMode string `json:"config_mode,omitempty"`
 }
 
 // UpdateNetworkRequest edits a network in place.
@@ -703,8 +684,7 @@ type UpdateNetworkRequest struct {
 	// Name is the display label, and the only identifier that may be edited.
 	Name *string `json:"name,omitempty"`
 
-	ListenPort *int    `json:"listen_port,omitempty"`
-	ConfigMode *string `json:"config_mode,omitempty"`
+	ListenPort *int `json:"listen_port,omitempty"`
 
 	// FirewallSource switches the network between "role" and "policy".
 	//
@@ -957,13 +937,6 @@ type NetworkResponse struct {
 
 	// ListenPort is 0 when the network defers to the control plane's default.
 	ListenPort int `json:"listen_port,omitempty"`
-
-	// ConfigMode is what hosts of this network get by default. "authoritative"
-	// means Orbit renders the complete nebula configuration and what it reports
-	// about a host's policy is the whole of it; "fragment" means Orbit renders
-	// one file into a directory nebula merges, so any policy it reports is a
-	// lower bound.
-	ConfigMode string `json:"config_mode,omitempty"`
 
 	// FirewallSource is where this network's firewall rules come from: "role"
 	// (per-role firewall_rules, the default) or "policy" (the compiled network

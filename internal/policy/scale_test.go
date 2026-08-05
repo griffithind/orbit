@@ -72,7 +72,6 @@ func tiered(tiers int) policy.Document {
 func renderWith(t *testing.T, rs policy.Ruleset) int {
 	t.Helper()
 	out, err := nebulacfg.Render(nebulacfg.Input{
-		Mode:       nebulacfg.ModeAuthoritative,
 		Paths:      nebulacfg.PathsFor("scale"),
 		Policy:     &rs,
 		ListenPort: 4242,
@@ -153,8 +152,7 @@ func TestRenderedPolicyIsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := nebulacfg.Render(nebulacfg.Input{
-		Mode: nebulacfg.ModeAuthoritative, Paths: nebulacfg.PathsFor("scale"),
+	first, err := nebulacfg.Render(nebulacfg.Input{Paths: nebulacfg.PathsFor("scale"),
 		Policy: &rs, ListenPort: 4242,
 	})
 	if err != nil {
@@ -165,8 +163,7 @@ func TestRenderedPolicyIsByteIdentical(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out, err := nebulacfg.Render(nebulacfg.Input{
-			Mode: nebulacfg.ModeAuthoritative, Paths: nebulacfg.PathsFor("scale"),
+		out, err := nebulacfg.Render(nebulacfg.Input{Paths: nebulacfg.PathsFor("scale"),
 			Policy: &again, ListenPort: 4242,
 		})
 		if err != nil {

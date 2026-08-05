@@ -1796,7 +1796,6 @@ func networkResponse(n *store.Network) wire.NetworkResponse {
 		NetworkID: n.NetworkID,
 		ID:        n.ID.String(), Slug: n.Slug, Name: n.Name, CIDRs: cidrs,
 		Curve: n.Curve, CertVersion: int(n.CertVer), CertTTL: n.CertTTL.String(),
-		ConfigMode:     n.ConfigMode,
 		FirewallSource: n.FirewallSource,
 		ConfigEpoch:    n.ConfigEpoch, BlocklistEpoch: n.BlocklistEpoch,
 	}

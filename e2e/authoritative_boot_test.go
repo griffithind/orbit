@@ -65,9 +65,6 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	// The control plane has to say which layout it rendered and where it
 	// belongs. An agent that had to guess would create one layout on its first
 	// write and discover the other on its first poll, leaving both on disk.
-	if resp.ConfigMode == "" {
-		t.Error("the enrollment response does not say which config mode this is")
-	}
 	if resp.NetworkSlug == "" {
 		t.Error("the enrollment response does not carry the network slug, so the agent " +
 			"has to derive its directory from something that can change")
@@ -112,7 +109,7 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	}
 
 	c := config.NewC(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := c.Load(layout.NebulaConfigArg()); err != nil {
+	if err := c.Load(layout.ConfigPath()); err != nil {
 		t.Fatalf("nebula could not load the authoritative config: %v\n%s", err, written)
 	}
 

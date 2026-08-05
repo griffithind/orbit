@@ -11,7 +11,6 @@ import (
 
 func authoritativeInput() nebulacfg.Input {
 	return nebulacfg.Input{
-		Mode:       nebulacfg.ModeAuthoritative,
 		Paths:      nebulacfg.PathsFor("prod"),
 		ListenPort: 4242,
 		TunDev:     "prod",
@@ -81,40 +80,6 @@ func TestAuthoritativeRendersEverythingNebulaNeeds(t *testing.T) {
 	if !strings.Contains(string(raw), "COMPLETE nebula configuration") {
 		t.Error("the header does not say the file is complete, which is the one thing a " +
 			"reader needs to know about it")
-	}
-}
-
-// TestFragmentModeStaysAFragment.
-//
-// Fragment mode must NOT emit the keys authoritative mode fills in. 50-orbit.yml
-// sorts after a conventional 00-base.yml, so a scalar Orbit emits WINS the
-// merge: emitting a log level or an MTU there would silently overwrite the
-// operator's own, which is the opposite of what a fragment is for.
-func TestFragmentModeStaysAFragment(t *testing.T) {
-	in := authoritativeInput()
-	in.Mode = nebulacfg.ModeFragment
-	in.Paths = nebulacfg.DefaultPaths()
-
-	raw, err := nebulacfg.Render(in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc := decodeDoc(t, raw)
-
-	if _, ok := doc["logging"]; ok {
-		t.Error("fragment mode emitted logging, which would override the operator's 00-base.yml")
-	}
-	if mtu := doc["tun"].(map[string]any)["mtu"]; mtu != nil {
-		t.Errorf("fragment mode emitted tun.mtu = %v", mtu)
-	}
-	if iv := doc["lighthouse"].(map[string]any)["interval"]; iv != nil {
-		t.Errorf("fragment mode emitted lighthouse.interval = %v", iv)
-	}
-	// tun.dev IS emitted in both modes: it is what keeps two networks on one
-	// machine from claiming the same device, and that problem exists in fragment
-	// mode too.
-	if doc["tun"].(map[string]any)["dev"] != "prod" {
-		t.Error("fragment mode dropped tun.dev")
 	}
 }
 
@@ -237,16 +202,6 @@ func TestTunDevSuggestionAvoidsTheSilentLinuxCollision(t *testing.T) {
 	}
 	if a != nebulacfg.TunDevSuggestion("production-cluster-eu") {
 		t.Error("the suggestion is not deterministic, so every render would look like a change")
-	}
-}
-
-// TestUnknownModeIsRefused. A typo in the mode must not silently pick one:
-// the two produce different files in different places.
-func TestUnknownModeIsRefused(t *testing.T) {
-	in := authoritativeInput()
-	in.Mode = "authoritive"
-	if _, err := nebulacfg.Render(in); err == nil {
-		t.Error("a misspelled mode rendered something")
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +26,8 @@ import (
 //
 // The assertion is the race detector. There is nothing to check afterwards:
 // either the reads and writes are ordered or they are not.
+var errNoConfig = errors.New("no verified configuration")
+
 func TestStatusIsSafeWhileTheAgentRuns(t *testing.T) {
 	dir := t.TempDir()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -36,7 +37,7 @@ func TestStatusIsSafeWhileTheAgentRuns(t *testing.T) {
 	// makes this constructible without a control plane.
 	nl := &networkLoop{
 		loop:   &agent.Loop{Layout: agent.DefaultLayout(dir), Log: quiet},
-		engine: &agent.Embedded{ConfigArg: filepath.Join(dir, "config.yml"), Log: quiet},
+		engine: &agent.Embedded{Config: func() (string, error) { return "", errNoConfig }, Log: quiet},
 		log:    quiet,
 	}
 	slot := &netSlot{dir: dir}
@@ -342,14 +343,14 @@ func TestReachabilityRendersBothEndsEvenWhenOneSettlesIt(t *testing.T) {
 // somewhere of its own gets the socket beside it — otherwise a test or a
 // container binds into a /var/lib/orbit that may not exist.
 func TestSocketRootFollowsAnExplicitDirectory(t *testing.T) {
-	empty, mode := "", "authoritative"
-	none := &dirFlags{dir: &empty, network: &empty, mode: &mode}
+	empty := ""
+	none := &dirFlags{dir: &empty, network: &empty}
 	if got := socketRoot(none, "/opt/orbit"); got != "/opt/orbit" {
 		t.Errorf("with no -dir, socket root = %q, want the -root value", got)
 	}
 
 	explicit := "/tmp/stack/prod"
-	df := &dirFlags{dir: &explicit, network: &empty, mode: &mode}
+	df := &dirFlags{dir: &explicit, network: &empty}
 	if got := socketRoot(df, agent.DefaultRoot); got != "/tmp/stack" {
 		t.Errorf("with -dir, socket root = %q, want the directory's parent", got)
 	}

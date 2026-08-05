@@ -43,23 +43,19 @@ func WarnInstanceCollisions(l Layout, log *slog.Logger) {
 			continue
 		}
 		peerDir := filepath.Join(root, e.Name())
-		// Try both modes: the sibling network is configured independently and
-		// may not have made the same choice this one did.
-		for _, mode := range []ConfigMode{ConfigAuthoritative, ConfigFragment} {
-			theirs, ok := readHostSettings(LayoutFor(peerDir, mode).ConfigPath())
-			if !ok {
-				continue
-			}
-			if mine.port != 0 && mine.port == theirs.port {
-				log.Warn("another network on this host listens on the same UDP port; "+
-					"only one of the two nebula processes will bind it",
-					"network", l.Network, "otherNetwork", e.Name(), "port", mine.port)
-			}
-			if mine.dev != "" && mine.dev == theirs.dev {
-				log.Warn("another network on this host uses the same tun device name; "+
-					"only one of the two nebula processes will create it",
-					"network", l.Network, "otherNetwork", e.Name(), "device", mine.dev)
-			}
+		theirs, ok := readHostSettings(DefaultLayout(peerDir).ConfigPath())
+		if !ok {
+			continue
+		}
+		if mine.port != 0 && mine.port == theirs.port {
+			log.Warn("another network on this host listens on the same UDP port; "+
+				"only one of the two nebula processes will bind it",
+				"network", l.Network, "otherNetwork", e.Name(), "port", mine.port)
+		}
+		if mine.dev != "" && mine.dev == theirs.dev {
+			log.Warn("another network on this host uses the same tun device name; "+
+				"only one of the two nebula processes will create it",
+				"network", l.Network, "otherNetwork", e.Name(), "device", mine.dev)
 		}
 	}
 }

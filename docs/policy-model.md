@@ -188,9 +188,8 @@ tag  role=db         ->  group  _o.t.role.db
 ```
 
 The prefix is reserved. Orbit must reject operator-supplied group names
-beginning with `_o.` — in `ModeAuthoritative` Orbit owns the file, but in
-`ModeFragment` an operator writes rules Orbit cannot see, and a collision there
-would silently widen access.
+beginning with `_o.`: Orbit owns the whole configuration, so a collision between
+a name it generates and one an operator chose would silently widen access.
 
 **Key/value structure buys nothing at the enforcement layer.** Nebula groups are
 opaque strings with no comparison operators. ZeroTier's tags are numeric and

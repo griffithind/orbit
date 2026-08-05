@@ -30,15 +30,15 @@ import (
 // apply sequence, the revert guard, verification — is unchanged and untested
 // code paths are not introduced alongside the ones that already work.
 type Embedded struct {
-	// ConfigArg is what nebula is pointed at, and it is Layout.NebulaConfigArg
-	// rather than Layout.ConfigPath — a FILE in authoritative mode and a
-	// DIRECTORY in fragment mode.
+	// Config produces the configuration to run, verified, with the certificate
+	// material inlined. Applier.VerifiedConfig is what supplies it.
 	//
-	// The distinction is the whole point of the modes: nebula loads a file
-	// verbatim and merges a directory. Handing it ConfigPath would load the
-	// fragment alone on a fragment-mode host, silently dropping every
-	// operator-authored file the mode exists to include.
-	ConfigArg string
+	// A CALLBACK RATHER THAN A PATH, and that is the whole design. Nebula is
+	// never told where to find a file, so there is no second read for an edit to
+	// win: what runs is what this returns, checked against the control plane's
+	// signature every time it is called. Editing nebula.yml on disk does not
+	// change what is running, because nothing reads it.
+	Config func() (string, error)
 
 	Log *slog.Logger
 
@@ -99,9 +99,13 @@ func (e *Embedded) startLocked(_ context.Context) error {
 	log := e.logger()
 	nlog := log.With("component", "nebula")
 
+	yamlCfg, err := e.Config()
+	if err != nil {
+		return err
+	}
 	c := config.NewC(nlog)
-	if err := c.Load(e.ConfigArg); err != nil {
-		return fmt.Errorf("load %s: %w", e.ConfigArg, err)
+	if err := c.LoadString(yamlCfg); err != nil {
+		return fmt.Errorf("load the verified configuration: %w", err)
 	}
 
 	// A nil device factory means the real tun device, which is the whole
@@ -120,7 +124,7 @@ func (e *Embedded) startLocked(_ context.Context) error {
 	e.generation++
 	e.lastExit = nil
 	gen := e.generation
-	log.Info("nebula started", "generation", gen, "config", e.ConfigArg)
+	log.Info("nebula started", "generation", gen)
 
 	// Notice if nebula stops on its own.
 	//
@@ -171,8 +175,10 @@ func (e *Embedded) Ensure(ctx context.Context) (started bool, err error) {
 	return true, e.startLocked(ctx)
 }
 
-// Reload re-reads the configuration file, which is what the agent has just
-// rewritten. The equivalent of the SIGHUP a supervised nebula would receive.
+// Reload re-reads and re-VERIFIES the configuration, which is what the agent has
+// just written. The equivalent of the SIGHUP a supervised nebula would receive,
+// except that a SIGHUP would reload whatever is on disk and this reloads only
+// what the control plane signed.
 func (e *Embedded) Reload(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -184,7 +190,11 @@ func (e *Embedded) Reload(ctx context.Context) error {
 		// configuration and no data plane.
 		return e.startLocked(ctx)
 	}
-	e.c.ReloadConfig()
+	yamlCfg, err := e.Config()
+	if err != nil {
+		return err
+	}
+	e.c.ReloadConfigString(yamlCfg)
 	return nil
 }
 

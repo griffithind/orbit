@@ -41,7 +41,7 @@ import (
 // The asymmetry is the honest one: the mode already decides whether Orbit's
 // document is the whole policy or a lower bound, and this is that same fact
 // showing up in the output.
-func FirewallFromPolicy(rs policy.Ruleset, mode string) *Firewall {
+func FirewallFromPolicy(rs policy.Ruleset) *Firewall {
 	fw := &Firewall{
 		Inbound:  make([]Rule, 0, len(rs.Inbound)),
 		Outbound: make([]Rule, 0, len(rs.Outbound)),
@@ -50,10 +50,6 @@ func FirewallFromPolicy(rs policy.Ruleset, mode string) *Firewall {
 		fw.Inbound = append(fw.Inbound, ruleFromPolicy(r))
 	}
 
-	if mode == ModeFragment {
-		fw.Outbound = DefaultFirewall().Outbound
-		return fw
-	}
 	for _, r := range rs.Outbound {
 		fw.Outbound = append(fw.Outbound, ruleFromPolicy(r))
 	}

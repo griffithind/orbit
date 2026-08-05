@@ -93,7 +93,6 @@ type networkView struct {
 	ConfigEpoch    int64
 	BlocklistEpoch int64
 	FirewallSource string
-	ConfigMode     string
 	CertTTL        string
 }
 
@@ -105,7 +104,6 @@ func newNetworkView(n *store.Network) networkView {
 		ConfigEpoch:    n.ConfigEpoch,
 		BlocklistEpoch: n.BlocklistEpoch,
 		FirewallSource: n.FirewallSource,
-		ConfigMode:     n.ConfigMode,
 		CertTTL:        n.CertTTL.String(),
 	}
 	for _, c := range n.CIDRs {
@@ -160,7 +158,6 @@ type membershipView struct {
 	// host inherits a default this process cannot see.
 	ListenPortLabel string
 	TunDev          string
-	ConfigMode      string
 }
 
 func newMembershipView(h *store.Membership, n *store.Network) membershipView {
@@ -188,7 +185,6 @@ func newMembershipView(h *store.Membership, n *store.Network) membershipView {
 
 		RestartRequiredEpoch: h.RestartRequiredEpoch,
 		TunDev:               h.TunDev,
-		ConfigMode:           h.ConfigMode,
 	}
 	if h.RoleID != nil {
 		v.RoleID = h.RoleID.String()
@@ -217,10 +213,7 @@ func newMembershipView(h *store.Membership, n *store.Network) membershipView {
 		if v.ListenPort == 0 && n.ListenPort != nil {
 			v.ListenPort = *n.ListenPort
 		}
-		if v.ConfigMode == "" {
-			v.ConfigMode = n.ConfigMode
-		}
-		if v.TunDev == "" && v.ConfigMode != "" {
+		if v.TunDev == "" {
 			v.TunDev = nebulacfg.TunDevSuggestion(n.Slug)
 		}
 	}

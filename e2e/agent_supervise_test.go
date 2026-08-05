@@ -236,37 +236,6 @@ func TestAuthoritativeModeInstallsExactlyOneConfigFile(t *testing.T) {
 	}
 }
 
-// TestFragmentModeStillWorks keeps the escape hatch honest: a host that
-// genuinely needs operator configuration alongside Orbit's must still be able
-// to have it.
-func TestFragmentModeStillWorks(t *testing.T) {
-	h := setup(t)
-	ts := h.serve(t, freeUDPPort(t))
-	host := h.createAndEnroll(t, ts, "fragment", "10.42.6.25", false, false, nil)
-
-	// Re-apply the same enrollment material into a fragment-mode directory.
-	src := agent.DefaultLayout(host.dir)
-	dir := t.TempDir()
-	layout := agent.FragmentLayout(dir)
-	m := agent.Material{
-		Config:      readFile(t, src.ConfigPath()),
-		CABundle:    readFile(t, src.Paths.CA),
-		Certificate: readFile(t, src.Paths.Cert),
-		PrivateKey:  readFile(t, src.Paths.Key),
-	}
-	if err := quietApplier(layout, nil).Apply(context.Background(), m); err != nil {
-		t.Fatalf("apply in fragment mode: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "config.d", "50-orbit.yml")); err != nil {
-		t.Errorf("fragment was not written: %v", err)
-	}
-	// And nebula must be pointed at the directory, not the file, or the merge
-	// fragment mode exists for does not happen.
-	if layout.NebulaConfigArg() != filepath.Join(dir, "config.d") {
-		t.Errorf("fragment -config = %q, want the config.d directory", layout.NebulaConfigArg())
-	}
-}
-
 // TestPerNetworkDirectoriesShareNothing is the multi-instance property stated as
 // a test: two networks on one host must not be able to touch each other's
 // state, even when both agents are running against the same root.

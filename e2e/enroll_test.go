@@ -736,7 +736,7 @@ func bootNebula(t *testing.T, dir string, addr netip.Addr) (*nebulaNode, error) 
 	t.Helper()
 
 	c := config.NewC(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := c.Load(agent.DefaultLayout(dir).NebulaConfigArg()); err != nil {
+	if err := c.Load(agent.DefaultLayout(dir).ConfigPath()); err != nil {
 		return nil, fmt.Errorf("load config from %s: %w", dir, err)
 	}
 

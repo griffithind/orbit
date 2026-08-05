@@ -441,10 +441,6 @@ func (s *Service) State(ctx context.Context, membershipID uuid.UUID, knownConfig
 		// restarted for — so repeating it costs nothing and losing it costs a
 		// host that quietly runs the wrong certificate forever.
 		resp.RestartRequiredEpoch = host.RestartRequiredEpoch
-		resp.ConfigMode = host.ConfigMode
-		if resp.ConfigMode == "" {
-			resp.ConfigMode = net.ConfigMode
-		}
 		resp.NetworkSlug = net.Slug
 
 		certs, err := tx.ActiveCertificates(ctx, host.ID)
@@ -637,11 +633,6 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		return nil, err
 	}
 
-	inst, err := s.instanceFor(host, net)
-	if err != nil {
-		return nil, err
-	}
-
 	sig, err := s.signMaterial(ctx, net, host.ID.String(), string(fragment), bundle)
 	if err != nil {
 		return nil, err
@@ -665,7 +656,6 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 		// to guess would create one layout now and discover the other later —
 		// leaving both on disk with nebula reading whichever the unit file
 		// happens to name.
-		ConfigMode:  inst.mode,
 		NetworkSlug: net.Slug,
 	}, nil
 }
@@ -678,7 +668,6 @@ func (s *Service) issueAndRender(ctx context.Context, tx *store.Tx, host *store.
 // before any of these columns existed, which is what keeps this from re-porting
 // a running fleet on the next poll.
 type instance struct {
-	mode       string
 	paths      nebulacfg.Paths
 	listenPort int
 	tunDev     string
@@ -686,22 +675,9 @@ type instance struct {
 }
 
 func (s *Service) instanceFor(host *store.Membership, net *store.Network) (instance, error) {
-	in := instance{mode: host.ConfigMode}
-	if in.mode == "" {
-		in.mode = net.ConfigMode
-	}
-	if in.mode == "" {
-		in.mode = store.ConfigModeAuthoritative
-	}
-
-	// Fragment mode keeps the deployment-wide paths it always had, because in
-	// that mode the operator owns the directory and Orbit is a guest in it.
-	// Authoritative mode owns a directory per network, which is what lets one
-	// machine run two nebulas without their config directories overlapping.
-	in.paths = s.cfg.Paths
-	if in.mode == store.ConfigModeAuthoritative {
-		in.paths = nebulacfg.PathsFor(net.Slug)
-	}
+	// A directory per network, which is what lets one machine run two nebulas
+	// without their config directories overlapping.
+	in := instance{paths: nebulacfg.PathsFor(net.Slug)}
 
 	switch {
 	case host.ListenPort != nil:
@@ -794,7 +770,6 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 	}
 
 	fragment, err := nebulacfg.Render(nebulacfg.Input{
-		Mode:         inst.mode,
 		Paths:        inst.paths,
 		AmLighthouse: host.IsLighthouse,
 		AmRelay:      host.IsRelay,

@@ -34,13 +34,13 @@ func (t *Tx) CreateHost(ctx context.Context, h *Membership) error {
 	err := t.tx.QueryRow(ctx, `
 		INSERT INTO orbit.membership (network_id, name, role_id, tags,
 		                        is_lighthouse, is_relay, state,
-		                        listen_port, tun_dev, config_mode, config_overrides,
+		                        listen_port, tun_dev, config_overrides,
 		                        device_id, advertise_port)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, created_at`,
 		h.NetworkID, h.Name, h.RoleID, nonNil(h.Tags),
 		h.IsLighthouse, h.IsRelay, h.State,
-		h.ListenPort, nullIfEmpty(h.TunDev), nullIfEmpty(h.ConfigMode), h.Overrides,
+		h.ListenPort, nullIfEmpty(h.TunDev), h.Overrides,
 		h.DeviceID, h.AdvertisePort,
 	).Scan(&h.ID, &h.CreatedAt)
 	if err != nil {
@@ -105,7 +105,7 @@ const membershipCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
 	h.created_at, coalesce(r.name, ''),
 	coalesce(array(SELECT a.addr FROM orbit.membership_address a WHERE a.membership_id = h.id
 	               ORDER BY a.addr), '{}'),
-	h.listen_port, coalesce(h.tun_dev, ''), coalesce(h.config_mode, ''),
+	h.listen_port, coalesce(h.tun_dev, ''),
 	h.config_overrides, h.restart_required_epoch, h.addr_changed_at,
 	h.device_id, h.advertise_port`
 
@@ -135,7 +135,7 @@ func scanHost(row interface{ Scan(...any) error }) (*Membership, error) {
 		&h.AppliedConfigEpoch, &h.AppliedBlocklistEpoch,
 		&h.LastSeenAt, &h.NebulaVersion, &h.AgentVersion, &h.CreatedAt,
 		&h.RoleName, &h.Addrs,
-		&h.ListenPort, &h.TunDev, &h.ConfigMode, &h.Overrides,
+		&h.ListenPort, &h.TunDev, &h.Overrides,
 		&h.RestartRequiredEpoch, &h.AddrChangedAt, &h.DeviceID, &h.AdvertisePort)
 	if err != nil {
 		return nil, err

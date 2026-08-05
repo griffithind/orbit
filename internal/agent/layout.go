@@ -93,51 +93,6 @@ func ValidateNetwork(slug string) error {
 	return nil
 }
 
-// ConfigMode is how Orbit's configuration reaches nebula.
-type ConfigMode int
-
-const (
-	// ConfigAuthoritative points nebula at ONE file that Orbit owns completely.
-	//
-	// This is the default, and it is the only mode in which Orbit can be said to
-	// control the host's configuration. Nebula merges every .yml in a config
-	// DIRECTORY with mergo.WithAppendSlice, so list values — firewall rules
-	// above all — are CONCATENATED across files. An operator rule and an Orbit
-	// rule then both apply, and there is no way for Orbit to see or remove the
-	// operator's. Pointing nebula at a single file removes the merge entirely:
-	// config.C.resolve (config/config.go) stats the path, and a non-directory is
-	// loaded as exactly that file.
-	ConfigAuthoritative ConfigMode = iota
-
-	// ConfigFragment writes config.d/50-orbit.yml alongside operator files and
-	// lets nebula merge.
-	//
-	// The escape hatch for a host that genuinely needs operator configuration
-	// next to Orbit's. It costs the property above: anything that must be
-	// guaranteed absent has to be absent from every file, which Orbit cannot
-	// enforce.
-	ConfigFragment
-)
-
-func (m ConfigMode) String() string {
-	if m == ConfigFragment {
-		return "fragment"
-	}
-	return "authoritative"
-}
-
-// ParseConfigMode reads the -mode flag.
-func ParseConfigMode(s string) (ConfigMode, error) {
-	switch s {
-	case "", "authoritative":
-		return ConfigAuthoritative, nil
-	case "fragment":
-		return ConfigFragment, nil
-	default:
-		return ConfigAuthoritative, fmt.Errorf("unknown config mode %q (want \"authoritative\" or \"fragment\")", s)
-	}
-}
-
 // The names inside a per-network directory. These are a contract with the
 // control plane's renderer and with the systemd units in deploy/: changing one
 // of them means changing all three.
@@ -145,16 +100,6 @@ const (
 	// ConfigFileName is the complete configuration in authoritative mode. It is
 	// what `nebula -config` points at — the FILE, not a directory.
 	ConfigFileName = "nebula.yml"
-
-	// FragmentName is the single file Orbit owns in fragment mode.
-	//
-	// The numeric prefix places it after a conventional 00-base.yml so Orbit's
-	// scalar settings win; list values are appended by nebula regardless of
-	// order, which is the property fragment mode gives up on.
-	FragmentName = "50-orbit.yml"
-
-	// ConfigDirName is the merge directory nebula is pointed at in fragment mode.
-	ConfigDirName = "config.d"
 
 	CAName   = "ca.crt"
 	CertName = "host.crt"
@@ -202,8 +147,6 @@ type Layout struct {
 	// which is what keeps two networks on one host from sharing anything.
 	Dir string
 
-	Mode ConfigMode
-
 	// Paths are the certificate and key locations referenced by the rendered
 	// configuration. The agent rewrites the config to match these on receipt
 	// (see Applier.localize), so a control plane rendering one layout and an
@@ -211,20 +154,19 @@ type Layout struct {
 	Paths nebulacfg.Paths
 }
 
-// DefaultLayout is the per-network layout in authoritative mode.
-func DefaultLayout(dir string) Layout { return LayoutFor(dir, ConfigAuthoritative) }
-
-// FragmentLayout is the per-network layout in fragment mode.
-func FragmentLayout(dir string) Layout { return LayoutFor(dir, ConfigFragment) }
-
-func LayoutFor(dir string, mode ConfigMode) Layout {
+// DefaultLayout is the per-network layout.
+//
+// One layout, since fragment mode was removed: Orbit owns the whole
+// configuration or it owns nothing, and the middle case — nebula merging
+// Orbit's file with operator-authored ones — is exactly the case where Orbit
+// cannot say what a host is running.
+func DefaultLayout(dir string) Layout {
 	return Layout{
 		// A slug is not required to derive any path, so taking it from the
 		// directory name keeps -dir the single source of truth while still
 		// giving logs something an operator recognises.
 		Network: filepath.Base(dir),
 		Dir:     dir,
-		Mode:    mode,
 		Paths: nebulacfg.Paths{
 			CA:   filepath.Join(dir, CAName),
 			Cert: filepath.Join(dir, CertName),
@@ -233,42 +175,16 @@ func LayoutFor(dir string, mode ConfigMode) Layout {
 	}
 }
 
-// ConfigDir is the merge directory, or "" in authoritative mode where there
-// is none.
-func (l Layout) ConfigDir() string {
-	if l.Mode == ConfigFragment {
-		return filepath.Join(l.Dir, ConfigDirName)
-	}
-	return ""
-}
-
 // ConfigName is the basename of the file Orbit owns.
-func (l Layout) ConfigName() string {
-	if l.Mode == ConfigFragment {
-		return FragmentName
-	}
-	return ConfigFileName
-}
+func (l Layout) ConfigName() string { return ConfigFileName }
 
 // ConfigPath is the file Orbit writes.
-func (l Layout) ConfigPath() string {
-	if l.Mode == ConfigFragment {
-		return filepath.Join(l.Dir, ConfigDirName, FragmentName)
-	}
-	return filepath.Join(l.Dir, ConfigFileName)
-}
-
-// NebulaConfigArg is what `nebula -config` must be given.
 //
-// A FILE in authoritative mode and a DIRECTORY in fragment mode, and the
-// difference is the whole point of the modes: nebula merges a directory and
-// loads a file verbatim.
-func (l Layout) NebulaConfigArg() string {
-	if l.Mode == ConfigFragment {
-		return filepath.Join(l.Dir, ConfigDirName)
-	}
-	return filepath.Join(l.Dir, ConfigFileName)
-}
+// A RECORD, not the thing nebula reads. The agent hands nebula the verified
+// bytes in memory (Applier.VerifiedConfig), so this file exists to be read by
+// people and to be compared against the signed original — editing it changes
+// nothing about what is running.
+func (l Layout) ConfigPath() string { return filepath.Join(l.Dir, ConfigFileName) }
 
 // PreviousDir is where the last known-good generation lives.
 func (l Layout) PreviousDir() string { return filepath.Join(l.Dir, PreviousDirName) }
@@ -313,7 +229,7 @@ func (l Layout) targets() map[string]string {
 // Describe is what the agent logs at startup so an operator can see the layout
 // without reading flags.
 func (l Layout) Describe() string {
-	return fmt.Sprintf("%s mode, nebula -config %s", l.Mode, l.NebulaConfigArg())
+	return fmt.Sprintf("network %s in %s", l.Network, l.Dir)
 }
 
 // SlugFromUnitInstance recovers a network slug from a systemd instance name.

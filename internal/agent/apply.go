@@ -309,7 +309,7 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 
 	a.Log.Info("applied configuration",
 		"network", a.Layout.Network, "config", a.Layout.ConfigPath(),
-		"mode", a.Layout.Mode.String(), "delivery", mode.String(),
+		"delivery", mode.String(),
 		"verify", describeVerifier(a.Verifier))
 	return nil
 }
@@ -447,19 +447,11 @@ func (a *Applier) ensureDirs() error {
 	if err := os.MkdirAll(a.Layout.Dir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", a.Layout.Dir, err)
 	}
-	if d := a.Layout.ConfigDir(); d != "" {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("create config directory: %w", err)
-		}
-	}
 	return nil
 }
 
 func (a *Applier) syncDirs() {
 	_ = syncDir(a.Layout.Dir)
-	if d := a.Layout.ConfigDir(); d != "" {
-		_ = syncDir(d)
-	}
 }
 
 // localize rewrites the paths the control plane rendered into this host's

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -148,6 +150,23 @@ func VerifyMaterial(networkKey []byte, membershipID string, sig *wire.ConfigSign
 // The loop's side: pinning, and the gate before every apply
 //------------------------------------------------------------------------------
 
+// NetworkKeyBytes decodes the pinned network identity public key, or nil.
+//
+// Nil for "not pinned yet" AND for "unreadable", which callers must treat the
+// same way: neither can verify anything. The difference is logged where the
+// distinction is actionable, not returned, because a caller that could tell
+// them apart would eventually branch on it.
+func (s State) NetworkKeyBytes() []byte {
+	if s.NetworkKey == "" {
+		return nil
+	}
+	key, err := base64.StdEncoding.DecodeString(s.NetworkKey)
+	if err != nil {
+		return nil
+	}
+	return key
+}
+
 // networkKey returns the pinned network identity public key, or nil.
 func (l *Loop) networkKey() []byte {
 	if l.State.NetworkKey == "" {
@@ -264,4 +283,88 @@ func (l *Loop) checkInstalled() {
 	if err := WriteState(l.Layout.Dir, l.State); err != nil {
 		l.Log.Error("persist agent state failed", "error", err)
 	}
+}
+
+//------------------------------------------------------------------------------
+// What nebula actually loads
+//------------------------------------------------------------------------------
+
+// VerifiedConfig returns the configuration nebula should run, from the signed
+// original, with the certificate material inlined.
+//
+// THIS IS THE POINT OF THE WHOLE FILE. Verifying a config and then letting
+// nebula independently re-read it off disk makes the verification advisory: an
+// edit between the check and the read wins, and root can SIGHUP nebula directly
+// without the agent involved at all. So nebula is never given a path. It is
+// given these bytes, and nebula.yml on disk is a record for people to read.
+//
+// The material is INLINED — pki.ca, pki.cert and pki.key become PEM rather than
+// paths — for the same reason internal/mesh does it for the control plane: a
+// path is an instruction to go and read something later, which is exactly the
+// second read this exists to remove. What is left on disk is the key, because
+// nebula needs it across restarts and it must match the certificate; a key file
+// is a real exposure, and a different one from this.
+//
+// An unsigned generation is refused outright. A host that has not pinned a
+// network key yet is the one exception, and it is the same window checkMaterial
+// allows — it closes at that host's first renewal.
+func (a *Applier) VerifiedConfig(networkKey []byte, membershipID string) (string, error) {
+	signed, err := os.ReadFile(a.Layout.SignedConfigPath())
+	if err != nil {
+		return "", fmt.Errorf("read the signed configuration: %w", err)
+	}
+	bundle, err := os.ReadFile(a.Layout.Paths.CA)
+	if err != nil {
+		return "", fmt.Errorf("read the trust bundle: %w", err)
+	}
+
+	if len(networkKey) == 0 {
+		a.Log.Warn("running a configuration without verifying it: no network key is " +
+			"pinned yet. This host will pin one at its next renewal")
+	} else {
+		sigJSON, err := os.ReadFile(a.Layout.SigPath())
+		if err != nil {
+			return "", fmt.Errorf("read the configuration signature: %w", err)
+		}
+		var sig wire.ConfigSignature
+		if err := json.Unmarshal(sigJSON, &sig); err != nil {
+			return "", fmt.Errorf("%w: the signature file is unreadable: %v", ErrConfigDiverged, err)
+		}
+		if err := VerifyMaterial(networkKey, membershipID, &sig, string(signed), string(bundle)); err != nil {
+			return "", fmt.Errorf("refusing to run this configuration: %w", err)
+		}
+	}
+
+	cert, err := os.ReadFile(a.Layout.Paths.Cert)
+	if err != nil {
+		return "", fmt.Errorf("read the certificate: %w", err)
+	}
+	key, err := os.ReadFile(a.Layout.Paths.Key)
+	if err != nil {
+		return "", fmt.Errorf("read the private key: %w", err)
+	}
+	return inlineMaterial(string(signed), string(bundle), string(cert), string(key))
+}
+
+// inlineMaterial replaces the pki path references with the material itself.
+//
+// Nebula accepts either a path or PEM for pki.ca, pki.cert and pki.key, which is
+// what makes this possible without a fork — and what makes localize unnecessary
+// on this path, since there are no paths left to rewrite.
+func inlineMaterial(rendered, caBundle, certPEM, keyPEM string) (string, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(rendered), &doc); err != nil {
+		return "", fmt.Errorf("parse the signed configuration: %w", err)
+	}
+	pki, ok := doc["pki"].(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("the signed configuration has no pki section")
+	}
+	pki["ca"], pki["cert"], pki["key"] = caBundle, certPEM, keyPEM
+
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("re-marshal the configuration: %w", err)
+	}
+	return string(out), nil
 }

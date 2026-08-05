@@ -558,35 +558,6 @@ func responseConfigMode(resp *wire.StateResponse) string {
 	return ""
 }
 
-// noteConfigMode warns when the control plane and this host disagree about how
-// configuration reaches nebula.
-//
-// It warns rather than adopting, and that is not timidity. The mode is a pair of
-// decisions that must move together: what the agent WRITES (one nebula.yml, or a
-// fragment in config.d) and what nebula READS (-config pointing at that file, or
-// at the directory). The second lives in the systemd unit, which the agent
-// cannot edit. An agent that switched modes on its own would write a correct
-// file to a path nebula is not reading and report success — the exact class of
-// silent mismatch this whole change exists to remove. A mismatch is an operator
-// action on two files; the agent's job is to make sure nobody has to discover it
-// from a stale certificate weeks later.
-//
-// Worth noticing which direction actually breaks. A fragment-rendered (partial)
-// config loaded as an authoritative whole fails validation immediately, so it is
-// caught. An authoritative-rendered (complete) config dropped into config.d
-// loads fine and merges, so it does NOT fail — it just quietly restores the
-// firewall-rule concatenation that authoritative mode exists to eliminate.
-func (l *Loop) noteConfigMode(resp *wire.StateResponse) {
-	server := responseConfigMode(resp)
-	if server == "" || server == l.Layout.Mode.String() {
-		return
-	}
-	l.Log.Error("the control plane renders this network in a different config mode than this host runs; "+
-		"change the agent's -mode and nebula's -config together, or Orbit is not authoritative here",
-		"network", l.Layout.Network, "serverMode", server, "hostMode", l.Layout.Mode.String(),
-		"writing", l.Layout.ConfigPath(), "nebulaReads", l.Layout.NebulaConfigArg())
-}
-
 // quarantinedEpoch is the generation this host is currently refusing, or zero.
 //
 // Read-only, unlike quarantined(), which expires the quarantine as a side
@@ -810,7 +781,6 @@ func (l *Loop) poll(ctx context.Context) error {
 
 	l.markReachable()
 	l.noteRenewHint(resp)
-	l.noteConfigMode(resp)
 	l.retryPendingRevert(ctx)
 
 	if resp.Config == "" {
@@ -1102,7 +1072,6 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 	}
 	l.markReachable()
 	l.noteRenewHint(resp)
-	l.noteConfigMode(resp)
 	l.retryPendingRevert(ctx)
 
 	if resp.Config == "" {

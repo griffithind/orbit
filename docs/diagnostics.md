@@ -115,7 +115,7 @@ protocol and port — and if none, say so plainly.
 
 The agent holds the *rendered* Nebula configuration, not a `policy.Ruleset`. It
 asks about what is actually in force, including anything an operator added in
-`ModeFragment`, rather than about what we believe we sent.
+the configuration nebula was actually handed, rather than what we believe we sent.
 
 Matching mirrors the grammar in [policy-model.md §1.2](policy-model.md):
 

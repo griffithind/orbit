@@ -64,16 +64,12 @@ import (
 type dirFlags struct {
 	dir     *string
 	network *string
-	mode    *string
 }
 
 func addDirFlags(fs *flag.FlagSet) *dirFlags {
 	return &dirFlags{
 		dir:     fs.String("dir", "", "per-network directory the agent owns: config, certificate, key, state, rollback copy (default "+agent.DefaultRoot+"/<network>)"),
 		network: fs.String("network", "", "network slug; shorthand for -dir "+agent.DefaultRoot+"/<slug>"),
-		mode: fs.String("mode", "authoritative",
-			`"authoritative" writes one complete nebula.yml that nebula is pointed at directly; `+
-				`"fragment" writes config.d/50-orbit.yml for nebula to merge with operator files`),
 	}
 }
 
@@ -99,10 +95,6 @@ func (d *dirFlags) networkRef() string {
 }
 
 func (d *dirFlags) layout() (agent.Layout, error) {
-	mode, err := agent.ParseConfigMode(*d.mode)
-	if err != nil {
-		return agent.Layout{}, err
-	}
 	switch {
 	case *d.dir != "" && *d.network != "":
 		// Only an error when they disagree: a unit that passes both for
@@ -119,7 +111,7 @@ func (d *dirFlags) layout() (agent.Layout, error) {
 		return agent.Layout{}, errors.New("one of -dir or -network is required; " +
 			"an agent manages exactly one network and has no default")
 	}
-	return agent.LayoutFor(filepath.Clean(*d.dir), mode), nil
+	return agent.DefaultLayout(filepath.Clean(*d.dir)), nil
 }
 
 const agentVerbs = "install, uninstall, join, enroll, run"
@@ -764,7 +756,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	}
 	nlog := log.With("network", layout.Network)
 
-	engine := &agent.Embedded{ConfigArg: layout.NebulaConfigArg(), Log: nlog}
+	engine := &agent.Embedded{Log: nlog}
 	applier := &agent.Applier{
 		Layout:   layout,
 		Reloader: engine,
@@ -774,6 +766,15 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 		Log:               nlog,
 	}
 	applier.Supervisor = engine
+
+	// The knot tied: nebula's configuration comes from the applier, verified on
+	// every start and every reload, rather than from a path nebula would read
+	// for itself. Set after the applier exists because the two refer to each
+	// other — the applier reloads the engine, the engine asks the applier what
+	// to run.
+	engine.Config = func() (string, error) {
+		return applier.VerifiedConfig(st.NetworkKeyBytes(), st.MembershipID)
+	}
 
 	if verifyURL != "" {
 		applier.Verifier = agent.NewReachabilityVerifier(verifyURL)

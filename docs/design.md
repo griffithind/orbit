@@ -71,9 +71,18 @@ See [revocation.md](revocation.md).
 `mergo.WithAppendSlice`. `pki.ca` accepts either a path or inline PEM. Reload is
 `SIGHUP` and is hot — tunnels survive it.
 
-**Therefore:** Orbit never rewrites an operator's configuration file. It owns
-exactly one fragment, `50-orbit.yml`, alongside whatever the operator maintains.
-Firewall rules from both files concatenate. See §7.
+**Therefore:** Orbit owns the whole configuration, and nebula is never pointed
+at a file at all. The agent hands it the verified bytes in memory, with `pki.ca`,
+`pki.cert` and `pki.key` inlined as PEM — which is what the "accepts either a
+path or inline PEM" line above buys. A config the control plane did not sign
+cannot be loaded, because nothing is read from disk to load.
+
+The merge behaviour is why there is no middle ground. Nebula concatenates
+firewall lists across files in a config directory, so a mode where Orbit wrote
+one file beside an operator's would mean Orbit could neither see nor remove a
+rule somebody else wrote — every policy answer a lower bound rather than the
+truth. That mode existed and was removed; `config_overrides` is the supported
+way to carry host-specific settings, rendered INTO the signed configuration.
 
 ### 1.5 Certificate rotation is hot; changing a membership's address is not
 
@@ -775,16 +784,22 @@ Orbit owns one directory per network, and every file in it:
   .previous/     # one generation, for rollback
 ```
 
-`nebula -config` points at the **file**, not the directory. `config.go:resolve`
-stats the path and loads a non-directory verbatim, so the merge described in §1.4
-does not happen at all — that is what makes Orbit authoritative over this host,
-and it is the precondition for any policy view claiming to be complete rather
-than a lower bound.
+**`nebula.yml` is a record, not an input.** Nebula is given no path: the agent
+verifies the signed original against the network key it pinned at join, inlines
+the certificate material, and hands nebula the bytes (`config.C.LoadString`).
+Editing `nebula.yml` therefore changes nothing about what is running — it is not
+read. That is what makes Orbit authoritative over this host, and the precondition
+for any policy view claiming to be complete rather than a lower bound.
 
-A host that genuinely needs operator configuration alongside Orbit's runs the
-agent with `-mode fragment`, which writes `config.d/50-orbit.yml` and points
-nebula at the directory. Rules concatenate again, and Orbit can no longer
-guarantee any rule is absent.
+It also closes a gap the signature alone did not. Verifying a file and then
+letting nebula independently re-read it made verification advisory: an edit
+between the check and the read won, and root could `SIGHUP` nebula without the
+agent involved. See [config-integrity.md](config-integrity.md).
+
+A host that genuinely needs host-specific nebula settings uses
+`config_overrides`, which the control plane renders into the signed
+configuration — the same outcome, with the control plane still able to say what
+is running.
 
 `/var/lib` rather than `/etc` because every file here is runtime state the agent
 writes and replaces. On an image-based system (bootc, OSTree, Fedora CoreOS)
@@ -943,14 +958,14 @@ Make this a test, not an intention:
 docker compose stop orbit
 # assert: mesh connectivity unaffected for the full certificate lifetime
 # assert: agent retries with backoff, logs, does not restart nebula
-# assert: agent never deletes or truncates its config fragment on failure
+# assert: agent never deletes or truncates its config on failure
 ```
 
 The agent's failure rules:
 
 - Never apply a partially-downloaded config.
 - Write `.new` → `fsync` → atomic `rename` → `SIGHUP` → **verify** → commit.
-- On verification failure, restore the previous fragment and `SIGHUP` again.
+- On verification failure, restore the previous generation and reload again.
 - If unreachable for longer than a threshold after applying epoch *N*, revert to
   *N−1*, then **quarantine** *N*. This is the guard against pushing a firewall
   rule that severs every host's path back to the control plane.

@@ -74,7 +74,6 @@
       <dd>{{ if .Membership.NebulaVersion }}<code>{{ .Membership.NebulaVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
       <dt>agent</dt>
       <dd>{{ if .Membership.AgentVersion }}<code>{{ .Membership.AgentVersion }}</code>{{ else }}<span class="note">not reported</span>{{ end }}</dd>
-      <dt>Config layout</dt><dd><code>{{ .Membership.ConfigMode }}</code></dd>
       <dt>Interface</dt>
       <dd>{{ if .Membership.TunDev }}<code>{{ .Membership.TunDev }}</code> · {{ end }}UDP {{ .Membership.ListenPortLabel }}</dd>
     </dl>

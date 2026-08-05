@@ -22,11 +22,10 @@ func testRuleset() policy.Ruleset {
 	}
 }
 
-func renderPolicy(t *testing.T, mode string) string {
+func renderPolicy(t *testing.T) string {
 	t.Helper()
 	rs := testRuleset()
 	out, err := Render(Input{
-		Mode:       mode,
 		Paths:      PathsFor("net"),
 		Policy:     &rs,
 		ListenPort: 4242,
@@ -52,7 +51,7 @@ func parsedFirewall(t *testing.T, body string) Firewall {
 // rendered and the allow-all is gone. That is what makes the two-ended
 // enforcement real rather than decorative.
 func TestAuthoritativeRendersBothHalves(t *testing.T) {
-	fw := parsedFirewall(t, renderPolicy(t, ModeAuthoritative))
+	fw := parsedFirewall(t, renderPolicy(t))
 
 	if len(fw.Inbound) != 2 {
 		t.Fatalf("inbound = %+v", fw.Inbound)
@@ -73,32 +72,11 @@ func TestAuthoritativeRendersBothHalves(t *testing.T) {
 	}
 }
 
-// Fragment mode can only ADD rules to whatever an operator wrote, so a narrow
-// outbound rule there would change no packet's fate while reading, in a review,
-// exactly like enforcement. Policy in fragment mode is enforced at the
-// receiver, and the rendered file says the allow-all is still there.
-func TestFragmentRendersTheInboundHalfOnly(t *testing.T) {
-	fw := parsedFirewall(t, renderPolicy(t, ModeFragment))
-
-	if len(fw.Inbound) != 2 {
-		t.Fatalf("inbound = %+v", fw.Inbound)
-	}
-	if len(fw.Outbound) != 1 || fw.Outbound[0].Host != "any" {
-		t.Fatalf("fragment mode should keep the allow-all it always had, got %+v", fw.Outbound)
-	}
-	for _, r := range fw.Outbound {
-		if r.CIDR != "" {
-			t.Errorf("a compiled outbound rule was rendered in fragment mode: %+v", r)
-		}
-	}
-}
-
 // A policy replaces the role's rules rather than merging with them: two sources
 // of firewall rules means two answers to "what may reach this host".
 func TestPolicyReplacesTheRoleFirewall(t *testing.T) {
 	rs := testRuleset()
 	out, err := Render(Input{
-		Mode:  ModeAuthoritative,
 		Paths: PathsFor("net"),
 		Firewall: &Firewall{
 			Inbound:  []Rule{{Port: "22", Proto: "tcp", Group: "ssh"}},
@@ -119,7 +97,6 @@ func TestPolicyReplacesTheRoleFirewall(t *testing.T) {
 // rendered before this package existed.
 func TestNoPolicyChangesNothing(t *testing.T) {
 	in := Input{
-		Mode:       ModeAuthoritative,
 		Paths:      PathsFor("net"),
 		Firewall:   DefaultFirewall(),
 		ListenPort: 4242,
@@ -143,7 +120,7 @@ func TestNoPolicyChangesNothing(t *testing.T) {
 // Nothing the compiler emits should reach the keys that short-circuit
 // FirewallRule.isAny: a group, host or cidr of "any" matches every peer.
 func TestRenderedPolicyRulesCarryNoIdentityKeys(t *testing.T) {
-	body := renderPolicy(t, ModeAuthoritative)
+	body := renderPolicy(t)
 	fw := parsedFirewall(t, body)
 	for _, r := range fw.Inbound {
 		if r.Host != "" || r.Group != "" || len(r.Groups) != 0 || r.CAName != "" || r.CASha != "" {
@@ -162,9 +139,7 @@ func TestRenderedPolicyRulesCarryNoIdentityKeys(t *testing.T) {
 // absent firewall key is not the same document.
 func TestEmptyPolicyRendersClosed(t *testing.T) {
 	rs := policy.Ruleset{}
-	out, err := Render(Input{
-		Mode: ModeAuthoritative, Paths: PathsFor("net"), Policy: &rs, ListenPort: 4242,
-	})
+	out, err := Render(Input{Paths: PathsFor("net"), Policy: &rs, ListenPort: 4242})
 	if err != nil {
 		t.Fatal(err)
 	}

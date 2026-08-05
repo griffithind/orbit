@@ -1348,16 +1348,10 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Name == nil && req.ListenPort == nil && req.ConfigMode == nil && req.FirewallSource == nil {
+	if req.Name == nil && req.ListenPort == nil && req.FirewallSource == nil {
 		writeErr(w, http.StatusBadRequest,
-			"no fields supplied; set name, listen_port, config_mode, or firewall_source. "+
+			"no fields supplied; set name, listen_port, or firewall_source. "+
 				"The slug is immutable and cannot be edited")
-		return
-	}
-	if req.ConfigMode != nil &&
-		*req.ConfigMode != store.ConfigModeAuthoritative && *req.ConfigMode != store.ConfigModeFragment {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("config_mode must be %q or %q",
-			store.ConfigModeAuthoritative, store.ConfigModeFragment))
 		return
 	}
 	if req.ListenPort != nil && (*req.ListenPort <= 0 || *req.ListenPort > 65535) {
@@ -1400,8 +1394,8 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		} else {
 			out = net
 		}
-		if req.ListenPort != nil || req.ConfigMode != nil {
-			if out, err = tx.UpdateNetworkInstanceDefaults(ctx, net.ID, req.ListenPort, req.ConfigMode); err != nil {
+		if req.ListenPort != nil {
+			if out, err = tx.UpdateNetworkInstanceDefaults(ctx, net.ID, req.ListenPort); err != nil {
 				return err
 			}
 		}
@@ -1438,7 +1432,7 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 				"hosts", affected, "configEpoch", out.ConfigEpoch)
 		}
 
-		if req.Name == nil && req.ListenPort == nil && req.ConfigMode == nil {
+		if req.Name == nil && req.ListenPort == nil {
 			// Nothing here is a rename, so do not write a network.renamed entry
 			// claiming one. The switch above already audited itself.
 			return nil
@@ -1684,7 +1678,6 @@ func membershipResponse(h *store.Membership, net *store.Network) wire.Membership
 		CreatedAt:             h.CreatedAt,
 
 		TunDev:               h.TunDev,
-		ConfigMode:           h.ConfigMode,
 		RestartRequiredEpoch: h.RestartRequiredEpoch,
 	}
 	if h.RoleID != nil {
@@ -1705,10 +1698,7 @@ func membershipResponse(h *store.Membership, net *store.Network) wire.Membership
 		if out.ListenPort == 0 && net.ListenPort != nil {
 			out.ListenPort = *net.ListenPort
 		}
-		if out.ConfigMode == "" {
-			out.ConfigMode = net.ConfigMode
-		}
-		if out.TunDev == "" && out.ConfigMode != "" {
+		if out.TunDev == "" {
 			out.TunDev = nebulacfg.TunDevSuggestion(net.Slug)
 		}
 	}

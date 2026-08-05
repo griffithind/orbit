@@ -65,7 +65,7 @@ func fixtureNetwork() networkView {
 	return networkView{
 		ID: uuid.NewString(), Slug: "prod", Name: "prod",
 		CIDRs: []string{"10.42.0.0/16"}, ConfigEpoch: 41, BlocklistEpoch: 7,
-		FirewallSource: "role", ConfigMode: "authoritative", CertTTL: "24h0m0s",
+		FirewallSource: "role", CertTTL: "24h0m0s",
 	}
 }
 
@@ -94,7 +94,7 @@ func fixtureHost() membershipView {
 		BlockBadge:  epochBadge(7, 7, store.MembershipActive),
 
 		RestartRequiredEpoch: 41, RestartPending: true,
-		ListenPort: 4242, TunDev: "orbit-prod", ConfigMode: "authoritative",
+		ListenPort: 4242, TunDev: "orbit-prod",
 	}
 }
 
