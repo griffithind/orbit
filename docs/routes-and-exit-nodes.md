@@ -410,6 +410,53 @@ A shield that can lock a machine out of the only thing able to unlock it is not
 a safety feature. This carve-out is not optional, and it is the reason shield is
 worth designing rather than assembling from a blog post.
 
+### Who accepts a shield
+
+Not the same answer as exit nodes, and the difference is who the shield is
+protecting *from*.
+
+**A route's shield is not user-acceptable.** The case that motivates it —
+"internal traffic must never take the local path, so nothing leaks" — protects
+the organisation from a machine sitting on a network nobody vetted. The person
+at that machine is the risk, not the beneficiary, and they are the one who would
+switch it off: on the café LAN, the shield is inconvenient precisely when it is
+working. Enforcement the target can disable is not enforcement.
+
+**An exit node's shield is not separately acceptable either — it arrives with
+the exit node.** The user already chose to send all their traffic through a
+gateway; "or nothing" is what choosing a kill switch means. A second prompt
+would let someone accept the exit node and decline the leak protection, which is
+the one combination nobody should end up in by accident.
+
+So neither is a separate acceptance. One is imposed, one is implied by a choice
+already made.
+
+**There is also no user to accept with.** Orbit has devices and memberships; the
+credential model designs a user credential and does not build one
+(`credential-model.md` §2). "Accepted by a user" today can only mean "accepted on
+the machine", which is the exit-node mechanism — and for a leak control, the
+machine is the wrong place to put the switch.
+
+### The hazard this creates, which is worse than it looks
+
+Shield `192.168.1.0/24` across a fleet and every person whose home router uses
+that prefix loses their LAN — printer, NAS, quite possibly the router's own web
+interface. It is the most common home subnet in the world, `192.168.0.0/24` is
+the second, and the failure is silent: the shield is working exactly as
+specified, it has simply also killed something legitimate.
+
+The answer is **transparency without veto**, and one new fact:
+
+- `orbit status` names shielded prefixes plainly, so somebody debugging their
+  printer finds the reason in the first place they look.
+- **The agent reports its local subnets.** It does not today — facts carry OS,
+  kernel, arch and posture, not attached networks. With that, the control plane
+  can answer "how many machines have a local network overlapping this prefix?"
+  *before* the shield is applied rather than through support tickets after.
+- Break-glass is a control-plane action on one membership, not a switch on the
+  machine. The escape hatch belongs on the side that can see the fleet, not the
+  side that is the risk.
+
 ### Shape
 
 ```sql
