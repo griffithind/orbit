@@ -9,6 +9,104 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.4.0
+
+The largest release so far: the data model was rebuilt, the mesh learned to
+carry routes and exit nodes, and hosts resolve each other by name. Read the
+breaking section before upgrading — an existing deployment cannot.
+
+### Breaking
+
+- **An existing network cannot be upgraded in place.** Orbit is now P-256 only,
+  and a certificate's curve cannot be changed — nebula refuses a certificate
+  whose curve differs from its signer's. Migration `0021` therefore refuses to
+  run while any CURVE25519 network exists, and says so rather than corrupting
+  one. The way forward is a new network and a re-join of every machine.
+
+- **The data model is devices, networks and memberships.** A machine is a
+  device with a key it generated; joining a network creates a membership. Names,
+  addresses and roles hang off the membership, public addresses off the device.
+  Several columns moved and `POST /v1/hosts` is gone; reservations replaced
+  enrollment codes.
+
+- **Hardware-backed keys were removed** — TPM, PKCS#11, Secure Enclave. They
+  were measured rather than assumed, and `tpm2-pkcs11` cannot do the ECDH nebula
+  needs, so the feature could not have worked for the thing it existed for.
+
+- **Building Orbit now needs a submodule.** Nebula is built from
+  `github.com/griffithind/nebula`, one commit ahead of upstream, pinned at
+  `third_party/nebula`. Clone with `--recurse-submodules`, or run
+  `git submodule update --init` in an existing checkout.
+
+### Added
+
+- **Routes.** A gateway forwards for a prefix that cannot run nebula — a Pi in
+  front of a lab network, a jump box in front of a VPC. Two gateways offering
+  the same prefix is high availability: nebula does weighted ECMP and fails over
+  with no coordination. `orbit route add|ls|rm`.
+
+  Authority is in the CERTIFICATE, not the database. A CA carries the prefixes
+  its subordinates may claim, so a row an attacker can write grants nothing.
+  Set it with `orbit ca create -unsafe-networks`; it is signed, so widening it
+  later is a new CA and a rotation.
+
+- **Exit nodes.** A route for `0.0.0.0/0`, taken deliberately by one machine:
+  `orbit exit-node use|off|ls`. Rendered only for the membership that chose it,
+  because a default route captures everything and nobody should get one by
+  accident. Works on Linux and macOS.
+
+- **Mesh DNS.** Every host resolves `<name>` and `<name>.<network>.internal`
+  from a name table carried in its signed configuration — no lighthouse
+  resolver, no round trip, and a name carries the same proof as a certificate
+  path. The agent serves it locally and forwards the rest to the resolvers the
+  machine had before.
+
+- **A host-state layer.** Gateways get IP forwarding and NAT in an nftables
+  table Orbit owns whole, and exit-node users get the policy routing that
+  `listen.so_mark` exists to be matched by. Everything installed is removed by
+  name, so uninstall works even if the rules were edited.
+
+- **`orbit ca create`.** Minting a CA was previously possible only at bootstrap
+  or through a hand-written HTTP request, which made adding a routed prefix —
+  necessarily a new CA — impossible from the CLI.
+
+- **`orbit status` shows what the machine was told to do**: routes, exit node,
+  forwarding, NAT and resolver, read from the verified configuration so it
+  answers "did the instruction arrive" separately from "did it take".
+
+### Changed
+
+- **Nebula loads only what the control plane signed.** The configuration is
+  verified and handed to nebula in memory; a root user editing the file on disk
+  changes nothing.
+
+- **One UDP port per network.** Nebula's wire header carries no network
+  identifier, so one socket serves exactly one network. Ports 4242-4257 are the
+  documented range.
+
+### Fixed
+
+- **`make demo` could never have worked.** It authenticated as `orbit_app`, a
+  role created `NOLOGIN` with a password nothing sets. It also exported
+  `ORBIT_ENROLL_PEPPER`, retired long ago and read by nothing.
+
+- **`orbit membership reserve` printed `-url -`** into a command meant to be
+  pasted onto the machine being enrolled.
+
+- **`orbit route add <reserved-name>` said "no host named X".** A reservation is
+  not a membership until the machine joins, and the error now says so instead of
+  sending an operator hunting for a typo.
+
+- **The device-key error named a temporary file** that never existed, rather
+  than the destination and the flag that moves it.
+
+- **A control plane's own listen port was never recorded**, so nothing could
+  render a config that dialled it.
+
+- **Cross-clock liveness comparison.** Replica liveness compared a database
+  `now()` against a Go `time.Now()`, which is skew-sensitive; six call sites and
+  two error-swallowing paths were affected.
+
 ## v0.3.5
 
 ### Fixed

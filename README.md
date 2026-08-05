@@ -58,11 +58,15 @@ break-glass path — and that does not belong on an operator laptop or on every
 managed host. `orbitd` also links gvisor for its userspace network stack, which
 no managed host needs.
 
-Or from source — Go 1.26 and nothing else:
+Or from source — Go 1.26 and nothing else. Clone with submodules: nebula is
+built from a pinned fork under `third_party/`, and without it the build fails on
+a missing module.
 
 ```bash
-git clone https://github.com/griffithind/orbit && cd orbit && make build
+git clone --recurse-submodules https://github.com/griffithind/orbit && cd orbit && make build
 ```
+
+In an existing checkout: `git submodule update --init`.
 
 ---
 
