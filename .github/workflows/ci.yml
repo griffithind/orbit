@@ -38,6 +38,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # nebula is built from the pinned submodule that go.mod's
+          # replace points at. Without this the directory is empty and
+          # every build fails on a missing module rather than on
+          # anything to do with the change being tested.
+          submodules: true
 
       - uses: actions/setup-go@v5
         with:
@@ -121,6 +127,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # nebula is built from the pinned submodule that go.mod's
+          # replace points at. Without this the directory is empty and
+          # every build fails on a missing module rather than on
+          # anything to do with the change being tested.
+          submodules: true
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
