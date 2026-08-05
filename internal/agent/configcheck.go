@@ -409,6 +409,21 @@ func (l *Loop) reconcileHost() {
 		}
 	}
 
+	// The resolver, before host state for the same reason the escape hatch is:
+	// Apply installs the route that changes where this machine's packets go, and
+	// a name table that lags that change resolves to answers the routing no
+	// longer agrees with.
+	if l.DNS != nil {
+		if d, err := DNSStateFromConfig(yamlCfg); err != nil {
+			l.Log.Error("could not read this network's name table", "error", err)
+		} else if err := l.DNS.Apply(d); err != nil {
+			// Not fatal: nebula is running and tunnels are unaffected. What is
+			// lost is resolving by name, which is a degraded machine rather
+			// than a disconnected one.
+			l.Log.Error("could not serve the mesh name table", "error", err)
+		}
+	}
+
 	if err := l.Host.Apply(want); err != nil {
 		// Not fatal to the data plane: nebula is already running and tunnels are
 		// unaffected. What is affected is everything BEHIND this gateway, so

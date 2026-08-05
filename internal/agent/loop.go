@@ -251,6 +251,11 @@ type Loop struct {
 	// not one, and on any platform that cannot be one.
 	Host HostConfigurer
 
+	// DNS serves the network's name table on this host's overlay address. Nil
+	// disables it, which is what every test and every platform that cannot read
+	// its own resolver configuration gets.
+	DNS *Resolver
+
 	// lastHostState is the last state successfully applied, so a reconcile that
 	// changes nothing does not log every cycle.
 	lastHostState string

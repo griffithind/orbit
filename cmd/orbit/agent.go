@@ -796,6 +796,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 		Client:  agent.NewClient(st.ControlURL()),
 		Applier: applier,
 		Host:    agent.NewHostConfigurer(nlog),
+		DNS:     agent.NewResolver(nlog),
 		Policy:  agent.DefaultRenewalPolicy(),
 		Layout:  layout,
 		Curve:   c,

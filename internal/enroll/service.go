@@ -832,6 +832,7 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 
 	fragment, err := nebulacfg.Render(nebulacfg.Input{
 		DNSDomain:    dnsDomainFor(net),
+		DNSListen:    firstAddr(host.Addrs),
 		Names:        names,
 		Paths:        inst.paths,
 		AmLighthouse: host.IsLighthouse,
@@ -1412,4 +1413,14 @@ func namesFor(ctx context.Context, tx *store.Tx, net *store.Network) ([]nebulacf
 		out = append(out, nebulacfg.Name{Name: r.Name, Addr: r.Addr})
 	}
 	return out, nil
+}
+
+// firstAddr is where this host's resolver binds. Zero when the membership has
+// no address yet, which renders no dns section at all rather than one that
+// cannot be served.
+func firstAddr(addrs []netip.Addr) netip.Addr {
+	if len(addrs) == 0 {
+		return netip.Addr{}
+	}
+	return addrs[0]
 }
