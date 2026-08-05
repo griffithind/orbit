@@ -62,8 +62,13 @@ services:
     # Host networking, and it is not optional. Nebula punches holes and hands
     # out the address it believes it is reachable at; behind a NAT bridge it
     # would advertise a container address and every host would dial somewhere
-    # that does not exist. This also means 4242/udp and 8080/tcp are bound on
-    # the host directly, so the host firewall is what governs them.
+    # that does not exist.
+    #
+    # So there is nothing to publish here: 8080/tcp and one UDP port PER NETWORK
+    # (4242 upwards — nebula's header has no network identifier, so one socket
+    # is one network) are bound on the host directly, and the host firewall is
+    # the only thing governing them. scripts/setup-control-plane.sh opens
+    # 4242-4257; see docs/deployment.md §1a.
     network_mode: host
 
     environment:

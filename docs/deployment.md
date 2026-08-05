@@ -50,7 +50,7 @@ stranger can reach is exposed by it beyond enrollment.
 
 | Port | Proto | Open to | Why |
 |---|---|---|---|
-| **4242** | udp | the internet | Nebula. The one hard requirement — memberships cannot find each other without it |
+| **4242-4257** | udp | the internet | Nebula, **one port per network**. 4242 is the first; a control plane serving one network uses only that |
 | **8080** | tcp | the internet | Enrollment and admin. Put TLS in front and use 443 once you have a name |
 | 22 | tcp | your addresses | ssh |
 | 8443 | — | **nothing** | The agent API listens on `orbitd`'s in-process userspace stack. The kernel never sees it, so there is nothing to open and no way to expose it by accident |
@@ -59,11 +59,30 @@ stranger can reach is exposed by it beyond enrollment.
 | 5432 | tcp | local | Postgres |
 
 ```bash
-firewall-cmd --permanent --add-port=4242/udp
+firewall-cmd --permanent --add-port=4242-4257/udp
 firewall-cmd --permanent --add-port=8080/tcp
 firewall-cmd --reload
 firewall-cmd --list-services   # confirm ssh survived before you drop the session
 ```
+
+**Why a range.** Nebula's v1 wire header carries no network identifier — 16
+bytes of version, type, subtype, reserved, remote index and message counter, and
+the remote index is an index into *one* interface's hostmap. A received packet
+therefore cannot be attributed to a network, so one UDP socket is one network
+and a control plane on N networks binds N ports. `-mesh <uuid>=<addr>:<port>`
+sets each one; omitting it takes `-nebula-port`, and two networks that both omit
+it are refused at startup rather than colliding inside nebula.
+
+Sixteen is the documented range because 4242 stays the first (a single-network
+deployment is unchanged), and sixteen covers what a self-hosted control plane
+plausibly runs — prod, staging, dev, a few per-tenant — while staying small
+enough to write as one rule. Past that, run a second `orbitd` over a disjoint
+set of networks, which is the scaling story regardless.
+
+Opening a port is not listening on it. Only the networks passed to `-mesh` bind
+anything; the rest refuse at the socket layer whatever the firewall says. If you
+would rather open exactly what you use, open `4242` plus one per additional
+network and revisit it when you add one.
 
 Minimal images often ship without firewalld — `dnf -y install firewalld &&
 systemctl enable --now firewalld` first, or use your provider's network firewall,
@@ -74,7 +93,7 @@ Verify from somewhere else, and check the negative case too:
 
 ```bash
 nc -zv  <host> 8080
-nc -zuv <host> 4242
+nc -zuv <host> 4242   # and one per additional network: 4243, 4244, …
 nc -zv  <host> 5432   # must FAIL
 ```
 

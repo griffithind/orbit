@@ -98,12 +98,27 @@ echo "docker $(docker --version | awk '{print $3}' | tr -d ,)"
 say "Firewall"
 
 systemctl enable --now firewalld >/dev/null
-firewall-cmd --permanent --add-port=4242/udp >/dev/null
+# A RANGE, not a single port, and the reason is structural rather than a
+# convenience. Nebula's wire header carries no network identifier, so one UDP
+# socket serves exactly one network and a control plane on N networks binds N
+# ports. Opening the range once, at install, is what stops adding a second
+# network from being a firewall change on a machine you may not be sitting at.
+#
+# 4242-4257 is sixteen. 4242 stays the first, so a single-network deployment is
+# unchanged; sixteen covers what a self-hosted control plane plausibly runs
+# (prod, staging, dev, a few per-tenant) while staying small enough to be one
+# rule rather than a wildcard. Past that, run a second instance over a disjoint
+# set of networks.
+#
+# Opening a port is not listening on it: only networks actually passed to -mesh
+# bind anything, and the rest refuse at the socket layer whatever the firewall
+# says.
+firewall-cmd --permanent --add-port=4242-4257/udp >/dev/null
 firewall-cmd --permanent --add-port=8080/tcp >/dev/null
 firewall-cmd --reload >/dev/null
 # 8443 is deliberately absent: the agent API listens on orbitd's in-process
 # userspace stack, so the kernel never binds it and there is nothing to open.
-echo "4242/udp and 8080/tcp open; ssh untouched"
+echo "4242-4257/udp and 8080/tcp open; ssh untouched"
 firewall-cmd --list-services | tr ' ' '\n' | grep -qx ssh \
     || echo "WARNING: ssh is not in the firewall's service list — check before you log out" >&2
 

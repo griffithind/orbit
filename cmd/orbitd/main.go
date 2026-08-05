@@ -77,11 +77,46 @@ func main() {
 	}
 }
 
-// meshSpecs is a repeatable -mesh flag: <network-uuid>=<overlay-addr>
+// The UDP ports a control plane's nebula instances use.
+//
+// One port per network, because nebula cannot share one (see meshSpecs). A
+// contiguous range is what lets a firewall rule and a cloud security group be
+// written once, at install, without knowing how many networks this control
+// plane will end up serving.
+//
+// SIXTEEN. The number is a judgement, so here is the reasoning: 4242 stays the
+// first, so a single-network deployment is unchanged and every existing
+// document stays correct. Sixteen covers what a self-hosted control plane
+// plausibly runs — prod, staging, dev, and a handful per-customer or
+// per-tenant — while staying small enough to state as one rule and to open
+// without feeling like a wildcard. Past that, run a second instance over a
+// disjoint subset of networks, which is the scaling story anyway.
+//
+// Opening a port is not listening on it: only the networks actually passed to
+// -mesh bind anything, and the rest are closed at the socket layer regardless
+// of the firewall.
+const (
+	DefaultNebulaPort    = 4242
+	DefaultNebulaPortMax = 4257
+)
+
+// meshSpecs is a repeatable -mesh flag: <network-uuid>=<overlay-addr>[:port]
 //
 // Joining is explicit per instance rather than implied by the network existing,
 // so scaling past a few hundred networks is a matter of running more instances
 // over disjoint subsets. `orbitd bootstrap` prints the exact flag.
+//
+// THE PORT IS PER NETWORK, and it has to be. Nebula's v1 header carries no
+// network identifier — 16 bytes of version, type, subtype, reserved, remote
+// index and message counter — and the remote index is an index into ONE
+// interface's hostmap. A received packet cannot be attributed to a network, so
+// one UDP socket is one network, and N networks need N ports.
+//
+// Omitting it takes -nebula-port, which is right for the single-network case
+// that is nearly everyone. Two networks that both omit it are refused by
+// checkMeshPorts rather than silently colliding: the second nebula would fail
+// with "address already in use" from inside a library, which is a long way from
+// the flag that caused it.
 type meshSpecs []mesh.Config
 
 func (m *meshSpecs) String() string { return fmt.Sprintf("%d networks", len(*m)) }
@@ -89,18 +124,63 @@ func (m *meshSpecs) String() string { return fmt.Sprintf("%d networks", len(*m))
 func (m *meshSpecs) Set(v string) error {
 	idAndAddr := strings.SplitN(v, "=", 2)
 	if len(idAndAddr) != 2 {
-		return fmt.Errorf("want <network-uuid>=<overlay-addr>, got %q", v)
+		return fmt.Errorf("want <network-uuid>=<overlay-addr>[:port], got %q", v)
 	}
 	networkID, err := uuid.Parse(idAndAddr[0])
 	if err != nil {
 		return fmt.Errorf("network id: %w", err)
 	}
-	addr, err := netip.ParseAddr(idAndAddr[1])
-	if err != nil {
-		return fmt.Errorf("overlay address: %w", err)
-	}
 
-	*m = append(*m, mesh.Config{NetworkID: networkID, Addr: addr})
+	// AddrPort first, then a bare address. The order matters and the two cannot
+	// be told apart by looking for a colon: an IPv6 overlay address is full of
+	// them. netip's own rule is the one to follow — a port means brackets, so
+	// "[fd00::1]:4242" parses here and "fd00::1" falls through to the bare form.
+	var cfg mesh.Config
+	if ap, err := netip.ParseAddrPort(idAndAddr[1]); err == nil {
+		if ap.Port() == 0 {
+			return fmt.Errorf("port 0 in %q: a lighthouse must be reachable at a "+
+				"known port, so this has to be a real one", v)
+		}
+		cfg = mesh.Config{NetworkID: networkID, Addr: ap.Addr(), ListenPort: int(ap.Port())}
+	} else {
+		addr, err := netip.ParseAddr(idAndAddr[1])
+		if err != nil {
+			return fmt.Errorf("overlay address: %w (an IPv6 address with a port "+
+				"needs brackets: [fd00::1]:4242)", err)
+		}
+		cfg = mesh.Config{NetworkID: networkID, Addr: addr}
+	}
+	*m = append(*m, cfg)
+	return nil
+}
+
+// checkMeshPorts refuses two networks on one UDP port.
+//
+// Caught HERE, before anything binds, because the alternative is discovering it
+// halfway through startup: the first network comes up, the second fails inside
+// nebula with "address already in use", and the operator is looking at a
+// library error rather than at the two flags that collided. Reporting both
+// network ids and the fix is the whole value of the check.
+func checkMeshPorts(meshes meshSpecs, defaultPort int) error {
+	byPort := map[int]uuid.UUID{}
+	for _, mc := range meshes {
+		port := mc.ListenPort
+		if port == 0 {
+			port = defaultPort
+		}
+		if other, taken := byPort[port]; taken {
+			return fmt.Errorf(
+				"networks %s and %s are both on UDP port %d, and nebula cannot "+
+					"share a port between networks: its wire header carries no "+
+					"network identifier, so one socket is one network.\n\n"+
+					"Give one of them its own port:\n"+
+					"  -mesh %s=<overlay-addr>:%d\n\n"+
+					"Ports %d-%d are the range Orbit's firewall guidance opens.",
+				other, mc.NetworkID, port,
+				mc.NetworkID, port+1, DefaultNebulaPort, DefaultNebulaPortMax)
+		}
+		byPort[port] = mc.NetworkID
+	}
 	return nil
 }
 
@@ -147,7 +227,9 @@ func serve(args []string) error {
 		addr       = fs.String("addr", ":8080", "listen address")
 		enrollURL  = fs.String("enroll-url", "", "public enroll URL handed to agents")
 		agentPort  = fs.Int("agent-port", 8443, "port the agent API listens on, on each overlay")
-		listenPort = fs.Int("nebula-port", 4242, "nebula UDP port written into rendered configs")
+		listenPort = fs.Int("nebula-port", DefaultNebulaPort,
+			"default nebula UDP port: what a -mesh without one takes, and what "+
+				"rendered configs use when neither the membership nor the network sets it")
 		trustXFF   = fs.Bool("trust-forwarded-for", false, "read the client address from X-Forwarded-For (only behind a trusted proxy)")
 		maxWatch   = fs.Int("max-watchers", 5000, "cap on concurrent long-poll connections per network")
 		noPush     = fs.Bool("no-push", false, "disable push updates; agents fall back to polling")
@@ -167,7 +249,11 @@ func serve(args []string) error {
 			"Prometheus exposition address; empty disables it. Bind to localhost or the overlay: the output is fleet inventory")
 		meshes meshSpecs
 	)
-	fs.Var(&meshes, "mesh", "join a network: <network-uuid>=<overlay-addr> (repeatable)")
+	fs.Var(&meshes, "mesh", fmt.Sprintf(
+		"join a network: <network-uuid>=<overlay-addr>[:port] (repeatable). "+
+			"One UDP port per network — nebula cannot share one. Omit it for "+
+			"-nebula-port; ports %d-%d are the documented range",
+		DefaultNebulaPort, DefaultNebulaPortMax))
 	_ = fs.Parse(args)
 
 	log := newLogger()
@@ -177,6 +263,9 @@ func serve(args []string) error {
 	// Checked before anything is opened or joined. A refusal that arrives after
 	// the store is up and the mesh is joined has already done work, and the
 	// operator has to unpick it to act on the message.
+	if err := checkMeshPorts(meshes, *listenPort); err != nil {
+		return err
+	}
 	*uiAddr = web.NormalizeAddr(*uiAddr)
 	if err := web.CheckExposure(*uiAddr, *uiURL); err != nil {
 		return err
@@ -363,7 +452,13 @@ func serve(args []string) error {
 		// for ListenPort — and the difference is invisible at a struct literal
 		// that simply omits one. See cmd/orbitd/wiring_test.go.
 		mc.AgentPort = *agentPort
-		mc.ListenPort = *listenPort
+		// AgentPort is shared across networks on purpose and ListenPort cannot
+		// be: the agent API listens on each network's own gvisor netstack, so
+		// the same number on two overlays is two independent listeners, while
+		// ListenPort is a real host UDP socket.
+		if mc.ListenPort == 0 {
+			mc.ListenPort = *listenPort
+		}
 		mc.LighthouseAddrs = splitCSV(*lighthouse)
 		mc.Relay = *relay
 		mc.Heartbeat = mesh.DefaultHeartbeat
