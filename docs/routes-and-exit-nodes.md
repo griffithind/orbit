@@ -275,7 +275,154 @@ machine's traffic.
 
 ---
 
-## 6. Order of work
+## 6. What the agent does to the host
+
+Today the agent touches **no** host state — no iptables, no `ip route`, no
+sysctl. Routes end that, and the ownership model is worth settling before the
+first rule is written rather than after.
+
+### The rule: mark the object, not just the record
+
+A state file saying "I added these rules" is not enough. It can be lost, and it
+says nothing about a rule somebody has since edited. The marker has to be on the
+host object itself, so the agent can find and remove its own work with no
+memory of having done it.
+
+**nftables — own a whole table.**
+
+```
+table inet orbit { ... }        # chains registered at hooks
+nft destroy table inet orbit    # removes everything, edited or not
+```
+
+One command, total, idempotent. This is what Tailscale does (`ts-table`), and
+their own issue tracker is mostly about the cases where owning less than a whole
+table goes wrong.
+
+**iptables — own whole chains**, since there is no private table:
+
+```
+ORBIT-OUTPUT, ORBIT-FORWARD, ORBIT-POSTROUTING
+```
+
+with a jump inserted at the head of each built-in. Removal is flush-chain,
+delete-jump, delete-chain. Never add or delete individual rules in a built-in
+chain: that is the thing that cannot be undone reliably once someone else has
+edited around it.
+
+**Routes — a private protocol number.**
+
+```
+ip route add 192.168.88.0/24 dev orbit-prod proto 201
+ip route flush proto 201
+```
+
+`proto` exists for exactly this. From `ip-route(8)`: *"A system setting up routes
+should set up all of its routes with a unique route origin number."* Anything
+without our number is not ours and is not touched.
+
+**Reconcile, do not fire-and-forget.** The same shape as the config divergence
+check: every cycle, compare the table and the `proto`-marked routes against what
+the signed config says they should be, and repair. A rule someone edited is
+detected and replaced, and the agent's records are never the authority — the
+host is inspected.
+
+**Uninstall must be total.** `orbit agent uninstall` destroys the table, flushes
+the proto, and leaves a machine indistinguishable from one Orbit never touched.
+That is testable, and it should have a test.
+
+### Who installs the route, nebula or us
+
+Nebula installs unsafe routes itself when `install: true`. That is the simple
+path and it should stay the default.
+
+Shielded routes (below) need **policy routing** — an `ip rule` and a private
+table — which nebula does not do. Those need `install: false` and agent-owned
+routes. So the division is per-route and follows the shield flag, not a global
+mode.
+
+---
+
+## 7. Shield: this prefix over the overlay, or not at all
+
+The ask: traffic for an advertised prefix must **never** take the local path,
+even when the machine is physically attached to the same network. A laptop on a
+café LAN that happens to use `192.168.88.0/24` must not reach the café's hosts
+believing they are yours — and must not leak to them.
+
+This is a real hazard, and the ordinary routing table gets it wrong: a
+directly-connected route wins over one pointing at a tunnel.
+
+### Two layers, and both are needed
+
+**Routing decides the normal case.** A rule at higher priority than `main`,
+pointing at a private table that holds the prefix via the tun:
+
+```
+ip rule add to 192.168.88.0/24 priority 100 lookup 201
+ip route add 192.168.88.0/24 dev orbit-prod table 201 proto 201
+```
+
+**Netfilter decides the failure case.** Routing changes — a new interface, DHCP,
+somebody's `ip route add`. The kill switch is what makes "never" true:
+
+```
+-d 192.168.88.0/24 ! -o orbit-prod -j DROP
+```
+
+Traffic for that prefix leaves through the overlay or it does not leave.
+
+### The exit-node form, and why nebula already has the hard part
+
+For `0.0.0.0/0` this is exactly wg-quick's kill switch, and the mechanism is
+worth naming because Orbit gets half of it free:
+
+- WireGuard marks its own outer packets with `FwMark` so they are not routed
+  back into the tunnel they carry. **Nebula's `so_mark` is the same knob**, which
+  is why the config comments say it "supports `0.0.0.0/0` unsafe_routes".
+- `ip rule ... not fwmark X lookup <table>` sends everything unmarked to the
+  tunnel table.
+- `ip rule table main suppress_prefixlength 0` is the elegant bit: the main
+  table's *default* route stops matching while its more-specific routes still
+  do. That is "allow LAN access" implemented correctly, for free, rather than as
+  a special case.
+
+So Orbit's exit-node shield is: set `so_mark`, add the rules above, add the
+kill-switch DROP for anything unmarked leaving a non-tun interface.
+
+### The lockout, which is the part to get right
+
+**A shielded `0.0.0.0/0` can cut the machine off from the control plane.** If the
+overlay is down, everything is dropped — including the agent's own HTTPS to the
+public enrol URL, which is the one path that could deliver a fix. Nebula's own
+UDP survives because of the mark; the agent's does not.
+
+Orbit already has the concept for this at the policy layer: the **management
+floor**, the reachability compiled policy may not remove
+(`enroll.managementEndpoints`). Shield needs the same idea one layer down, and
+the kill-switch rule must except:
+
+- packets carrying nebula's `so_mark` — the tunnel itself,
+- the control plane's public endpoint and its overlay replicas,
+- loopback and link-local, or DHCP cannot renew and the machine loses its lease.
+
+A shield that can lock a machine out of the only thing able to unlock it is not
+a safety feature. This carve-out is not optional, and it is the reason shield is
+worth designing rather than assembling from a blog post.
+
+### Shape
+
+```sql
+ALTER TABLE orbit.route ADD COLUMN shield boolean NOT NULL DEFAULT false;
+```
+
+Per route, like `masquerade` — a LAN prefix might be shielded while a second
+route on the same gateway is not, and `0.0.0.0/0` is the case that most wants
+it and most needs the carve-out.
+
+---
+
+## 8. Order of work
 
 1. `orbit.route` and the CA default, together — the second gates the first and
    is permanent, so it is not a thing to leave until the feature works.
@@ -285,8 +432,12 @@ machine's traffic.
 3. `nebulacfg` renders `tun.unsafe_routes`, grouping rows by prefix so multiple
    gateways become one entry with weighted `via` list.
 4. API, CLI and UI for offering and revoking a route.
-5. Exit nodes: `0.0.0.0/0`, the opt-in call, `ip_forward`, `so_mark`, and the
-   masquerade rule. Host surgery, and it belongs behind a route feature that
-   already works rather than in front of it.
+5. The host-state layer: the nftables table, the `proto` number, the reconcile
+   loop, and a test that uninstall leaves nothing behind. Before any rule is
+   written in anger.
+6. Exit nodes and shield: `0.0.0.0/0`, the opt-in call, `ip_forward`, `so_mark`,
+   masquerade, the policy-routing rules and the management carve-out. Host
+   surgery, and it belongs behind a route feature that already works rather
+   than in front of it.
 
 Access control needs no step. It already works.
