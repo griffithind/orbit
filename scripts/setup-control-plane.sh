@@ -18,6 +18,18 @@
 # see the closing notes.
 set -euo pipefail
 
+# EVERY `docker compose run` IN THIS SCRIPT MUST REDIRECT STDIN FROM /dev/null.
+#
+# The supported way to run this is `curl ... | sudo bash`, which puts the
+# SCRIPT ITSELF on stdin. `docker compose run` attaches stdin to the container
+# and consumes it — so it eats the rest of the script, bash reaches EOF, and the
+# run stops silently having done only the steps above the first such command.
+#
+# It exits 0 while doing so, which is the worst part: the database gets migrated
+# and nothing after that happens, so the operator is left with a healthy
+# Postgres, no network id, no admin token and no control plane — and no error to
+# search for. -T is not enough; it only disables TTY allocation.
+
 REPO_URL=${ORBIT_REPO_URL:-https://github.com/griffithind/orbit}
 # Resolved from the API, not pinned. A hardcoded default goes stale at every
 # release and installs an old control plane on a fresh machine — silently, since
@@ -264,7 +276,7 @@ fi
 #------------------------------------------------------------------------------
 say "Database"
 
-docker compose run --rm -T orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
+docker compose run --rm -T orbitd migrate -app-password "$POSTGRES_APP_PASSWORD" < /dev/null
 
 #------------------------------------------------------------------------------
 say "Bootstrap"
@@ -287,7 +299,7 @@ else
     out=bootstrap-output.txt
     umask 077
     docker compose run --rm -T orbitd bootstrap \
-        -network "$NETWORK" -cidr "$CIDR" -cert-ttl "$CERT_TTL" | tee "$out"
+        -network "$NETWORK" -cidr "$CIDR" -cert-ttl "$CERT_TTL" < /dev/null | tee "$out"
     chmod 0600 "$out"
 
     net=$(sed -n 's/^ *export ORBIT_NETWORK=//p' "$out" | tr -d '\r' | head -1)
@@ -326,7 +338,7 @@ say "Break-glass token"
 # Only on a fresh bootstrap: minting one on every re-run would leave a trail of
 # "*" tokens nobody is tracking, which is the opposite of what this is for.
 if [ "$FRESH" = 1 ]; then
-    BREAK_GLASS=$(docker compose run --rm -T orbitd token create \
+    BREAK_GLASS=$(docker compose run --rm -T orbitd token create < /dev/null \
         -name break-glass -scopes '*' 2>/dev/null | tr -d '\r' | tail -1)
     printf 'break-glass %s\n' "$BREAK_GLASS" >> bootstrap-output.txt
     chmod 0600 bootstrap-output.txt
