@@ -9,6 +9,43 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.4.2
+
+Deployment fixes. Nothing in the agent or control plane changed; if you have not
+run `deploy/compose.yml` or `setup-control-plane.sh` yet, this is the version to
+start from.
+
+### Fixed
+
+- **The compose file carried a second CA passphrase that was never read.** It
+  set `ORBIT_CA_KEY_PASSPHRASE_FILE` to a `./ca-pass` file the setup script
+  generated, alongside `ORBIT_KEK_PASSPHRASE` from `.env` — two independently
+  random secrets. Only one was ever used: that variable is a compatibility alias
+  from before the CA key moved into Postgres, read only when the KEK names are
+  unset.
+
+  Inert, and hazardous. Had `ORBIT_KEK_PASSPHRASE` ever been empty — an `.env`
+  edited by hand, a variable dropped by a wrapper — the control plane would have
+  silently fallen back to a different passphrase and failed to decrypt anything
+  it had stored, which reads as a corrupt database rather than a missing
+  variable. The file, its secret mount and its ownership dance are gone; one
+  secret, in `.env`.
+
+- **The control plane's device key did not survive a restart.** The image
+  declares `VOLUME /var/lib/orbit` and compose named no volume for it, so Docker
+  created an anonymous one — orphaned whenever the container is recreated, which
+  `compose up -d` does on any configuration change. The control plane came back
+  as a different device on its own network each time. The volume is now named.
+
+- **`make demo` authenticated as a role that cannot log in**, and exported
+  `ORBIT_ENROLL_PEPPER`, retired long ago and read by nothing.
+
+- **The container image would not build** when `go.mod` replaced nebula with the
+  submodule; carried over from v0.4.1 for anyone who skipped it.
+
+- The compose header documented `orbit host create` and `orbit host code`, verbs
+  the membership refactor removed.
+
 ## v0.4.1
 
 ### Fixed
