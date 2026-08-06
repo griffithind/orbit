@@ -77,11 +77,23 @@ func exitNodeList(ctx context.Context, args []string) error {
 		column{name: "IN USE"},
 	)
 	for _, r := range res.Value.Available {
-		t.add(shortFingerprint(r.ID), orDash(r.GatewayAddr), yesNo(r.Masquerade),
+		// The FULL id. It was shortened with shortFingerprint, which is right for
+		// a 64-hex digest and wrong for a uuid: a fingerprint is a handle nobody
+		// retypes, an id is the argument the very next command takes. Truncated,
+		// the hint below named something the table above could not supply.
+		t.add(r.ID, orDash(r.GatewayAddr), yesNo(r.Masquerade),
 			yesNo(r.ID == res.Value.CurrentRouteID))
 	}
 	t.render(out)
-	fmt.Fprintf(errOut, "\n  orbit exit-node use %s <route uuid>\n", fs.Arg(0))
+
+	// A command that can be run, not a shape to fill in. If exactly one route is
+	// on offer there is nothing to choose, so choose it in the example.
+	if len(res.Value.Available) == 1 {
+		fmt.Fprintf(errOut, "\n  orbit exit-node use %s %s\n",
+			fs.Arg(0), res.Value.Available[0].ID)
+	} else {
+		fmt.Fprintf(errOut, "\n  orbit exit-node use %s <ROUTE from the first column>\n", fs.Arg(0))
+	}
 	return nil
 }
 
