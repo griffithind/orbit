@@ -9,6 +9,32 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.4.3
+
+Setup script fixes, all three found by running it on a clean host. v0.4.2's
+script cannot complete via the documented `curl ... | sudo bash`; this is the
+version to install from.
+
+### Fixed
+
+- **`docker compose run` consumed the rest of the script.** The supported way to
+  run the setup is `curl ... | sudo bash`, which puts the SCRIPT ITSELF on
+  stdin. `docker compose run` attaches stdin to the container and reads it, so
+  the first such command swallowed everything below it, bash reached EOF, and
+  the run stopped.
+
+  It stopped with status 0. The database was migrated and bootstrap, the `.env`
+  write-back and `compose up` never ran — leaving a healthy Postgres, an empty
+  `ORBIT_NETWORK`, no admin token, no control plane, and no error to search for.
+  `-T` does not prevent this; it only disables TTY allocation. Every
+  `docker compose run` now redirects from `/dev/null`.
+
+- **The script did not fetch the nebula submodule.** Neither `git clone` nor
+  `git checkout` brings one, and `go.mod` replaces nebula with
+  `third_party/nebula`, so building the image locally failed on a missing file.
+  Only on the fallback path — taken exactly when the published image cannot be
+  pulled, which is what happens while a release's image job is still running.
+
 ## v0.4.2
 
 Deployment fixes. Nothing in the agent or control plane changed; if you have not
