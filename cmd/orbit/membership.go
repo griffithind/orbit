@@ -761,6 +761,11 @@ func membershipRm(ctx context.Context, args []string) error {
 }
 
 // splitCSV matches orbitd's helper of the same name: trimmed, empties dropped.
+// enrollPath is what -enroll-url carries beyond the origin. Kept beside the
+// trimming rather than imported so the two cannot drift silently: if the route
+// moves, this stops matching and the printed URL is wrong again.
+const enrollPath = "/enroll/v1/enroll"
+
 // joinURL is the URL to put in the join command printed for an operator to copy.
 //
 // The control plane's -enroll-url when it has one, because that is the address it knows
@@ -772,7 +777,13 @@ func membershipRm(ctx context.Context, args []string) error {
 // failure lands on the machine being enrolled rather than here.
 func joinURL(enrollURL, clientURL string) string {
 	if enrollURL != "" {
-		return enrollURL
+		// The BASE, not the enroll endpoint. -enroll-url is the full path an
+		// agent POSTs to, because that is what the agent needs; `agent join`
+		// takes the origin and appends the path itself. Printing the endpoint
+		// gave an operator a command that 404s — verified on a real control
+		// plane, where the pasted line failed and the same line minus the suffix
+		// enrolled first try.
+		return strings.TrimSuffix(enrollURL, enrollPath)
 	}
 	if clientURL != "" {
 		return clientURL
