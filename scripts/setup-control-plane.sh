@@ -137,6 +137,18 @@ else
 fi
 git -C "$DIR" checkout --quiet "v$VERSION" 2>/dev/null \
     || die "no tag v$VERSION in $REPO_URL"
+
+# Nebula is a submodule, and go.mod's replace points the build at it. Neither
+# clone nor checkout brings it, so without this the image build fails on a
+# missing file in third_party/nebula — and only on the fallback path, which is
+# the one taken exactly when the published image could not be pulled. Two things
+# have to go wrong before anyone sees it, which is why it survived a release.
+#
+# Recursive and after every checkout, not just the clone: a re-run that moves to
+# a new version moves the pointer with it.
+git -C "$DIR" submodule update --init --recursive --quiet \
+    || die "could not fetch the nebula submodule in $DIR"
+
 cd "$DIR/deploy"
 echo "orbit v$VERSION at $DIR"
 
