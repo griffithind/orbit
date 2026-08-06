@@ -107,7 +107,7 @@ func (t *Tx) DeleteRoute(ctx context.Context, id uuid.UUID) error {
 // `via` would point every machine at something that cannot answer.
 func (t *Tx) NetworkRoutes(ctx context.Context, networkID uuid.UUID) ([]Route, error) {
 	rows, err := t.tx.Query(ctx, `
-		SELECT `+routeCols+`, a.addr
+		SELECT `+routeCols+`, a.addr, h.name
 		  FROM orbit.route r
 		  JOIN orbit.membership h ON h.id = r.membership_id
 		  JOIN LATERAL (
@@ -127,7 +127,7 @@ func (t *Tx) NetworkRoutes(ctx context.Context, networkID uuid.UUID) ([]Route, e
 		var r Route
 		if err := rows.Scan(&r.ID, &r.NetworkID, &r.MembershipID, &r.Prefix,
 			&r.Weight, &r.Masquerade, &r.Install, &r.MTU, &r.CreatedAt,
-			&r.GatewayAddr); err != nil {
+			&r.GatewayAddr, &r.MembershipName); err != nil {
 			return nil, mapErr(err, "scan route")
 		}
 		out = append(out, r)

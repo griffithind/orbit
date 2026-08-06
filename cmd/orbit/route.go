@@ -91,18 +91,42 @@ func routeList(ctx context.Context, args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit route ls <membership name|uuid>")
+	if fs.NArg() > 1 {
+		return usageErrorf("usage: orbit route ls [membership name|uuid]\n\n" +
+			"With no argument, every route in the network.")
 	}
 	if err := o.load(); err != nil {
 		return err
 	}
 
-	id, err := o.resolveMembership(ctx, fs.Arg(0))
-	if err != nil {
-		return err
+	// NO ARGUMENT MEANS THE WHOLE NETWORK, and that is the common question.
+	// Routes were listable only per membership, so "what does this fleet route"
+	// could only be answered by somebody who already knew which machine to ask —
+	// which is the one thing an operator looking at a route table does not know.
+	var (
+		res   adminclient.Result[wire.RouteListResponse]
+		scope string
+		err   error
+	)
+	if fs.NArg() == 0 {
+		network, nerr := o.resolveNetwork(ctx)
+		if nerr != nil {
+			return nerr
+		}
+		networkID, perr := uuid.Parse(network.ID)
+		if perr != nil {
+			return perr
+		}
+		scope = network.Name
+		res, err = o.client.ListNetworkRoutes(ctx, networkID)
+	} else {
+		id, rerr := o.resolveMembership(ctx, fs.Arg(0))
+		if rerr != nil {
+			return rerr
+		}
+		scope = fs.Arg(0)
+		res, err = o.client.ListRoutes(ctx, id)
 	}
-	res, err := o.client.ListRoutes(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -110,20 +134,32 @@ func routeList(ctx context.Context, args []string) error {
 		return emitJSON(res.Raw)
 	}
 	if len(res.Value.Routes) == 0 {
-		fmt.Fprintf(errOut, "%s offers no routes.\n", fs.Arg(0))
+		fmt.Fprintf(errOut, "%s offers no routes.\n", scope)
 		return nil
 	}
 
-	t := newTable(o.r,
-		column{name: "PREFIX", elastic: true},
+	// GATEWAY only when listing the network. Asked about one machine the column
+	// is that machine repeated, which is noise; asked about the network it is
+	// the answer to "who carries this".
+	cols := []column{{name: "PREFIX", elastic: true}}
+	if fs.NArg() == 0 {
+		cols = append(cols, column{name: "GATEWAY"})
+	}
+	cols = append(cols,
 		column{name: "VIA"},
 		column{name: "WEIGHT"},
 		column{name: "NAT"},
 		column{name: "INSTALL"},
 	)
+	t := newTable(o.r, cols...)
 	for _, r := range res.Value.Routes {
-		t.add(r.Prefix, orDash(r.GatewayAddr), fmt.Sprint(r.Weight),
+		row := []string{r.Prefix}
+		if fs.NArg() == 0 {
+			row = append(row, orDash(r.MembershipName))
+		}
+		row = append(row, orDash(r.GatewayAddr), fmt.Sprint(r.Weight),
 			yesNo(r.Masquerade), yesNo(r.Install))
+		t.add(row...)
 	}
 	t.render(out)
 	return nil

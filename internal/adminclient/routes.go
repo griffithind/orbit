@@ -3,6 +3,7 @@ package adminclient
 import (
 	"context"
 	"net/http"
+	"net/url"
 
 	"github.com/google/uuid"
 
@@ -41,4 +42,10 @@ func (c *Client) SetExitNode(ctx context.Context, membershipID uuid.UUID, routeI
 		"/v1/memberships/"+membershipID.String()+"/exit-node", nil,
 		wire.SetExitNodeRequest{RouteID: routeID})
 	return err
+}
+
+// ListNetworkRoutes lists every route in a network, whoever offers it.
+func (c *Client) ListNetworkRoutes(ctx context.Context, networkID uuid.UUID) (Result[wire.RouteListResponse], error) {
+	q := url.Values{"network_id": {networkID.String()}}
+	return get[wire.RouteListResponse](ctx, c, "/v1/routes", q)
 }

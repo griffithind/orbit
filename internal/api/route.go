@@ -24,6 +24,39 @@ import (
 // with a message naming the CA — which is a legible failure in the right place,
 // rather than this layer duplicating a rule it would eventually disagree with.
 
+// handleListNetworkRoutes lists every route in a network.
+//
+// The listing that was missing. Routes were reachable only through
+// /v1/memberships/{id}/routes, so seeing what a network routes meant already knowing which
+// membership to ask — and the answer to "what does this fleet route" was assembled by
+// hand, or not at all. NetworkRoutes has always existed; it is what config rendering
+// reads, so this exposes the same view every host is already configured from.
+func (s *Server) handleListNetworkRoutes(w http.ResponseWriter, r *http.Request) {
+	networkID, err := uuid.Parse(r.URL.Query().Get("network_id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "network_id query parameter is required")
+		return
+	}
+
+	var out wire.RouteListResponse
+	out.Routes = []wire.RouteResponse{}
+	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
+		rs, err := tx.NetworkRoutes(ctx, networkID)
+		if err != nil {
+			return err
+		}
+		for _, rt := range rs {
+			out.Routes = append(out.Routes, routeResponse(rt, rt.MembershipName))
+		}
+		return nil
+	})
+	if err != nil {
+		s.notFoundOr(w, err, "network")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleListRoutes(w http.ResponseWriter, r *http.Request) {
 	membershipID, ok := pathUUID(w, r, "id")
 	if !ok {

@@ -155,3 +155,52 @@ func TestOnlyADefaultRouteCanBeAnExitNode(t *testing.T) {
 		t.Errorf("the error does not say what is wrong: %q", errResp.Error)
 	}
 }
+
+// TestNetworkRoutesAreListableWithoutKnowingWho.
+//
+// Routes were reachable only through /v1/memberships/{id}/routes, so answering "what does
+// this network route" required already knowing which membership to ask — the one thing
+// somebody reading a route table does not know. The rendering path has always had the
+// whole-network view; this is the same view, exposed.
+func TestNetworkRoutesAreListableWithoutKnowingWho(t *testing.T) {
+	h := setupRoutable(t, "192.168.10.0/24", "192.168.20.0/24")
+	ts := h.serve(t, freeUDPPort(t))
+
+	a := h.createAndEnroll(t, ts, "gw-a", "10.42.98.9", false, false, nil)
+	b := h.createAndEnroll(t, ts, "gw-b", "10.42.98.10", false, false, nil)
+
+	for _, add := range []struct {
+		id  string
+		req wire.CreateRouteRequest
+	}{
+		{a.id, wire.CreateRouteRequest{Prefix: "192.168.10.0/24"}},
+		{b.id, wire.CreateRouteRequest{Prefix: "192.168.20.0/24", Masquerade: true}},
+	} {
+		var rt wire.RouteResponse
+		if code := h.adminPost(t, ts.URL+"/v1/memberships/"+add.id+"/routes",
+			add.req, &rt); code != http.StatusCreated {
+			t.Fatalf("add route %s: status %d", add.req.Prefix, code)
+		}
+	}
+
+	var got wire.RouteListResponse
+	if code := h.adminReq(t, http.MethodGet,
+		ts.URL+"/v1/routes?network_id="+h.netID.String(), nil, &got); code != http.StatusOK {
+		t.Fatalf("list network routes: %d", code)
+	}
+	if len(got.Routes) != 2 {
+		t.Fatalf("want 2 routes across the network, got %d", len(got.Routes))
+	}
+
+	// The gateway's NAME comes back, so a listing reads without a lookup per row.
+	byPrefix := map[string]wire.RouteResponse{}
+	for _, r := range got.Routes {
+		byPrefix[r.Prefix] = r
+	}
+	if n := byPrefix["192.168.10.0/24"].MembershipName; n != "gw-a" {
+		t.Errorf("192.168.10.0/24 gateway name = %q, want gw-a", n)
+	}
+	if n := byPrefix["192.168.20.0/24"].MembershipName; n != "gw-b" {
+		t.Errorf("192.168.20.0/24 gateway name = %q, want gw-b", n)
+	}
+}

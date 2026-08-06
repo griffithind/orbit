@@ -161,6 +161,11 @@ type Route struct {
 	// the membership. Not stored: it is the membership's address, and copying it
 	// here would be a second place for it to be wrong.
 	GatewayAddr netip.Addr
+
+	// MembershipName is the gateway's name, carried so a network-wide listing
+	// reads without a lookup per row. Empty from the per-membership queries,
+	// where the caller already knows whose routes it asked for.
+	MembershipName string
 }
 
 type Role struct {
