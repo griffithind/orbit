@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -149,7 +150,16 @@ func TestFacts(t *testing.T) {
 		"/proc/sys/kernel/osrelease": "6.14.0-63.fc42.x86_64\n",
 	})
 	f := Facts("v1.11.0")
-	if f.OSVersion != "Fedora Linux 42 (Silverblue)" {
+	// The fake /etc/os-release only reaches the platforms that read one. Darwin
+	// asks sw_vers, which is the real machine and not something a test should
+	// pin — so this asserts the shape it must never have: an empty string, which
+	// is what every Mac reported before posture_darwin.go existed and what made
+	// a fleet look like it had agents that were not reporting.
+	if runtime.GOOS == "darwin" {
+		if f.OSVersion == "" {
+			t.Error("OSVersion is empty on darwin; sw_vers should name the machine")
+		}
+	} else if f.OSVersion != "Fedora Linux 42 (Silverblue)" {
 		t.Errorf("OSVersion = %q", f.OSVersion)
 	}
 	if f.Kernel != "6.14.0-63.fc42.x86_64" {

@@ -433,6 +433,25 @@ func (s *Service) Renew(ctx context.Context, membershipID uuid.UUID, req wire.Re
 // State answers an agent poll. Config and certificate material are included
 // only when the agent is behind, so a steady-state poll stays small.
 func (s *Service) State(ctx context.Context, membershipID uuid.UUID, knownConfig, knownBlock int64) (*wire.StateResponse, error) {
+	// EVERY poll records that this machine was heard from.
+	//
+	// Nothing did. RecordAgentReport ran on enrol and on join, and the agent
+	// POSTs a report only when something CHANGED — so a host that is healthy and
+	// up to date reported nothing ever again, and last_seen_at stayed frozen at
+	// the moment it enrolled. `orbit membership ls` showed a fleet polling every
+	// thirty seconds as hours stale, which is backwards from the one thing that
+	// column exists to say.
+	//
+	// Its own transaction, because the read below is a READ and this is a write.
+	// Best effort: liveness is a report about the fleet, and failing a poll —
+	// which is how a host gets its configuration — because we could not write a
+	// timestamp would turn a bookkeeping problem into an outage.
+	if err := s.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		return tx.TouchDevice(ctx, membershipID)
+	}); err != nil {
+		s.log.Warn("could not record that a host polled", "membership", membershipID, "error", err)
+	}
+
 	var resp wire.StateResponse
 	err := s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
 		host, err := tx.GetHost(ctx, membershipID)

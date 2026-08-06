@@ -1008,6 +1008,25 @@ func (t *Tx) recordReportOnDevice(ctx context.Context, membershipID uuid.UUID, r
 	return mapErr(err, "record agent report on device")
 }
 
+// TouchDevice records that a membership's machine was heard from, and nothing else.
+//
+// LIVENESS IS NOT CONVERGENCE, and conflating them was the first attempt at this. A poll
+// proves the machine is alive; what it has APPLIED is what its reports say. Advancing the
+// epoch here would make the control plane believe a generation was confirmed because a
+// host asked about it, which is how the unreachable-guard ends up reverting something
+// nobody confirmed.
+//
+// So this writes last_seen_at alone. Versions are left to the reports that actually carry
+// them; a poll does not send one.
+func (t *Tx) TouchDevice(ctx context.Context, membershipID uuid.UUID) error {
+	_, err := t.tx.Exec(ctx, `
+		UPDATE orbit.device d
+		   SET last_seen_at = now()
+		  FROM orbit.membership h
+		 WHERE h.id = $1 AND d.id = h.device_id`, membershipID)
+	return mapErr(err, "touch device")
+}
+
 // MeshName is one machine's name and one of its overlay addresses.
 type MeshName struct {
 	Name string

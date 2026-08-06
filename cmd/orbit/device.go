@@ -71,6 +71,11 @@ func deviceLs(ctx context.Context, args []string) error {
 		column{name: "HOSTNAME", elastic: true},
 		column{name: "ID"},
 		column{name: "OS"},
+		// Versions belong to the DEVICE — a laptop on three networks runs one
+		// agent — so this is where the fleet's "what is everything running"
+		// question is answered. It was only visible per-membership, where the
+		// same machine appears once per network.
+		column{name: "AGENT"},
 		column{name: "POSTURE"},
 		column{name: "SEEN"},
 	)
@@ -86,6 +91,7 @@ func deviceLs(ctx context.Context, args []string) error {
 		}
 		seen := d.LastSeenAt
 		t.add(orDash(name), shortFingerprint(d.ID), orDash(d.Facts.OSVersion),
+			orDash(d.Facts.AgentVersion),
 			postureSummary(d.Posture, d.PostureObservedAt), ago(&seen))
 	}
 	if shown == 0 {
