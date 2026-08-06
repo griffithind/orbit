@@ -950,6 +950,13 @@ func installCmd(args []string) error {
 			err, plan.Path, strings.Join(plan.Start, " "))
 	}
 
+	// The commands for THIS platform, because every piece of guidance around
+	// this one said systemctl and a Mac does not have it. The plan already
+	// computed them; printing them is the difference between an operator
+	// knowing the next command and translating one.
+	fmt.Fprintf(errOut, "\nManage it with (%s):\n\n  %s\n  %s\n",
+		plan.Manager, strings.Join(plan.Restart, " "), strings.Join(plan.Status, " "))
+
 	// The service is running and serving nothing, which is correct and worth
 	// saying — otherwise the obvious reading of "installed" is "done".
 	fmt.Fprintf(errOut, "\nThis machine belongs to no network yet. Join one:\n\n"+

@@ -158,6 +158,13 @@ func printNetwork(r renderer, n agent.NetworkStatus) {
 	// condition with a specific remedy, and none is visible from the epochs.
 	if !n.DataPlaneDownSince.IsZero() {
 		field("data plane", r.ansi("31", "down since "+ago(&n.DataPlaneDownSince)))
+		// Named for THIS platform. A dead data plane is the moment somebody
+		// reaches for the service manager, and telling a Mac to run systemctl
+		// sends them looking for a command that does not exist.
+		if restart, statusCmd := agent.ServiceCommands(); restart != "" {
+			field("", "restart with: "+restart)
+			field("", "logs with:    "+statusCmd)
+		}
 	}
 	if !n.UnconfirmedSince.IsZero() {
 		field("unconfirmed", "applied "+ago(&n.UnconfirmedSince)+

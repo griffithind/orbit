@@ -28,10 +28,17 @@ type ServicePlan struct {
 	Name string
 	// Contents is the rendered file.
 	Contents string
-	// Start and Status are the commands that bring it up and report on it,
-	// shown to the operator so the next step is never a guess.
-	Start  []string
-	Status []string
+	// Start, Restart and Status are the commands that bring it up, cycle it and
+	// report on it, shown to the operator so the next step is never a guess.
+	//
+	// RESTART EXISTS BECAUSE THE GUIDANCE KEPT SAYING systemctl. The plan has
+	// always known the platform — it renders a plist on darwin and a unit on
+	// Linux — while everything an operator READ assumed systemd, so a Mac was
+	// told to run a command it does not have. The machinery being right does not
+	// help if the sentence next to it is wrong.
+	Start   []string
+	Restart []string
+	Status  []string
 }
 
 // PlanService renders the service definition for this platform.
@@ -89,6 +96,7 @@ func systemdPlan(binary string, args []string, root string) ServicePlan {
 		Name:    name,
 		Path:    "/etc/systemd/system/" + name + ".service",
 		Start:   []string{"systemctl", "daemon-reload", "&&", "systemctl", "enable", "--now", name},
+		Restart: []string{"systemctl", "restart", name},
 		Status:  []string{"systemctl", "status", name},
 		Contents: `# Orbit agent. One process, every network this host has joined.
 #
@@ -148,6 +156,10 @@ func launchdPlan(binary string, args []string) ServicePlan {
 		Name:    label,
 		Path:    "/Library/LaunchDaemons/" + label + ".plist",
 		Start:   []string{"launchctl", "bootstrap", "system", "/Library/LaunchDaemons/" + label + ".plist"},
+		// kickstart -k rather than unload/load: it restarts a running job and
+		// starts a stopped one, which is the behaviour `systemctl restart` has
+		// and the reason an operator reaches for it.
+		Restart: []string{"launchctl", "kickstart", "-k", "system/" + label},
 		Status:  []string{"launchctl", "print", "system/" + label},
 		Contents: `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -287,4 +299,22 @@ func EnabledInstances(root, except string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// ServiceCommands returns the restart and status commands for this platform.
+//
+// For the places that need to TELL somebody what to run without installing
+// anything — `orbit status` reporting a dead data plane, most of all. It reaches
+// through PlanService so there is one source of truth: a platform whose commands
+// change here changes everywhere they are printed.
+func ServiceCommands() (restart, status string) {
+	// A placeholder binary path: nothing is written, and only the manager's own
+	// command names are read back out.
+	plan, err := PlanService("", "orbit", "")
+	if err != nil {
+		// A platform with no service manager has nothing to suggest, and a
+		// guess would be worse than silence.
+		return "", ""
+	}
+	return strings.Join(plan.Restart, " "), strings.Join(plan.Status, " ")
 }
