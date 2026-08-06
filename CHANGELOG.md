@@ -9,6 +9,60 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.4.4
+
+Routes now take effect when you add them, gateways forward on hosts that run a
+firewall, and a network's routes can be listed without knowing whose they are.
+
+### Fixed
+
+- **Adding a route did nothing for days.** A route is authority only once it is
+  in the gateway's CERTIFICATE — nebula reads unsafe networks from there and
+  nowhere else. Adding one left the gateway holding a certificate that did not
+  carry the prefix, while the control plane had already rendered that route into
+  every consumer's configuration. `orbit route add` returned success, every
+  other machine was told to reach a network through that gateway, and the
+  gateway refused to carry it until its ordinary renewal — roughly half a
+  certificate lifetime later.
+
+  The mechanism already existed and was wired to one input: enrolment pulls
+  renewal forward when a host's ADDRESS changed after its certificate was
+  issued. Routes are the same shape and were not checked. They are now, on
+  addition and on withdrawal — a gateway still carrying a prefix in its
+  certificate is still authorised to route it, whatever the table says.
+
+- **A gateway on Fedora, RHEL or any firewalld host dropped every forwarded
+  packet.** Orbit enabled IP forwarding and masqueraded, but the filter path
+  still decides whether a packet lives, and on those hosts that verdict belongs
+  to firewalld. `orbit status` reported the gateway forwarding and NATing —
+  both instructions had arrived and both had been applied — while nothing got
+  through.
+
+  It is not fixed with a rule in Orbit's own table, which was the first attempt.
+  nftables runs every base chain at a hook in priority order and `accept` only
+  means "continue to the next chain"; only `drop` is terminal. So the frontend
+  owns the verdict and the only way past it is to ask the frontend: the tun
+  joins firewalld's trusted zone, or gets a ufw route rule, or — where nothing
+  owns the verdict — needs nothing, because Orbit's table is then sufficient.
+  Each is one named object, removed on uninstall.
+
+- **`orbit membership reserve` printed a join command that returned 404.** It
+  echoed the control plane's `-enroll-url`, which is the full path an agent
+  POSTs to, while `orbit agent join -url` takes the origin and appends the path
+  itself.
+
+- **`orbit exit-node ls` truncated the route id** it then told you to pass to
+  `orbit exit-node use`, so the command's own next step could not be satisfied
+  from its output. With one route on offer the hint is now the whole command.
+
+### Added
+
+- **`orbit route ls` with no argument lists the whole network**, with the
+  gateway that offers each prefix. Routes were reachable only per membership, so
+  answering "what does this network route" required already knowing which
+  machine to ask. Backed by the same query configuration rendering reads, so the
+  listing cannot disagree with what hosts are configured from.
+
 ## v0.4.3
 
 Setup script fixes, all three found by running it on a clean host. v0.4.2's
