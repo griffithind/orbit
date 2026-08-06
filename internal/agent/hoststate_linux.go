@@ -36,7 +36,15 @@ import (
 // the day a network is dual stack and nobody remembers there were two tables.
 const nftFamily = "inet"
 
-type nftConfigurer struct{ log logger }
+type nftConfigurer struct {
+	log logger
+
+	// tunDev is remembered from the last Apply so Remove can undo the firewall
+	// frontend's interface assignment. Uninstall has no HostState to read, and
+	// the alternative — leaving the tun in firewalld's trusted zone forever — is
+	// a hole Orbit opened and did not close.
+	tunDev string
+}
 
 type logger interface {
 	Info(msg string, args ...any)
@@ -79,6 +87,14 @@ func (n *nftConfigurer) Apply(h HostState) error {
 		if err := setForwarding(true); err != nil {
 			return err
 		}
+		// Enabling ip_forward decides whether the kernel ROUTES the packet; the
+		// filter path still decides whether it lives. On firewalld and ufw hosts
+		// that verdict is not ours, and masquerading a packet something else
+		// already dropped is the failure this pairs with.
+		if err := ensureForwardAllowed(h); err != nil {
+			return err
+		}
+		n.tunDev = h.TunDev
 	}
 
 	// One transaction. `destroy` rather than `delete` so a first run, where the
@@ -117,6 +133,10 @@ func (n *nftConfigurer) Remove() error {
 	if err := removePolicyRoute(); err != nil {
 		return err
 	}
+	// Best effort: a machine that never forwarded has nothing here, and refusing
+	// to finish an uninstall because a zone assignment was already gone is the
+	// wrong direction.
+	_ = removeForwardAllowed(n.tunDev)
 	return n.removeTable()
 }
 
