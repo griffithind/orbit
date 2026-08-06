@@ -9,6 +9,44 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## v0.4.5
+
+Reporting fixes. A healthy fleet no longer describes itself as a broken one, and
+the agent names the commands for the platform it installed on.
+
+### Fixed
+
+- **`last seen` was frozen at enrolment.** The control plane recorded a host on
+  enrol and on join, and the agent posts a report only when something CHANGED —
+  so a machine that is healthy and up to date reported nothing ever again. A
+  host polling every thirty seconds read as hours stale, which is backwards from
+  the one thing that column exists to say, and it made every other reading in
+  the fleet view suspect.
+
+  Every poll now records that the machine was heard from, and only that.
+  Liveness is not convergence: a poll proves a host is alive, while what it has
+  APPLIED is what its reports say. Advancing an epoch on a poll would make the
+  control plane believe a generation was confirmed because a host asked about
+  it, which is how the unreachable-guard reverts something nobody confirmed.
+
+- **Macs reported no operating system.** Device facts read `PRETTY_NAME` from
+  `/etc/os-release`, which darwin does not have, so every Mac showed a blank OS
+  while Linux hosts reported themselves — which reads as an agent that is not
+  reporting rather than a file that is not there. `sw_vers` now names them.
+
+- **Every instruction said `systemctl`.** The agent has always rendered a
+  launchd plist on darwin and a systemd unit on Linux, but nothing printed the
+  difference, so a Mac was told to run a command it does not have.
+  `orbit agent install` and `orbit status` now name the restart and status
+  commands for the manager actually in use.
+
+### Added
+
+- **`orbit device ls` shows the agent version.** Versions are device-scoped by
+  design — a laptop on three networks runs one agent — so that listing is where
+  "what is everything running" is answered. It was previously visible only per
+  membership, where one machine appears once per network.
+
 ## v0.4.4
 
 Routes now take effect when you add them, gateways forward on hosts that run a
