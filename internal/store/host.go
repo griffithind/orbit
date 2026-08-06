@@ -106,7 +106,7 @@ const membershipCols = `h.id, h.network_id, h.name, h.role_id, h.tags,
 	coalesce(array(SELECT a.addr FROM orbit.membership_address a WHERE a.membership_id = h.id
 	               ORDER BY a.addr), '{}'),
 	h.listen_port, coalesce(h.tun_dev, ''),
-	h.config_overrides, h.restart_required_epoch, h.addr_changed_at,
+	h.config_overrides, h.restart_required_epoch, h.addr_changed_at, h.routes_changed_at,
 	h.device_id, h.advertise_port`
 
 // membershipFrom is the FROM clause membershipCols is written against; the two travel
@@ -136,7 +136,8 @@ func scanHost(row interface{ Scan(...any) error }) (*Membership, error) {
 		&h.LastSeenAt, &h.NebulaVersion, &h.AgentVersion, &h.CreatedAt,
 		&h.RoleName, &h.Addrs,
 		&h.ListenPort, &h.TunDev, &h.Overrides,
-		&h.RestartRequiredEpoch, &h.AddrChangedAt, &h.DeviceID, &h.AdvertisePort)
+		&h.RestartRequiredEpoch, &h.AddrChangedAt, &h.RoutesChangedAt,
+		&h.DeviceID, &h.AdvertisePort)
 	if err != nil {
 		return nil, err
 	}

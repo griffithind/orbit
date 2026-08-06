@@ -154,3 +154,46 @@ func (h *harness) reissue(t *testing.T, ctx context.Context, membershipID uuid.U
 		t.Fatalf("reissue: %v", err)
 	}
 }
+
+// TestRouteChangePullsRenewalForward.
+//
+// A route is authority only once it is in the gateway's CERTIFICATE — nebula reads
+// unsafe networks from there and nowhere else. Adding one therefore leaves the machine
+// holding a certificate that does not authorise the routing the control plane has already
+// told every other host to use, and the pull-forward existed for exactly that shape of
+// change but was wired only to addresses and groups.
+//
+// Without it `orbit route add` returned success and the route carried nothing until the
+// ordinary renewal, roughly half a certificate lifetime later — which is indistinguishable
+// from a broken gateway and is why this failure was reported as "I don't know if it's
+// going to work".
+func TestRouteChangePullsRenewalForward(t *testing.T) {
+	h := setup(t)
+	ts := h.serve(t, freeUDPPort(t))
+	ctx := context.Background()
+
+	host := h.createAndEnroll(t, ts, "routefwd", "10.42.12.2", false, false, nil)
+	client := xffClient(t, ts.URL, host.addr)
+
+	before := renewAfter(t, ctx, client)
+	if !before.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("baseline RenewAfter = %s, expected roughly the certificate midpoint", before)
+	}
+
+	if code := h.adminReq(t, http.MethodPost,
+		ts.URL+"/v1/memberships/"+host.id+"/routes",
+		wire.CreateRouteRequest{Prefix: "192.168.77.0/24"}, nil); code != http.StatusCreated &&
+		code != http.StatusOK {
+		t.Fatalf("add route: %d", code)
+	}
+
+	after := renewAfter(t, ctx, client)
+	if !after.Before(before) {
+		t.Fatalf("RenewAfter did not move earlier after a route was added: %s -> %s.\n"+
+			"The gateway keeps a certificate with no unsafe networks, so the route\n"+
+			"is stored, rendered to every consumer, and carries nothing.", before, after)
+	}
+	if after.After(time.Now().Add(time.Minute)) {
+		t.Errorf("RenewAfter = %s, expected roughly now so the gateway renews promptly", after)
+	}
+}

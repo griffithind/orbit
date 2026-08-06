@@ -251,6 +251,13 @@ type Membership struct {
 	// one that no longer authorises the packets it is sending.
 	AddrChangedAt *time.Time
 
+	// RoutesChangedAt is when this membership's routes last changed, or nil if
+	// they never have. Compared against the certificate's issued_at for the same
+	// reason AddrChangedAt is: routes live in the certificate's unsafe networks,
+	// so one issued before the change does not authorise the routing the control
+	// plane believes is in force.
+	RoutesChangedAt *time.Time
+
 	// LastSeenAt, NebulaVersion and AgentVersion are read from the DEVICE, not
 	// stored on this row — the columns were dropped in migration 0015.
 	//

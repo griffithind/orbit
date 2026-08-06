@@ -507,7 +507,14 @@ func (s *Service) State(ctx context.Context, membershipID uuid.UUID, knownConfig
 			// address moves the host is not merely behind, it is off the mesh
 			// until it reissues. Waiting out half a certificate lifetime for
 			// that is downtime, not latency.
-			if host.AddrChangedAt != nil && c.IssuedAt.Before(*host.AddrChangedAt) {
+			// ROUTES for the same reason, and it is the same failure. Nebula
+			// reads routing authority from the certificate, so a gateway whose
+			// routes changed after its certificate was issued is not merely
+			// behind — it will refuse to carry the prefix the control plane has
+			// already told every other machine to reach through it. Without
+			// this, `orbit route add` succeeded and did nothing until the
+			// ordinary renewal, half a certificate lifetime later.
+			if certStale(c.IssuedAt, host.AddrChangedAt, host.RoutesChangedAt) {
 				resp.RenewAfter = s.clock()
 			}
 		}
@@ -1423,4 +1430,18 @@ func firstAddr(addrs []netip.Addr) netip.Addr {
 		return netip.Addr{}
 	}
 	return addrs[0]
+}
+
+// certStale reports whether a certificate predates any change that belongs in it.
+//
+// Variadic over the timestamps rather than a chain of comparisons, so adding the
+// next thing that lives in a certificate is one argument and not another branch
+// somebody can forget to write.
+func certStale(issuedAt time.Time, changes ...*time.Time) bool {
+	for _, at := range changes {
+		if at != nil && issuedAt.Before(*at) {
+			return true
+		}
+	}
+	return false
 }

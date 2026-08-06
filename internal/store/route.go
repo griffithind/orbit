@@ -30,6 +30,21 @@ const routeCols = `r.id, r.network_id, r.membership_id, r.prefix, r.weight,
 // Bumps the config epoch, because every other machine's rendered configuration
 // changes: a new gateway is a new `via` entry in their unsafe_routes. Adding a
 // route nobody is told about would be a row that does nothing.
+// touchRoutes records that this membership's routes changed, so the next
+// enrolment tells it to renew immediately rather than at its ordinary time.
+//
+// now() rather than a Go clock: this has to be comparable with the certificate's
+// issued_at, which Postgres wrote, and mixing the two clocks is a skew bug that
+// only shows up on someone else's machine.
+func (t *Tx) touchRoutes(ctx context.Context, membershipID uuid.UUID) error {
+	_, err := t.tx.Exec(ctx,
+		`UPDATE orbit.membership SET routes_changed_at = now() WHERE id = $1`, membershipID)
+	if err != nil {
+		return mapErr(err, "touch routes")
+	}
+	return nil
+}
+
 func (t *Tx) CreateRoute(ctx context.Context, r *Route) error {
 	if r.Weight == 0 {
 		r.Weight = 1
@@ -45,6 +60,9 @@ func (t *Tx) CreateRoute(ctx context.Context, r *Route) error {
 	if err != nil {
 		return mapErr(err, "create route")
 	}
+	if err := t.touchRoutes(ctx, r.MembershipID); err != nil {
+		return err
+	}
 	_, err = t.BumpEpoch(ctx, r.NetworkID, EpochConfig)
 	return err
 }
@@ -55,14 +73,20 @@ func (t *Tx) CreateRoute(ctx context.Context, r *Route) error {
 // from "was never there" — the difference between a successful revocation and a
 // typo that left a route in place.
 func (t *Tx) DeleteRoute(ctx context.Context, id uuid.UUID) error {
-	var networkID uuid.UUID
+	var networkID, membershipID uuid.UUID
 	err := t.tx.QueryRow(ctx,
-		`DELETE FROM orbit.route WHERE id = $1 RETURNING network_id`, id).Scan(&networkID)
+		`DELETE FROM orbit.route WHERE id = $1 RETURNING network_id, membership_id`,
+		id).Scan(&networkID, &membershipID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return ErrNotFound
 		}
 		return mapErr(err, "delete route")
+	}
+	// Withdrawal matters as much as addition: a gateway still carrying a prefix
+	// in its certificate is still authorised to route it, whatever the table says.
+	if err := t.touchRoutes(ctx, membershipID); err != nil {
+		return err
 	}
 	_, err = t.BumpEpoch(ctx, networkID, EpochConfig)
 	return err
