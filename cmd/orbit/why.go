@@ -43,7 +43,7 @@ import (
 // tunnel is up and cannot read its peer's rules; the server knows both rulesets
 // and nothing about whether anybody has converged on them.
 func whyCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("why", flag.ExitOnError)
+	fs := flag.NewFlagSet("why", flag.ContinueOnError)
 	// The admin options are bound unconditionally so the two-operand form works
 	// without a mode flag. -network and -json mean the same thing either way,
 	// which is why they can be shared rather than duplicated.
@@ -58,7 +58,7 @@ func whyCmd(ctx context.Context, args []string) error {
 	// operands, and Go's flag package stops at the first non-flag — so
 	// `orbit why 10.42.0.9 -port 443` would silently ignore -port and answer a
 	// different question from the one asked.
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	switch fs.NArg() {

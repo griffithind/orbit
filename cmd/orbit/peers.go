@@ -20,7 +20,7 @@ import (
 // completed a handshake with is invisible from the server and obvious here.
 
 func peersCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("peers", flag.ExitOnError)
+	fs := flag.NewFlagSet("peers", flag.ContinueOnError)
 	var (
 		root    = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
 		network = fs.String("network", "", "which joined network; required only when this host has joined more than one")

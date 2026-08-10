@@ -18,10 +18,10 @@ import (
 // surface. A second consumer would be the thing that eventually moves a column
 // and quietly breaks a recovery check nobody runs until they need it.
 func whoamiCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("whoami", flag.ExitOnError)
+	fs := flag.NewFlagSet("whoami", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {

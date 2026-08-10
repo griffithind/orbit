@@ -25,7 +25,7 @@ import (
 // knows.
 
 func statusCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	var (
 		root   = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
 		asJSON = fs.Bool("json", false, "emit the raw report")

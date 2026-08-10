@@ -12,10 +12,10 @@ import (
 )
 
 func tokenLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("token ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("token ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -76,7 +76,7 @@ func orNever(s string) string {
 // A token that has to be copied out of a scrollback buffer is one that ends up in
 // a shell history.
 func tokenCreate(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("token create", flag.ExitOnError)
+	fs := flag.NewFlagSet("token create", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -87,7 +87,7 @@ func tokenCreate(ctx context.Context, args []string) error {
 		scopes = fs.String("scopes", "", "comma separated scopes; \"*\" grants everything (required)")
 		days   = fs.Int("expires-days", 0, "expire after N days; 0 means never")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if *name == "" {
@@ -145,10 +145,10 @@ reachable. Revoke it once a narrower token is in place:
 }
 
 func tokenRevoke(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("token revoke", flag.ExitOnError)
+	fs := flag.NewFlagSet("token revoke", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {

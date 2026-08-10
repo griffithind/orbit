@@ -153,6 +153,45 @@ knows what policy says and nothing about whether a handshake completed.
 
 ---
 
+## 4.3 `orbit netcheck`
+
+The layer below everything else in this document.
+
+`status`, `peers` and `why` all read the agent's socket, so all three need an
+agent that started. `netcheck` needs nothing: no token, no overlay, no agent. It
+is what to run when the answer to "why is this not working" is that the machine
+cannot reach the control plane at all.
+
+Four checks, reported separately because they send an operator to four different
+places:
+
+| check | a failure means |
+|---|---|
+| `dns` | the name does not resolve from here. Note a host using mesh DNS may have a resolver that is itself behind the overlay |
+| `tcp` | nothing is listening, or a firewall drops it. Not an authentication failure |
+| `tls` | the chain does not verify from this host — a private CA has to be in the system trust store |
+| `clock` | see below |
+
+The agent itself is reported as `--` rather than `FAIL` and does not affect the
+exit status, because netcheck is meant to be useful on a machine that has not
+been set up yet.
+
+Clock skew is measured against the control plane's own `Date` header rather than
+against NTP, because the control plane is what will refuse this host's
+certificate and its opinion of the time is the one that matters. The tolerance
+is two minutes: issuance backdates by one (`ca.ValidityFor` takes a skew
+allowance), so a minute is survivable and more is not — past that a freshly
+issued certificate has a `NotBefore` this host believes is in the future, and
+nebula refuses it.
+
+That failure is worth calling out because of how it presents. A wrong clock
+breaks enrolment and renewal and reports itself as a certificate error, which
+sends whoever is debugging to the CA — the one place the fault is not. Nothing
+else in the system says "your clock is wrong".
+
+Exit status is 0 when everything real passed, 1 otherwise, so `orbit netcheck`
+works as a health check without parsing its output.
+
 ## 5. Commands
 
 ```

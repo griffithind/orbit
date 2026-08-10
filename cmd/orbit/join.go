@@ -32,7 +32,7 @@ import (
 // docs/design-device-identity.md §3.
 
 func joinCmd(args []string) error {
-	fs := flag.NewFlagSet("join", flag.ExitOnError)
+	fs := flag.NewFlagSet("join", flag.ContinueOnError)
 	var (
 		url     = fs.String("url", "", "control plane base URL")
 		network = fs.String("network", "", "network to join, as a uuid or a slug")

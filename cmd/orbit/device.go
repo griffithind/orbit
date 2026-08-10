@@ -21,11 +21,11 @@ import (
 // the failure the device noun exists to remove. See docs/model.md §3.
 
 func deviceLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("device ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("device ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	gaps := fs.Bool("gaps", false, "only machines whose posture is not fully satisfied, unknowns included")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -80,10 +80,10 @@ func deviceLs(ctx context.Context, args []string) error {
 }
 
 func deviceShow(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("device show", flag.ExitOnError)
+	fs := flag.NewFlagSet("device show", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -155,11 +155,11 @@ func deviceBlock(ctx context.Context, args []string, unblock bool) error {
 	if unblock {
 		verb = "unblock"
 	}
-	fs := flag.NewFlagSet("device "+verb, flag.ExitOnError)
+	fs := flag.NewFlagSet("device "+verb, flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	reason := fs.String("reason", "", "recorded on the device and in the audit log")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -310,11 +310,11 @@ func (o *options) resolveDevice(ctx context.Context, ref string) (uuid.UUID, err
 // network's config epoch moves. Setting it per membership was how a partial edit
 // left half the fleet dialling somewhere nothing was listening.
 func deviceSetAddrs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("device set-addrs", flag.ExitOnError)
+	fs := flag.NewFlagSet("device set-addrs", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	clear := fs.Bool("clear", false, "remove every public address, so this machine is only found by hole punching")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {

@@ -122,7 +122,7 @@ func newLogger() *slog.Logger {
 }
 
 func enrollCmd(args []string) error {
-	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
+	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
 	var (
 		url  = fs.String("url", "", "control plane base URL")
 		code = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
@@ -221,7 +221,7 @@ func enrollCmd(args []string) error {
 }
 
 func runCmd(args []string) error {
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	var (
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		interval  = fs.Duration("interval", time.Minute, "poll interval")
@@ -798,7 +798,7 @@ func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool
 // rescans its root, so a join lands without a restart — and without dropping the
 // tunnels of every other network a restart would have taken with it.
 func installCmd(args []string) error {
-	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	var (
 		root      = fs.String("root", agent.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
@@ -873,7 +873,7 @@ func installCmd(args []string) error {
 }
 
 func uninstallCmd(args []string) error {
-	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	var (
 		keepDir = fs.Bool("keep-dir", false, "leave the per-network directory, including the certificate and key")
 		yes     = fs.Bool("y", false, "do not ask")

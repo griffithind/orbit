@@ -30,10 +30,10 @@ import (
 // its refusal is a 400 which maps to the same exit 2.
 
 func policyShow(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("policy show", flag.ExitOnError)
+	fs := flag.NewFlagSet("policy show", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -88,11 +88,11 @@ func inForce(source string) string {
 // review, which is why it exits non-zero on failure and prints nothing on stdout
 // unless asked.
 func policyCheck(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("policy check", flag.ExitOnError)
+	fs := flag.NewFlagSet("policy check", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	host := fs.String("host", "", "report what this host would compile to (name or uuid)")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -199,10 +199,10 @@ func renderRules(o options, dir string, rules []wire.PolicyRule) {
 // firewall". Exit 2 either way: a local refusal and the server's 400 are the same
 // class of problem, and a script must not have to tell them apart.
 func policyApply(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("policy apply", flag.ExitOnError)
+	fs := flag.NewFlagSet("policy apply", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -279,10 +279,10 @@ func versionOrNone(v int64) string {
 // successfully, reports the new epoch, and reads as fully converged while traffic
 // stops.
 func policyUse(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("policy use", flag.ExitOnError)
+	fs := flag.NewFlagSet("policy use", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {

@@ -24,7 +24,7 @@ import (
 // a rotation. Deciding it here is cheaper than discovering it after ten machines have
 // joined.
 func caCreate(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("ca create", flag.ExitOnError)
+	fs := flag.NewFlagSet("ca create", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -41,7 +41,7 @@ func caCreate(ctx context.Context, args []string) error {
 				"widened later — it is signed into the certificate, so adding a prefix "+
 				"means another CA and another rotation")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -106,10 +106,10 @@ func caCreate(ctx context.Context, args []string) error {
 }
 
 func caLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("ca ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("ca ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -173,12 +173,12 @@ func caLs(ctx context.Context, args []string) error {
 // curl that body is a wall of JSON, and the names in it are the only actionable
 // part.
 func caActivate(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("ca activate", flag.ExitOnError)
+	fs := flag.NewFlagSet("ca activate", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	ack := fs.Bool("acknowledge-cutoff", false,
 		"promote even though hosts have not converged, cutting them off (emergency use; audited separately)")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -269,10 +269,10 @@ func caActivate(ctx context.Context, args []string) error {
 }
 
 func caRetire(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("ca retire", flag.ExitOnError)
+	fs := flag.NewFlagSet("ca retire", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {

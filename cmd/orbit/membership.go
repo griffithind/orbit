@@ -19,7 +19,7 @@ import (
 //------------------------------------------------------------------------------
 
 func membershipLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -33,7 +33,7 @@ func membershipLs(ctx context.Context, args []string) error {
 		count  = fs.Bool("count", false, "also ask for the total matching the filter")
 		all    = fs.Bool("all", false, "follow cursors and print every page")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -170,11 +170,11 @@ func renderHostTable(r renderer, network *wire.NetworkResponse, hosts []wire.Mem
 // certificate list. Behind curl that is three requests, three JSON blobs, and
 // arithmetic on RFC3339 strings.
 func membershipShow(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership show", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership show", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	history := fs.Int("history", 0, "also list the N most recent certificates")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -366,7 +366,7 @@ func shortFingerprint(s string) string {
 // redeemed — so there is no half-provisioned row to clean up if the machine
 // never arrives, and no membership that names no machine.
 func membershipReserve(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership reserve", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership reserve", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -380,7 +380,7 @@ func membershipReserve(ctx context.Context, args []string) error {
 		publicAddr    = fs.String("public-addr", "", "comma-separated public addresses, hosts WITHOUT ports")
 		advertisePort = fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound one (NAT forwarding)")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if *name == "" {
@@ -461,7 +461,7 @@ func membershipReserve(ctx context.Context, args []string) error {
 }
 
 func membershipSet(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership set", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership set", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -471,7 +471,7 @@ func membershipSet(ctx context.Context, args []string) error {
 		relay         = fs.Bool("relay", false, "act as a relay")
 		advertisePort = fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound port (NAT forwarding). The ADDRESSES are a machine fact: `orbit device set-addrs`")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -568,10 +568,10 @@ func onlyGlobals(supplied map[string]bool) bool {
 // makes `orbit membership code web-01 | op create item` work without the code passing
 // through a shell history or a scrollback buffer.
 func membershipCode(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership code", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership code", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -623,10 +623,10 @@ func membershipBlock(ctx context.Context, args []string, unblock bool) error {
 	if unblock {
 		verb = "unblock"
 	}
-	fs := flag.NewFlagSet("membership "+verb, flag.ExitOnError)
+	fs := flag.NewFlagSet("membership "+verb, flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -673,11 +673,11 @@ func membershipBlock(ctx context.Context, args []string, unblock bool) error {
 }
 
 func membershipRm(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership rm", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	reason := fs.String("reason", "", "recorded in the audit log")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -787,10 +787,10 @@ func csvList(s string) []string {
 // easy to look at, so this is deliberately the shortest command in the CLI: a
 // network, and what is waiting in it.
 func membershipPending(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership pending", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership pending", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -831,11 +831,11 @@ func membershipPending(ctx context.Context, args []string) error {
 
 // membershipAuthorize admits a pending membership.
 func membershipAuthorize(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("membership authorize", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership authorize", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	role := fs.String("role", "", "assign this role while authorizing (name or uuid)")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {

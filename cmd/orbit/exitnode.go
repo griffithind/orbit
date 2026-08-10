@@ -20,10 +20,10 @@ import (
 // one it may not use produces a default route that carries nothing.
 
 func exitNodeList(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("exit-node ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("exit-node ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -84,10 +84,10 @@ func exitNodeUse(ctx context.Context, args []string, clear bool) error {
 	if clear {
 		name = "exit-node off"
 	}
-	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	want := 2

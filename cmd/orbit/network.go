@@ -12,10 +12,10 @@ import (
 )
 
 func networkLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("network ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("network ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -67,14 +67,14 @@ func networkLs(ctx context.Context, args []string) error {
 // the thing an operator watches after a block or a decommission. It is typed far
 // more often than everything under `network` combined.
 func convergeCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("converge", flag.ExitOnError)
+	fs := flag.NewFlagSet("converge", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
 		wait  = fs.Duration("wait", 0, "poll until every host has converged, or give up after this long")
 		every = fs.Duration("interval", 5*time.Second, "poll interval while waiting")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {

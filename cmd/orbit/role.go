@@ -16,10 +16,10 @@ import (
 )
 
 func roleLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("role ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("role ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -72,10 +72,10 @@ func firewallSummary(raw json.RawMessage) string {
 }
 
 func roleShow(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("role show", flag.ExitOnError)
+	fs := flag.NewFlagSet("role show", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -130,7 +130,7 @@ func roleShow(ctx context.Context, args []string) error {
 }
 
 func roleEdit(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("role edit", flag.ExitOnError)
+	fs := flag.NewFlagSet("role edit", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -138,7 +138,7 @@ func roleEdit(ctx context.Context, args []string) error {
 		groups   = fs.String("groups", "", "comma separated groups, replacing the current set")
 		firewall = fs.String("firewall", "", "path to a JSON firewall document, or - for stdin")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -261,10 +261,10 @@ func readFirewall(path string) (json.RawMessage, error) {
 }
 
 func roleRm(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("role rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("role rm", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {

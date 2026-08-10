@@ -118,8 +118,22 @@ is up, when it last reached the control plane — ask the agent on it:
 ```bash
 sudo orbit status                      # every network this host joined
 sudo orbit peers                       # the tunnels it actually holds
-sudo orbit why 10.42.0.9 -port 5432    # and why it can or cannot reach one
+sudo orbit why 10.42.0.9 --port 5432   # and why it can or cannot reach one
 ```
+
+When none of that works — the agent will not start, enrolment fails, renewal
+fails — the question is a layer below, and `netcheck` answers it without a
+token, without the overlay, and without the agent:
+
+```bash
+orbit netcheck
+```
+
+DNS, TCP, TLS and clock skew, reported separately because they send you to
+different places. The clock is the one worth knowing about: certificates last a
+day by default and nebula refuses one whose validity starts in the future, so a
+machine with a wrong clock cannot enrol or renew — and says so as a certificate
+error, which is the one place the problem is not.
 
 From your laptop, the same question with two memberships is answered by the control
 plane, in both directions at once:
@@ -276,7 +290,7 @@ taken.
 | [docs/revocation.md](docs/revocation.md) | How blocking propagates, and how to measure it |
 | [docs/credential-model.md](docs/credential-model.md) | Device credential vs user credential. The user half is designed, not built |
 | [docs/key-custody.md](docs/key-custody.md) | Where the CA and identity keys live, why a second replica does not work yet, and what to do about it |
-| [docs/diagnostics.md](docs/diagnostics.md) | The agent status socket behind `orbit status`, `peers` and `why` |
+| [docs/diagnostics.md](docs/diagnostics.md) | The agent status socket behind `orbit status`, `peers`, `why` and `netcheck` |
 
 Read `model.md` first — it is short, and every other document assumes its three
 nouns. Then `design.md` §1, which documents six properties of Nebula's certificate

@@ -67,10 +67,10 @@ func yesNo(b bool) string {
 }
 
 func routeList(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("route ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("route ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() > 1 {
@@ -148,7 +148,7 @@ func routeList(ctx context.Context, args []string) error {
 }
 
 func routeAdd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("route add", flag.ExitOnError)
+	fs := flag.NewFlagSet("route add", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -163,7 +163,7 @@ func routeAdd(ctx context.Context, args []string) error {
 			"do not put this route in consumers' system routing tables")
 		mtu = fs.Int("mtu", 0, "per-route MTU; 0 uses the tun's")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
@@ -216,10 +216,10 @@ func routeAdd(ctx context.Context, args []string) error {
 }
 
 func routeRemove(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("route rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("route rm", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {

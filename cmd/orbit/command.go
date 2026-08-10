@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"strings"
@@ -145,7 +146,7 @@ func (c *command) dispatch(ctx context.Context, path string, args []string) erro
 	if c.Flags != nil {
 		c.Flags(fs)
 	}
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		if err == flag.ErrHelp {
 			return &exitError{code: exitOK}
 		}
@@ -237,4 +238,25 @@ func (c *command) usage(path string, fs *flag.FlagSet) error {
 		fs.PrintDefaults()
 	}
 	return &exitError{code: exitUsage}
+}
+
+// parseLeaf parses a leaf command's flags.
+//
+// Leaves used flag.ContinueOnError, under which fs.Parse calls os.Exit itself. The
+// exit codes that produced were right by luck — 2 for a bad flag, 0 for -h,
+// which is what this returns — but it wrote to fs.Output() rather than the
+// errOut seam the tests replace, and it made all 41 error checks around
+// parseFlags unreachable.
+//
+// ContinueOnError plus this wrapper keeps the codes and routes everything
+// through one path.
+func parseLeaf(fs *flag.FlagSet, args []string) error {
+	fs.SetOutput(errOut)
+	if err := parseFlags(fs, args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return &exitError{code: exitOK}
+		}
+		return &exitError{code: exitUsage}
+	}
+	return nil
 }

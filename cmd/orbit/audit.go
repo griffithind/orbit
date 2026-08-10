@@ -18,7 +18,7 @@ import (
 // as the answer to a narrow question, and "nothing happened in that hour" is the
 // wrong thing to conclude during an incident.
 func auditCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("audit", flag.ExitOnError)
+	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -30,7 +30,7 @@ func auditCmd(ctx context.Context, args []string) error {
 		limit      = fs.Int("limit", 0, "rows to return, up to 1000")
 		meta       = fs.Bool("meta", false, "print each entry's metadata")
 	)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {

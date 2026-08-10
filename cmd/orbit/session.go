@@ -18,10 +18,10 @@ import (
 // plane at this moment. The history — who signed in, from where — is in
 // `orbit audit -action session.created`, which outlives these rows.
 func sessionLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("session ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("session ls", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
@@ -88,10 +88,10 @@ func sessionLs(ctx context.Context, args []string) error {
 // that matters: a prompt on something cheap teaches people to type y without
 // reading, which is what makes the prompt on an irreversible action worthless.
 func sessionRevoke(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("session revoke", flag.ExitOnError)
+	fs := flag.NewFlagSet("session revoke", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {

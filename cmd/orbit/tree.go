@@ -49,6 +49,11 @@ There is no --token flag: an argument is visible in ps to every user on the box.
 				Run: func(ctx context.Context, a []string) error { return peersCmd(ctx, a) },
 			},
 			{
+				Name: "netcheck", Short: "can this host reach the control plane, and is its clock right",
+				Raw: true,
+				Run: netcheckCmd,
+			},
+			{
 				Name: "why", Short: "why this host can or cannot reach a peer",
 				Args: "<peer> | <src> <dst>", Raw: true,
 				Run: func(ctx context.Context, a []string) error { return whyCmd(ctx, a) },
