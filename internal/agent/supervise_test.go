@@ -61,6 +61,19 @@ func (f *fakeSupervisor) Restart(context.Context) error {
 	return nil
 }
 
+// Ensure starts only when down, and reports whether it did — the contract the
+// self-healing path depends on. A supervisor that restarted unconditionally here
+// would drop every tunnel on the network once per cycle.
+func (f *fakeSupervisor) Ensure(ctx context.Context) (bool, error) {
+	f.mu.Lock()
+	if !f.known || f.running {
+		f.mu.Unlock()
+		return false, nil
+	}
+	f.mu.Unlock()
+	return true, f.Restart(ctx)
+}
+
 func (f *fakeSupervisor) set(running bool, instance string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

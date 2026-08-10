@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/slackhq/nebula/cert"
@@ -274,6 +275,12 @@ type Loop struct {
 	// across a restart costs one poll interval.
 	serverRenewAfter time.Time
 
+	// pollMu guards lastPoll and lastPollErr, which the status socket reads from
+	// its own goroutine while the loop writes them from the tick goroutine.
+	pollMu      sync.Mutex
+	lastPoll    time.Time
+	lastPollErr error
+
 	// now is injectable for tests.
 	now func() time.Time
 }
@@ -524,17 +531,15 @@ func (l *Loop) checkDataPlane(ctx context.Context) {
 // restartRequiredEpoch is the control plane's "this generation cannot be
 // hot-loaded" marker, or zero.
 //
-// One line once wire.StateResponse carries the field:
-//
-//	return resp.RestartRequiredEpoch
-//
 // An epoch rather than a boolean, and the difference is the whole idempotence
 // story: the server repeats the value on every poll so a host that missed one
 // response still learns of it, which means a boolean would be indistinguishable
 // from "restart again now" on the very next tick.
 func restartRequiredEpoch(resp *wire.StateResponse) int64 {
-	_ = resp
-	return 0
+	if resp == nil {
+		return 0
+	}
+	return resp.RestartRequiredEpoch
 }
 
 // restartRequired reports whether the control plane is asking for a restart
@@ -559,16 +564,6 @@ func (l *Loop) noteRestarted(resp *wire.StateResponse) {
 		l.Log.Info("restarted for the generation the control plane flagged",
 			"network", l.Layout.Network, "restartRequiredEpoch", e)
 	}
-}
-
-// responseConfigMode is the mode the control plane RENDERED this generation in.
-//
-// One line once wire.StateResponse carries the field:
-//
-//	return resp.ConfigMode
-func responseConfigMode(resp *wire.StateResponse) string {
-	_ = resp
-	return ""
 }
 
 // quarantinedEpoch is the generation this host is currently refusing, or zero.
@@ -628,26 +623,94 @@ func (l *Loop) adoptEndpoints(urls []string) {
 	}
 }
 
-// Tick performs one iteration.
+// cycle is everything an iteration does except deciding how to wait.
 //
-// Renewal runs before the configuration poll because a renewal response already
-// carries the current configuration; doing it the other way round would apply
-// the same generation twice.
+// Run and Tick share it so that "what the agent does each time round" has one
+// definition. It previously had two, and they had drifted: the daemon called
+// Tick, which did neither checkInstalled nor reconcileHost, so config-integrity
+// self-healing and host reconciliation were built, tested via Run, and never
+// executed in production.
 //
-// A failure in either half is logged and returned but is never allowed to
-// disturb the running data plane: the applier only installs a generation it has
-// already validated, and rolls back one that fails verification.
-func (l *Loop) Tick(ctx context.Context) error {
+// Order matters and is not arbitrary. Ensure first, so a host whose data plane
+// is down spends the cycle getting it back rather than talking to a control
+// plane it may not be able to reach without it. Renewal before the poll, because
+// a renewal response already carries the current configuration and doing it the
+// other way round would apply the same generation twice.
+func (l *Loop) cycle(ctx context.Context) {
+	l.ensureDataPlane(ctx)
 	l.checkGuard(ctx)
 	l.checkDataPlane(ctx)
 
+	// Every cycle, including the first. The first matters most: the machine may
+	// have been edited while the agent was stopped, which is exactly when
+	// someone would do it. It is a hash comparison against files already on this
+	// disk, so the steady-state cost is nothing.
+	l.checkInstalled()
+
+	// And the host's own forwarding rules, which live somewhere other things
+	// also write to and therefore have to be re-asserted rather than assumed.
+	l.reconcileHost()
+
 	if err := l.maybeRenew(ctx); err != nil {
-		// Renewal failure is not fatal to the tick. The existing certificate is
-		// still valid (that is the point of renewing at half life), and the
-		// configuration poll below may still have useful work to do.
+		// Renewal failure is not fatal. The existing certificate is still valid
+		// (that is the point of renewing at half life), and the configuration
+		// poll may still have useful work to do.
 		l.Log.Warn("renewal failed", "error", err)
 	}
-	return l.poll(ctx)
+}
+
+// ensureDataPlane restarts nebula if it is not running.
+//
+// Distinct from checkDataPlane, which only observes and records how long the
+// data plane has been down. Observing without acting is what left a host that
+// failed to start at boot down until the next new generation arrived.
+func (l *Loop) ensureDataPlane(ctx context.Context) {
+	sup := l.Applier.Supervisor
+	if sup == nil {
+		return
+	}
+	started, err := sup.Ensure(ctx)
+	if err != nil {
+		l.Log.Error("nebula is down and will not start",
+			"network", l.Layout.Network, "error", err)
+		return
+	}
+	if started {
+		l.Log.Info("nebula restarted", "network", l.Layout.Network)
+	}
+}
+
+// Tick performs one iteration and returns.
+//
+// This is the -once path. Run is the long-running one; both go through cycle,
+// so they cannot diverge again.
+//
+// A failure is logged and returned but is never allowed to disturb the running
+// data plane: the applier only installs a generation it has already validated,
+// and rolls back one that fails verification.
+func (l *Loop) Tick(ctx context.Context) error {
+	l.cycle(ctx)
+	return l.recordPoll(l.poll(ctx))
+}
+
+// recordPoll stores the outcome of the most recent poll for the status socket.
+//
+// "Last polled 40 minutes ago with no error" is a different diagnosis from
+// "polled a second ago and failed", and the epochs alone tell neither. Recorded
+// here rather than in the daemon so that both loops report it and the status
+// socket does not depend on which one is running.
+func (l *Loop) recordPoll(err error) error {
+	l.pollMu.Lock()
+	l.lastPoll, l.lastPollErr = l.clock(), err
+	l.pollMu.Unlock()
+	return err
+}
+
+// LastPoll reports when the loop last completed a poll, and what it returned.
+func (l *Loop) LastPoll() (at time.Time, err error) {
+	l.pollMu.Lock()
+	defer l.pollMu.Unlock()
+	return l.lastPoll, l.lastPollErr
 }
 
 // CurrentWindow reads the validity window of the certificate on disk.
@@ -998,23 +1061,7 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 
 	push := opts.Push
 	for ctx.Err() == nil {
-		l.checkGuard(ctx)
-		l.checkDataPlane(ctx)
-
-		// Every cycle, including the first. The first matters most: the machine
-		// may have been edited while the agent was stopped, which is exactly
-		// when someone would do it. It is a hash comparison against files
-		// already on this disk, so the steady-state cost is nothing.
-		l.checkInstalled()
-
-		// And the host's own forwarding rules, which live somewhere other
-		// things also write to and therefore have to be re-asserted rather
-		// than assumed.
-		l.reconcileHost()
-
-		if err := l.maybeRenew(ctx); err != nil {
-			l.Log.Warn("renewal failed", "error", err)
-		}
+		l.cycle(ctx)
 
 		if push {
 			outcome, err := l.watchOnce(ctx, opts.Hold)
@@ -1053,7 +1100,7 @@ func (l *Loop) Run(ctx context.Context, opts RunOptions) error {
 			continue
 		}
 
-		if err := l.poll(ctx); err != nil {
+		if err := l.recordPoll(l.poll(ctx)); err != nil {
 			l.Log.Warn("poll failed, keeping current configuration", "error", err)
 		}
 		l.sleep(ctx, opts.Interval, opts.Jitter)

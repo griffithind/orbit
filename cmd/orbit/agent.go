@@ -51,7 +51,6 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
-	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/version"
 )
@@ -168,13 +167,6 @@ Run "orbit agent <command> -h" for flags.
 `)
 	// No message: the listing above is the message, matching subUsage.
 	return &exitError{code: exitUsage}
-}
-
-func describeSupervisor(s agent.Supervisor) string {
-	if s == nil {
-		return "none"
-	}
-	return s.Describe()
 }
 
 func newLogger() *slog.Logger {
@@ -690,12 +682,6 @@ type networkLoop struct {
 	loop   *agent.Loop
 	engine *agent.Embedded
 	log    *slog.Logger
-
-	// mu guards the tick's own record of itself. Loop's state is NOT read
-	// through here — see status.
-	mu       sync.Mutex
-	lastPoll time.Time
-	lastErr  error
 }
 
 // status is this network as the socket reports it.
@@ -707,9 +693,7 @@ type networkLoop struct {
 // report on it. Reading the file is also the more honest answer — it is what
 // survives a restart, and it is what the control plane was last told.
 func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
-	n.mu.Lock()
-	lastPoll, lastErr := n.lastPoll, n.lastErr
-	n.mu.Unlock()
+	lastPoll, lastErr := n.loop.LastPoll()
 
 	layout := n.loop.Layout
 	out := agent.NetworkStatus{
@@ -832,53 +816,31 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	return &networkLoop{loop: loop, engine: engine, log: nlog}, nil
 }
 
+// run drives this network until ctx ends.
+//
+// The loop itself lives in agent.Loop, not here. This used to be a second
+// implementation — a ticker calling Loop.Tick — and the two drifted: Tick did
+// neither checkInstalled nor reconcileHost, and had no watch, so config-integrity
+// self-healing, host reconciliation and the entire push path were built, tested
+// against Loop.Run, and never executed by the daemon. Revocation propagation was
+// bounded by this ticker rather than by the notifier.
+//
+// One loop, one definition of a cycle, and -once is the same cycle without the
+// wait.
 func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool) {
-	tick := func() {
-		// Nebula first. It may have failed to start at boot, or died since —
-		// a fatal reader error stops it without stopping this process — and
-		// without this it would stay down until a NEW generation happened to
-		// arrive, which on a settled network is never.
-		//
-		// Before the poll rather than after, so that a host whose data plane is
-		// down spends the tick getting it back rather than talking to a control
-		// plane it may not be able to reach without it.
-		if started, err := n.engine.Ensure(ctx); err != nil {
-			n.log.Error("nebula is down and will not start", "error", err)
-		} else if started {
-			n.log.Info("nebula restarted")
-		}
-
-		err := n.loop.Tick(ctx)
-		if err != nil {
+	if once {
+		if err := n.loop.Tick(ctx); err != nil {
 			n.log.Warn("tick failed, keeping current configuration", "error", err)
 		}
-
-		// Recorded whether or not it failed. "Last polled 40 minutes ago with
-		// no error" is a different diagnosis from "polled a second ago and
-		// failed", and the epochs alone tell neither.
-		n.mu.Lock()
-		n.lastPoll, n.lastErr = time.Now(), err
-		n.mu.Unlock()
-	}
-
-	tick()
-	if once {
 		return
 	}
 
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			tick()
-		}
+	opts := agent.DefaultRunOptions()
+	opts.Interval = interval
+	if err := n.loop.Run(ctx, opts); err != nil && !errors.Is(err, context.Canceled) {
+		n.log.Warn("agent loop stopped", "error", err)
 	}
 }
-
-func parseCurve(name string) (cert.Curve, error) { return ca.ParseCurve(name) }
 
 // installCmd sets this MACHINE up: a device identity, a service, nothing else.
 //

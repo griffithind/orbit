@@ -45,7 +45,13 @@ func TestStatusIsSafeWhileTheAgentRuns(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// The tick, recording when it last ran and what it failed with.
+	// A second reader of the same loop state the socket reads.
+	//
+	// The write side moved into agent.Loop when the daemon stopped keeping its
+	// own copy of it — see TestLastPollIsSafeAcrossGoroutines there, which
+	// exercises the writer. What is still worth racing here is status() itself,
+	// which reads the state file, the certificate and LastPoll together while a
+	// slot underneath it is being replaced.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -55,9 +61,8 @@ func TestStatusIsSafeWhileTheAgentRuns(t *testing.T) {
 				return
 			default:
 			}
-			nl.mu.Lock()
-			nl.lastPoll, nl.lastErr = time.Now(), errors.New("control plane unreachable")
-			nl.mu.Unlock()
+			_, _ = nl.loop.LastPoll()
+			_ = nl.status(context.Background())
 		}
 	}()
 
