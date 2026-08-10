@@ -8,8 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const sessionVerbs = "ls, revoke"
-
 // sessionLs lists live browser sessions.
 //
 // Live only, which is the difference from `orbit token ls` and is deliberate.

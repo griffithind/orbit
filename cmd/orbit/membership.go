@@ -14,8 +14,6 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-const membershipVerbs = "ls, show, pending, authorize, reserve, set, code, block, unblock, rm"
-
 //------------------------------------------------------------------------------
 // ls
 //------------------------------------------------------------------------------
@@ -419,6 +417,8 @@ func membershipReserve(ctx context.Context, args []string) error {
 		}
 		req.RoleID = id.String()
 	}
+
+	o.announce(fmt.Sprintf("Reserving a place for %q in network %s", req.Name, network.Name))
 
 	res, err := o.client.Reserve(ctx, network.Slug, req)
 	if err != nil {
@@ -871,6 +871,12 @@ func membershipAuthorize(ctx context.Context, args []string) error {
 		}
 		roleID = id.String()
 	}
+
+	// Announced because this ADMITS a machine and allocates its address, which
+	// is the least reversible thing in the membership group. It was the one
+	// mutating command that said nothing, while `block` — which is reversible —
+	// announced.
+	o.announce(fmt.Sprintf("About to AUTHORIZE membership %s", membershipID))
 
 	res, err := o.client.Authorize(ctx, membershipID, roleID)
 	if err != nil {

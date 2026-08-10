@@ -103,20 +103,20 @@ removes one NETWORK, and the machine keeps serving every other one.`,
 				leaf("ls", "list the fleet, filtered and paginated", func(ctx context.Context, a []string) error { return membershipLs(ctx, a) }),
 				leaf("show", "everything about one membership", func(ctx context.Context, a []string) error { return membershipShow(ctx, a) }),
 				leaf("pending", "memberships waiting for authorization", func(ctx context.Context, a []string) error { return membershipPending(ctx, a) }),
-				leaf("authorize", "admit a pending membership", func(ctx context.Context, a []string) error { return membershipAuthorize(ctx, a) }),
-				leaf("reserve", "reserve a place, printing a single-use code", func(ctx context.Context, a []string) error { return membershipReserve(ctx, a) }),
-				leaf("set", "change role, tags, or lighthouse/relay flags", func(ctx context.Context, a []string) error { return membershipSet(ctx, a) }),
-				leaf("code", "mint a fresh enrollment code", func(ctx context.Context, a []string) error { return membershipCode(ctx, a) }),
-				leaf("block", "revoke its certificates and cut it off", func(ctx context.Context, a []string) error { return membershipBlock(ctx, a, false) }),
-				leaf("unblock", "lift a block", func(ctx context.Context, a []string) error { return membershipBlock(ctx, a, true) }),
-				leaf("rm", "remove it permanently", func(ctx context.Context, a []string) error { return membershipRm(ctx, a) }),
+				mutating("authorize", "admit a pending membership", func(ctx context.Context, a []string) error { return membershipAuthorize(ctx, a) }),
+				mutating("reserve", "reserve a place, printing a single-use code", func(ctx context.Context, a []string) error { return membershipReserve(ctx, a) }),
+				mutating("set", "change role, tags, or lighthouse/relay flags", func(ctx context.Context, a []string) error { return membershipSet(ctx, a) }),
+				mutating("code", "mint a fresh enrollment code", func(ctx context.Context, a []string) error { return membershipCode(ctx, a) }),
+				mutating("block", "revoke its certificates and cut it off", func(ctx context.Context, a []string) error { return membershipBlock(ctx, a, false) }),
+				mutating("unblock", "lift a block", func(ctx context.Context, a []string) error { return membershipBlock(ctx, a, true) }),
+				mutating("rm", "remove it permanently", func(ctx context.Context, a []string) error { return membershipRm(ctx, a) }),
 			}),
 			subgroup("device", "the machines themselves, across every network", nil, []*command{
 				leaf("ls", "every machine this control plane knows", func(ctx context.Context, a []string) error { return deviceLs(ctx, a) }),
 				leaf("show", "one machine and its memberships", func(ctx context.Context, a []string) error { return deviceShow(ctx, a) }),
-				leaf("set-addrs", "set the public addresses peers dial", func(ctx context.Context, a []string) error { return deviceSetAddrs(ctx, a) }),
-				leaf("block", "cut a machine off every network at once", func(ctx context.Context, a []string) error { return deviceBlock(ctx, a, false) }),
-				leaf("unblock", "lift a machine-wide block", func(ctx context.Context, a []string) error { return deviceBlock(ctx, a, true) }),
+				mutating("set-addrs", "set the public addresses peers dial", func(ctx context.Context, a []string) error { return deviceSetAddrs(ctx, a) }),
+				mutating("block", "cut a machine off every network at once", func(ctx context.Context, a []string) error { return deviceBlock(ctx, a, false) }),
+				mutating("unblock", "lift a machine-wide block", func(ctx context.Context, a []string) error { return deviceBlock(ctx, a, true) }),
 			}),
 			subgroup("network", "networks on this control plane", nil, []*command{
 				leaf("ls", "list networks", func(ctx context.Context, a []string) error { return networkLs(ctx, a) }),
@@ -124,39 +124,39 @@ removes one NETWORK, and the machine keeps serving every other one.`,
 			subgroup("role", "roles and their firewall rules", nil, []*command{
 				leaf("ls", "list roles", func(ctx context.Context, a []string) error { return roleLs(ctx, a) }),
 				leaf("show", "one role, with its rules", func(ctx context.Context, a []string) error { return roleShow(ctx, a) }),
-				leaf("edit", "change a role's name, groups or firewall", func(ctx context.Context, a []string) error { return roleEdit(ctx, a) }),
-				leaf("rm", "delete a role", func(ctx context.Context, a []string) error { return roleRm(ctx, a) }),
+				mutating("edit", "change a role's name, groups or firewall", func(ctx context.Context, a []string) error { return roleEdit(ctx, a) }),
+				mutating("rm", "delete a role", func(ctx context.Context, a []string) error { return roleRm(ctx, a) }),
 			}),
 			subgroup("policy", "the network policy document", nil, []*command{
 				leaf("show", "the document in force", func(ctx context.Context, a []string) error { return policyShow(ctx, a) }),
 				leaf("check", "validate a document without applying it", func(ctx context.Context, a []string) error { return policyCheck(ctx, a) }),
-				leaf("apply", "install a document", func(ctx context.Context, a []string) error { return policyApply(ctx, a) }),
-				leaf("use", "switch the network between role and policy firewalls", func(ctx context.Context, a []string) error { return policyUse(ctx, a) }),
+				mutating("apply", "install a document", func(ctx context.Context, a []string) error { return policyApply(ctx, a) }),
+				mutating("use", "switch the network between role and policy firewalls", func(ctx context.Context, a []string) error { return policyUse(ctx, a) }),
 			}),
 			subgroup("ca", "certificate authorities", nil, []*command{
-				leaf("create", "mint a new authority", func(ctx context.Context, a []string) error { return caCreate(ctx, a) }),
+				mutating("create", "mint a new authority", func(ctx context.Context, a []string) error { return caCreate(ctx, a) }),
 				leaf("ls", "list authorities and their state", func(ctx context.Context, a []string) error { return caLs(ctx, a) }),
-				leaf("activate", "promote one to sign new certificates", func(ctx context.Context, a []string) error { return caActivate(ctx, a) }),
-				leaf("retire", "stop trusting one", func(ctx context.Context, a []string) error { return caRetire(ctx, a) }),
+				mutating("activate", "promote one to sign new certificates", func(ctx context.Context, a []string) error { return caActivate(ctx, a) }),
+				mutating("retire", "stop trusting one", func(ctx context.Context, a []string) error { return caRetire(ctx, a) }),
 			}),
 			subgroup("route", "routes a membership advertises", nil, []*command{
 				leaf("ls", "routes on a membership, or the whole network", func(ctx context.Context, a []string) error { return routeList(ctx, a) }),
-				leaf("add", "advertise a prefix from a membership", func(ctx context.Context, a []string) error { return routeAdd(ctx, a) }),
-				leaf("rm", "stop advertising one", func(ctx context.Context, a []string) error { return routeRemove(ctx, a) }),
+				mutating("add", "advertise a prefix from a membership", func(ctx context.Context, a []string) error { return routeAdd(ctx, a) }),
+				mutating("rm", "stop advertising one", func(ctx context.Context, a []string) error { return routeRemove(ctx, a) }),
 			}),
 			subgroup("exit-node", "which route a membership uses for the internet", nil, []*command{
 				leaf("ls", "exit nodes available to a membership", func(ctx context.Context, a []string) error { return exitNodeList(ctx, a) }),
-				leaf("use", "send a membership's default route through one", func(ctx context.Context, a []string) error { return exitNodeUse(ctx, a, false) }),
-				leaf("off", "stop using an exit node", func(ctx context.Context, a []string) error { return exitNodeUse(ctx, a, true) }),
+				mutating("use", "send a membership's default route through one", func(ctx context.Context, a []string) error { return exitNodeUse(ctx, a, false) }),
+				mutating("off", "stop using an exit node", func(ctx context.Context, a []string) error { return exitNodeUse(ctx, a, true) }),
 			}),
 			subgroup("token", "admin tokens", nil, []*command{
 				leaf("ls", "list tokens", func(ctx context.Context, a []string) error { return tokenLs(ctx, a) }),
-				leaf("create", "mint a scoped token", func(ctx context.Context, a []string) error { return tokenCreate(ctx, a) }),
-				leaf("revoke", "revoke one", func(ctx context.Context, a []string) error { return tokenRevoke(ctx, a) }),
+				mutating("create", "mint a scoped token", func(ctx context.Context, a []string) error { return tokenCreate(ctx, a) }),
+				mutating("revoke", "revoke one", func(ctx context.Context, a []string) error { return tokenRevoke(ctx, a) }),
 			}),
 			subgroup("session", "browser sessions on the operator console", nil, []*command{
 				leaf("ls", "list sessions", func(ctx context.Context, a []string) error { return sessionLs(ctx, a) }),
-				leaf("revoke", "end one", func(ctx context.Context, a []string) error { return sessionRevoke(ctx, a) }),
+				mutating("revoke", "end one", func(ctx context.Context, a []string) error { return sessionRevoke(ctx, a) }),
 			}),
 			{
 				Name: "audit", Short: "read the audit trail",
@@ -196,4 +196,21 @@ func subgroup(name, short string, aliases []string, subs []*command) *command {
 // functions before anything could be run.
 func leaf(name, short string, run func(context.Context, []string) error) *command {
 	return &command{Name: name, Short: short, Raw: true, Run: run}
+}
+
+// mutating is a leaf that changes the control plane.
+//
+// The bit is not decoration. cmd/orbit/tree_test.go asserts that every command
+// marked here calls o.announce, which is the check that would have caught the
+// seven that did not — among them `membership authorize`, which admits a machine
+// and allocates its address, while `membership block`, which is reversible,
+// announced.
+//
+// Once leaves parse their flags through the table the announcement moves here
+// and the test becomes unnecessary. Until then the marker and the test together
+// are what make it a rule rather than a habit.
+func mutating(name, short string, run func(context.Context, []string) error) *command {
+	c := leaf(name, short, run)
+	c.Mutating = true
+	return c
 }

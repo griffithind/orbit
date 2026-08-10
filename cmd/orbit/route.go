@@ -20,8 +20,6 @@ import (
 // them and falls to a survivor — so `route add` on a second gateway is the whole
 // of high availability here, with nothing else to configure.
 
-const routeVerbs = "ls, add, rm"
-
 // resolveMembership turns a name or uuid into a membership id, in the selected
 // network. The same hop `orbit membership set` makes.
 func (o *options) resolveMembership(ctx context.Context, ref string) (uuid.UUID, error) {
@@ -188,6 +186,8 @@ func routeAdd(ctx context.Context, args []string) error {
 		req.Install = &no
 	}
 
+	o.announce(fmt.Sprintf("Advertising %s from membership %s", req.Prefix, fs.Arg(0)))
+
 	res, err := o.client.AddRoute(ctx, id, req)
 	if err != nil {
 		if api, ok := isConflict(err); ok {
@@ -233,6 +233,8 @@ func routeRemove(ctx context.Context, args []string) error {
 	if err != nil {
 		return usageErrorf("route rm takes a route uuid: %q", fs.Arg(0))
 	}
+	o.announce(fmt.Sprintf("About to REMOVE route %s", id))
+
 	if err := o.client.RemoveRoute(ctx, id); err != nil {
 		return err
 	}

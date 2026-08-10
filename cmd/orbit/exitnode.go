@@ -19,8 +19,6 @@ import (
 // whether this machine may reach 0.0.0.0/0 through that gateway, and choosing
 // one it may not use produces a default route that carries nothing.
 
-const exitNodeVerbs = "ls, use, off"
-
 func exitNodeList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("exit-node ls", flag.ExitOnError)
 	var o options
@@ -115,6 +113,15 @@ func exitNodeUse(ctx context.Context, args []string, clear bool) error {
 	if !clear {
 		routeID = fs.Arg(1)
 	}
+	// Announced because this reroutes a host's DEFAULT route: getting the wrong
+	// control plane here sends a production machine's internet traffic through
+	// a gateway chosen for staging.
+	if clear {
+		o.announce(fmt.Sprintf("About to STOP using an exit node on %q", fs.Arg(0)))
+	} else {
+		o.announce(fmt.Sprintf("About to route %q through exit node %s", fs.Arg(0), routeID))
+	}
+
 	if err := o.client.SetExitNode(ctx, id, routeID); err != nil {
 		return err
 	}

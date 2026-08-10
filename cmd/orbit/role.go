@@ -15,8 +15,6 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-const roleVerbs = "ls, show, edit, rm"
-
 func roleLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("role ls", flag.ExitOnError)
 	var o options

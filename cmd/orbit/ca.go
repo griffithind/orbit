@@ -12,8 +12,6 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-const caVerbs = "create, ls, activate, retire"
-
 // caCreate mints a CA. It does not start signing with it.
 //
 // The two steps are the whole of rotation: every host must hold the new CA before
@@ -72,6 +70,11 @@ func caCreate(ctx context.Context, args []string) error {
 		}
 		claim = net.Value.CIDRs
 	}
+
+	// Announced because what a CA may sign is fixed at creation and cannot be
+	// widened afterwards — a CA minted against the wrong control plane is not a
+	// mistake you edit, it is one you replace.
+	o.announce(fmt.Sprintf("Creating CA %q claiming %s", fs.Arg(0), strings.Join(claim, ", ")))
 
 	res, err := o.client.CreateCA(ctx, networkID, wire.CreateCARequest{
 		Name:           fs.Arg(0),

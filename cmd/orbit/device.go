@@ -20,8 +20,6 @@ import (
 // state, and asking "is it encrypted" three times and getting three answers is
 // the failure the device noun exists to remove. See docs/model.md §3.
 
-const deviceVerbs = "ls, show, set-addrs, block, unblock"
-
 func deviceLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("device ls", flag.ExitOnError)
 	var o options
@@ -339,6 +337,8 @@ func deviceSetAddrs(ctx context.Context, args []string) error {
 	if *clear {
 		addrs = nil
 	}
+
+	o.announce(fmt.Sprintf("Setting the public addresses of device %s", id))
 
 	res, err := o.client.SetDeviceAddrs(ctx, id, addrs)
 	if err != nil {

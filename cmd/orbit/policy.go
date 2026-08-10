@@ -29,8 +29,6 @@ import (
 // control plane will occasionally disagree; the server refuses in that case, and
 // its refusal is a 400 which maps to the same exit 2.
 
-const policyVerbs = "show, check, apply, use"
-
 func policyShow(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("policy show", flag.ExitOnError)
 	var o options

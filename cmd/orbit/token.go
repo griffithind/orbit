@@ -11,8 +11,6 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-const tokenVerbs = "ls, create, revoke"
-
 func tokenLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("token ls", flag.ExitOnError)
 	var o options
