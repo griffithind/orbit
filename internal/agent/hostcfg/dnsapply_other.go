@@ -1,6 +1,6 @@
 //go:build !linux && !darwin
 
-package agent
+package hostcfg
 
 // applyDNS refuses where there is no supported way to change the machine's resolver.
 //

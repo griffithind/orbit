@@ -1,6 +1,6 @@
 //go:build !linux && !darwin
 
-package agent
+package hostcfg
 
 // systemResolvers has no portable answer, so the resolver forwards nothing and answers
 // only mesh names. That is a worse resolver than no resolver, which is why the platforms
