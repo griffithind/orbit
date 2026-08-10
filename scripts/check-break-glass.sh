@@ -56,7 +56,7 @@ case "$code" in
     # The token authenticated once and does not now: revoked, expired, or the
     # database was restored from a backup that predates it.
     echo "FAIL  token rejected (401) — revoked, expired, or from a different deployment" >&2
-    echo "      mint a replacement: orbitd token create -name break-glass -scopes '*'" >&2
+    echo "      mint a replacement: orbitd token create --name break-glass --scopes '*'" >&2
     exit 1
     ;;
 403)

@@ -112,12 +112,12 @@ if [ "$CONTROL_PLANE" = 1 ]; then
     cat <<EOF
 Next, on this machine:
 
-  orbitd migrate -dsn "postgres://postgres@localhost/orbit" -app-password '<secret>'
-  orbitd bootstrap -dsn "\$ORBIT_DSN" -network prod -cidr 10.42.0.0/16 \\
-      -write-unit -enroll-url https://<public>/enroll/v1/enroll \\
-      -overlay-addr 10.42.0.1 -lighthouse <public>:4242
+  orbitd migrate --dsn "postgres://postgres@localhost/orbit" --app-password '<secret>'
+  orbitd bootstrap --dsn "\$ORBIT_DSN" --network prod --cidr 10.42.0.0/16 \\
+      --write-unit --enroll-url https://<public>/enroll/v1/enroll \\
+      --overlay-addr 10.42.0.1 --lighthouse <public>:4242
 
-bootstrap prints an admin token once, and -write-unit leaves a unit ready to
+bootstrap prints an admin token once, and --write-unit leaves a unit ready to
 enable.
 EOF
 else
@@ -125,14 +125,14 @@ else
 Next, on this host:
 
   sudo orbit agent install
-sudo orbit join -url https://<control-plane> -network prod
+sudo orbit join --url https://<control-plane> --network prod
 
 That generates this machine's device identity, asks to join, and waits for an
 operator to authorize it with 'orbit membership authorize <id>'.
 
 To skip the wait, have someone with an admin token reserve a place first —
-'orbit membership reserve -name <name>' prints a single-use code — and pass it:
+'orbit membership reserve --name <name>' prints a single-use code — and pass it:
 
-  sudo orbit join -url https://<control-plane> -network prod -code orb_1_…
+  sudo orbit join --url https://<control-plane> --network prod --code orb_1_…
 EOF
 fi

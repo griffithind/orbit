@@ -510,12 +510,12 @@ Routes, exit nodes and the gateway host-state layer. Shield is not.
 
 ```bash
 # The CA must permit it, and this is the only time it can be decided.
-orbitd bootstrap -network prod -cidr 10.42.0.0/16 \
-    -unsafe-networks 192.168.88.0/24
+orbitd bootstrap --network prod --cidr 10.42.0.0/16 \
+    --unsafe-networks 192.168.88.0/24
 
 # Then, per gateway:
 orbit route add lab-pi 192.168.88.0/24
-orbit route add spare-pi 192.168.88.0/24 -weight 5   # redundancy, that is all
+orbit route add spare-pi 192.168.88.0/24 --weight 5   # redundancy, that is all
 orbit route ls lab-pi
 orbit route rm <uuid>
 ```
@@ -548,7 +548,7 @@ interface, and an `unsafe_route` naming itself is a loop.
 ### Exit nodes
 
 ```bash
-orbit route add lab-pi 0.0.0.0/0 -masquerade   # the gateway offers it
+orbit route add lab-pi 0.0.0.0/0 --masquerade   # the gateway offers it
 orbit exit-node ls laptop                       # what is on offer
 orbit exit-node use laptop <route-uuid>         # this machine chooses it
 orbit exit-node off laptop

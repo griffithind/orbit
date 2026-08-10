@@ -327,7 +327,7 @@ and blocking are unaffected; the network simply has no agent API, so its members
 cannot poll, renew, or receive pushed revocations. Joining is an explicit
 per-instance decision rather than an implicit consequence of creating a network.
 
-**Shard by network, horizontally.** `-mesh` is per-instance and the store is
+**Shard by network, horizontally.** `--mesh` is per-instance and the store is
 shared, so scaling past a few hundred networks is a matter of running more
 orbitd instances, each joining a disjoint subset. No coordination is needed: the
 agent API is stateless and the notifier fans out from Postgres, which every
@@ -343,7 +343,7 @@ control plane.
 
 **Memberships scale independently of networks.** The limit there is watcher
 connections — one HTTP connection and one goroutine per agent long-polling —
-capped by `-max-watchers` (default 5000 per network) and ultimately by the
+capped by `--max-watchers` (default 5000 per network) and ultimately by the
 process's file descriptors. Agents that cannot get a watcher slot fall back to
 polling, which is why that cap fails soft rather than refusing service.
 

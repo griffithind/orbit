@@ -196,7 +196,7 @@ The sequencing that keeps the tree working:
    version, kernel, arch, agent and nebula version, plus disk encryption, secure
    boot, firewall and TPM presence. Native reads, no osquery. The agent sends
    them on every report; the control plane resolves the membership to its device
-   and records once. `GET /v1/devices`, `orbit device ls -gaps`,
+   and records once. `GET /v1/devices`, `orbit device ls --gaps`,
    `orbit device show`, and device-wide blocking.
 3. **Codes become reservations.** *(Done.)* `POST /v1/memberships` is gone, along
    with `orbit membership reserve` and the web's Add-a-host form. An enrollment
@@ -204,7 +204,7 @@ The sequencing that keeps the tree working:
    reservation — name, optional pinned address, optional role — and the
    membership is created at redemption, already naming its device. `POST
    /v1/networks/{ref}/reservations`, `orbit membership reserve`,
-   `orbit join -code`.
+   `orbit join --code`.
 
    Two consequences that were not obvious in advance. Address exhaustion moved
    from creation to REDEMPTION, because a reservation holds a name and does not

@@ -142,8 +142,8 @@ The complete answer belongs to the control plane, which holds both compiled
 rulesets:
 
 ```
-orbit why <src> <dst> [-proto tcp] [-port 5432]     # admin, bidirectional, authoritative on policy
-orbit why <peer>      [-proto tcp] [-port 5432]     # node-local, one direction, live path state
+orbit why <src> <dst> [--proto tcp] [--port 5432]     # admin, bidirectional, authoritative on policy
+orbit why <peer>      [--proto tcp] [--port 5432]     # node-local, one direction, live path state
 ```
 
 This split falls out of the CLI survey: node-local commands answer about *this
@@ -196,16 +196,16 @@ works as a health check without parsing its output.
 
 ```
 orbit status                        # all networks, one screen
-orbit peers [-network <slug>]       # hostmap table
-orbit why <peer>      [-proto] [-port]   # this host: identity, path, its own rules
-orbit why <src> <dst> [-proto] [-port]   # the control plane: both directions
+orbit peers [--network <slug>]       # hostmap table
+orbit why <peer>      [--proto] [--port]   # this host: identity, path, its own rules
+orbit why <src> <dst> [--proto] [--port]   # the control plane: both directions
 ```
 
 `orbit why` dispatches on the number of operands rather than on a mode flag,
 because it is one question — may these two talk — asked from the two places
 that can answer parts of it.
 
-`-json` on all of them. The human format is the default because these are read by
+`--json` on all of them. The human format is the default because these are read by
 people under time pressure; the JSON is for scripts and for `bugreport` later.
 
 `orbit status` with no agent running must say "the agent is not running" and

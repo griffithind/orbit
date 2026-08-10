@@ -12,7 +12,7 @@ what happens when renewal stops working.
 | | Gate | Command | When |
 |---|---|---|---|
 | **Join** | a human says yes | `orbit join` | a machine handed to a person; anything provisioned before its name is decided |
-| **Reservation** | a code, made in advance | `orbit membership reserve` then `orbit join -code` | unattended provisioning, where nobody is watching a queue |
+| **Reservation** | a code, made in advance | `orbit membership reserve` then `orbit join --code` | unattended provisioning, where nobody is watching a queue |
 
 A reservation records the whole of the operator's intent — name, address, role,
 and whether the machine will be a lighthouse or a relay and where it is
@@ -359,7 +359,7 @@ nobody, and expires never (`design-device-identity.md` §2). So the circle is
 gone, and the way back is the way in:
 
 ```bash
-orbit join -url https://orbit.example.com -network prod
+orbit join --url https://orbit.example.com --network prod
 ```
 
 The join is idempotent: it resolves the device by its key and returns the

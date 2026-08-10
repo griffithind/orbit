@@ -104,7 +104,7 @@ Implementation notes that matter:
 - Hold the connection with a **timeout shorter than the shortest idle timeout in
   the path** — 30 seconds is a safe default against most proxies and NATs.
 - Send a heartbeat comment so intermediaries do not consider the stream idle.
-- Cap concurrent watchers **per network** (`-max-watchers`); otherwise one large
+- Cap concurrent watchers **per network** (`--max-watchers`); otherwise one large
   network exhausts the connection pool for every other one on the deployment.
   The cap fails soft: an agent that cannot get a slot falls back to polling.
 - The watch endpoint is on the overlay, so a blocked host loses its tunnel and

@@ -62,7 +62,7 @@ Two consequences worth stating plainly:
 first start        orbit generates a device key           (no network, no control plane)
                    → device.key, never leaves the host
 
-join               orbit join <network-id> -url <cp>      (optionally: -code <enrollment code>)
+join               orbit join <network-id> --url <cp>      (optionally: --code <enrollment code>)
                    → control plane records the device public key
                    → host row created in state `pending`
 

@@ -13,11 +13,11 @@ CLI, and a web console. It runs Nebula unforked, as a library, so a managed host
 is one binary and one service.
 
 ```bash
-orbit membership reserve -name web-03 -role web        # → orb_1_…, single use
+orbit membership reserve --name web-03 --role web        # → orb_1_…, single use
 
 sudo orbit agent install                               # once per machine
-sudo orbit join -url https://orbit.example.com \
-    -network prod -code orb_1_…                        # once per network
+sudo orbit join --url https://orbit.example.com \
+    --network prod --code orb_1_…                        # once per network
 
 orbit membership block web-03                          # off the mesh in ~5s
 ```
@@ -25,7 +25,7 @@ orbit membership block web-03                          # off the mesh in ~5s
 Or with nobody holding a code: the machine asks, and you say yes.
 
 ```bash
-sudo orbit join -url https://orbit.example.com -network prod
+sudo orbit join --url https://orbit.example.com --network prod
 orbit membership pending                          # what is waiting
 orbit membership authorize <id>
 ```
@@ -96,19 +96,19 @@ Every machine after that: reserve a place from your laptop, then set the machine
 up and join it.
 
 ```bash
-orbit membership reserve -name web-01 -role web        # prints the code
+orbit membership reserve --name web-01 --role web        # prints the code
 
 # On the machine. install is once; join is once per network.
 sudo orbit agent install
-sudo orbit join -url https://orbit.example.com -network prod -code orb_1_…
+sudo orbit join --url https://orbit.example.com --network prod --code orb_1_…
 ```
 
 `install` generates the machine's device identity and installs the service;
 `join` adds one network, and the service picks it up without a restart. A
 machine on three meshes is installed once and joined three times.
 
-An address is allocated when the machine arrives; `-addr` on the reservation
-pins one for the cases that need it. Drop the `-code` and the machine waits in
+An address is allocated when the machine arrives; `--addr` on the reservation
+pins one for the cases that need it. Drop the `--code` and the machine waits in
 `orbit membership pending` for you to authorize it — the better shape for a
 laptop handed to somebody, because no secret has to travel to it.
 
@@ -139,7 +139,7 @@ From your laptop, the same question with two memberships is answered by the cont
 plane, in both directions at once:
 
 ```bash
-orbit why web-01 db-01 -proto tcp -port 5432
+orbit why web-01 db-01 --proto tcp --port 5432
 ```
 
 `status` is the agent's own view; `peers` is nebula's hostmap, which is the one
@@ -211,7 +211,7 @@ them off.
 reverts to the previous one, reports that it did, and quarantines the failed
 generation so it does not loop.
 
-**A console, for when a terminal is the wrong place.** `orbitd -ui-addr 8081`
+**A console, for when a terminal is the wrong place.** `orbitd --ui-addr 8081`
 serves convergence, hosts, rotation gates, and the audit log. Server-rendered,
 no build step, works with JavaScript disabled. Sign in with an ordinary API
 token; sessions default to read-only and reference the token rather than copying

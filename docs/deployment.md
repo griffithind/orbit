@@ -2,7 +2,7 @@
 
 Running Orbit on one ordinary VM.
 
-Service files are **generated**, not copied: `orbitd bootstrap -write-unit`
+Service files are **generated**, not copied: `orbitd bootstrap --write-unit`
 writes the control plane's, and `orbit agent install` writes each machine's. A unit
 file kept in a docs directory drifts — the flags change, the example does not,
 and somebody pastes something that stopped working two releases ago.
@@ -55,7 +55,7 @@ stranger can reach is exposed by it beyond enrollment.
 orbitd doctor --dsn "$ORBIT_DSN" --addr :8080 --enroll-url https://orbit.example.com
 ```
 
-It exists because `serve` validates as it goes, and validates `-addr` at the very
+It exists because `serve` validates as it goes, and validates `--addr` at the very
 last statement — after the store is open, the vault is unsealed, the CA registry
 is built and every mesh node has joined. A typo'd listen address therefore costs
 a full startup and fails on the final line. `doctor` binds and releases each
@@ -91,8 +91,8 @@ firewall-cmd --list-services   # confirm ssh survived before you drop the sessio
 bytes of version, type, subtype, reserved, remote index and message counter, and
 the remote index is an index into *one* interface's hostmap. A received packet
 therefore cannot be attributed to a network, so one UDP socket is one network
-and a control plane on N networks binds N ports. `-mesh <uuid>=<addr>:<port>`
-sets each one; omitting it takes `-nebula-port`, and two networks that both omit
+and a control plane on N networks binds N ports. `--mesh <uuid>=<addr>:<port>`
+sets each one; omitting it takes `--nebula-port`, and two networks that both omit
 it are refused at startup rather than colliding inside nebula.
 
 Sixteen is the documented range because 4242 stays the first (a single-network
@@ -101,7 +101,7 @@ plausibly runs — prod, staging, dev, a few per-tenant — while staying small
 enough to write as one rule. Past that, run a second `orbitd` over a disjoint
 set of networks, which is the scaling story regardless.
 
-Opening a port is not listening on it. Only the networks passed to `-mesh` bind
+Opening a port is not listening on it. Only the networks passed to `--mesh` bind
 anything; the rest refuse at the socket layer whatever the firewall says. If you
 would rather open exactly what you use, open `4242` plus one per additional
 network and revisit it when you add one.
@@ -134,7 +134,7 @@ CREATE DATABASE orbit;
 ```
 
 ```bash
-orbitd migrate -dsn "postgres://postgres@localhost/orbit"
+orbitd migrate --dsn "postgres://postgres@localhost/orbit"
 psql -c "ALTER ROLE orbit_app LOGIN PASSWORD '…'"
 ```
 
@@ -160,7 +160,7 @@ And `sudo` resets `PATH` to `secure_path`, which does **not** include
 `orbitd: command not found`; use the full path:
 
 ```bash
-sudo -u postgres /usr/local/bin/orbitd migrate -dsn "postgres:///orbit?host=/var/run/postgresql"
+sudo -u postgres /usr/local/bin/orbitd migrate --dsn "postgres:///orbit?host=/var/run/postgresql"
 ```
 
 Verify before going further — this exercises the role, the password, the `pg_hba`
@@ -261,12 +261,12 @@ awkward ordering that separating them creates.
 #    identity keys are sealed into Postgres under the KEK — no key file, and
 #    nothing to chown afterwards.
 export ORBIT_KEK_PASSPHRASE_FILE=/etc/orbit/kek.plain
-orbitd bootstrap -dsn "$ORBIT_DSN" \
-    -network prod -cidr 10.42.0.0/16 -cert-ttl 168h \
-    -write-unit -overlay-addr 10.42.0.1 -lighthouse 203.0.113.10:4242 \
-    -enroll-url https://orbit.example.com/enroll/v1/enroll
+orbitd bootstrap --dsn "$ORBIT_DSN" \
+    --network prod --cidr 10.42.0.0/16 --cert-ttl 168h \
+    --write-unit --overlay-addr 10.42.0.1 --lighthouse 203.0.113.10:4242 \
+    --enroll-url https://orbit.example.com/enroll/v1/enroll
 
-# 2. Start it, as its own lighthouse. -write-unit above filled in the unit and
+# 2. Start it, as its own lighthouse. --write-unit above filled in the unit and
 #    the env file from this bootstrap's own results, so there is nothing to
 #    copy across and nothing to mistype.
 systemctl enable --now orbit-control
@@ -275,14 +275,14 @@ systemctl enable --now orbit-control
 shred -u /etc/orbit/kek.plain
 
 # 4. Mint the break-glass token now, while everything works. See section 5.
-orbitd token create -name break-glass -scopes '*'
+orbitd token create --name break-glass --scopes '*'
 
 # 5. Every machine from here. Reserve a place; it prints a single-use code.
-orbit membership reserve -name web-01 -role web
+orbit membership reserve --name web-01 --role web
 
 # On the machine: install once, join once per network.
 sudo orbit agent install
-sudo orbit join -url https://orbit.example.com -network prod -code orb_1_…
+sudo orbit join --url https://orbit.example.com --network prod --code orb_1_…
 ```
 
 `install` is a MACHINE-level action — it generates the device identity at
@@ -291,20 +291,20 @@ network. A machine on three meshes is installed once and joined three times; the
 service rescans its root, so each join lands without a restart and without
 dropping the tunnels of the networks it already serves.
 
-Omit `-code` and the machine lands in `orbit membership pending` for an operator
+Omit `--code` and the machine lands in `orbit membership pending` for an operator
 to authorize. That is the better shape for anything handed to a person, because
 no secret has to travel to it — and it is the only shape available when the
 machine is provisioned before anyone knows what it will be called.
 
-`-lighthouse` is a **seed**, not a setting. It applies only when the control
+`--lighthouse` is a **seed**, not a setting. It applies only when the control
 plane's own membership is first created; after that the membership is the source
 of truth, exactly as it is for every other machine. That is why there is no
-`-lighthouse=true`: a public address cannot be discovered from behind NAT, so
+`--lighthouse=true`: a public address cannot be discovered from behind NAT, so
 the operator states it once, and a lighthouse nobody can reach is worse than
 none because every host keeps dialling it.
 
 A control plane that is its own lighthouse needs a **fixed** UDP port —
-`-nebula-port`, which defaults to 4242. Nebula refuses `am_lighthouse` with no
+`--nebula-port`, which defaults to 4242. Nebula refuses `am_lighthouse` with no
 port rather than starting into a state where every host is told to reach it
 somewhere it is not listening, and Orbit checks the same thing first so the
 error names the flag and the membership rather than a nebula config field.
@@ -320,10 +320,10 @@ membership with a wrong one leaving a lighthouse advertising a dead address:
 orbit device set-addrs lh-01 203.0.113.20
 
 # What it is, in this network.
-orbit membership set lh-01 -lighthouse
+orbit membership set lh-01 --lighthouse
 ```
 
-`-advertise-port` on `membership set` exists for the one case the derivation
+`--advertise-port` on `membership set` exists for the one case the derivation
 cannot infer: a machine behind port forwarding, where the port that reaches it
 is deliberately not the port it binds. Leave it unset otherwise.
 
@@ -333,7 +333,7 @@ took.
 
 ### Why lighthouse and not relay
 
-`-relay` exists and is off by default, and that asymmetry is deliberate.
+`--relay` exists and is off by default, and that asymmetry is deliberate.
 
 A **lighthouse** answers queries and coordinates hole punching. It is not in the
 data path. Restarting the control plane briefly interrupts discovery for memberships
@@ -375,8 +375,8 @@ sign. There is no default, deliberately: a CA that quietly permitted a range
 would grant routing authority nobody asked for.
 
 ```bash
-orbitd bootstrap -network prod -cidr 10.42.0.0/16 \
-    -unsafe-networks 192.168.88.0/24,10.90.0.0/16
+orbitd bootstrap --network prod --cidr 10.42.0.0/16 \
+    --unsafe-networks 192.168.88.0/24,10.90.0.0/16
 ```
 
 **Widening it later is a new CA and a rotation**, because the constraint is
@@ -397,7 +397,7 @@ availability — nebula load-balances across them by weight and falls to a
 survivor when one stops answering:
 
 ```bash
-orbit route add spare-pi 192.168.88.0/24 -weight 5
+orbit route add spare-pi 192.168.88.0/24 --weight 5
 ```
 
 **Who may use it is ordinary policy.** A routed subnet is a destination like any
@@ -432,7 +432,7 @@ cannot advertise one; the agent refuses rather than pretending.
 An exit node is a route for `0.0.0.0/0`, and a machine takes one deliberately:
 
 ```bash
-orbit route add lab-pi 0.0.0.0/0 -masquerade
+orbit route add lab-pi 0.0.0.0/0 --masquerade
 orbit exit-node ls laptop
 orbit exit-node use laptop <route-uuid>
 orbit exit-node off laptop
@@ -462,14 +462,14 @@ and no window in which the machine is up and the fleet has been told there is no
 lighthouse:
 
 ```bash
-orbit membership reserve -name lh-01 -lighthouse -public-addr 203.0.113.20
+orbit membership reserve --name lh-01 --lighthouse --public-addr 203.0.113.20
 ```
 
 Hand the printed code to cloud-init. When the machine redeems it, the membership
 comes into existence already a lighthouse, the address lands on the machine's
 `device` record, and every other host picks it up on its next poll.
 
-`-public-addr` is required with `-lighthouse` for a machine Orbit has not met. A
+`--public-addr` is required with `--lighthouse` for a machine Orbit has not met. A
 lighthouse nobody can reach is worse than none — every host keeps dialling it —
 and reservation time is the last moment an operator is present to say where it
 will be. If the machine has already joined another network it already has its
@@ -481,10 +481,10 @@ If you want the control plane out of the data path entirely, the ordering
 matters: `orbitd` joins the overlay as a nebula host, but reaching the overlay
 needs a lighthouse, which has to be enrolled by a running `orbitd`.
 
-1. Start `orbitd` with **no** `-mesh` — enrollment and admin work, the agent API
+1. Start `orbitd` with **no** `--mesh` — enrollment and admin work, the agent API
    does not exist yet, and it says so at startup.
 2. Reserve and bring up the lighthouse as above, start its nebula.
-3. Restart `orbitd` with `-mesh`.
+3. Restart `orbitd` with `--mesh`.
 
 ---
 
@@ -524,7 +524,7 @@ back in, by construction.
 with the API:
 
 ```bash
-orbitd token create -name break-glass -scopes '*' | \
+orbitd token create --name break-glass --scopes '*' | \
     op item create --category=password --title='Orbit break-glass' password=-
 ```
 
@@ -610,7 +610,7 @@ out of a vault under pressure has been seen by people and possibly pasted into
 places:
 
 ```bash
-orbitd token create -name break-glass-2 -scopes '*'   # new one first
+orbitd token create --name break-glass-2 --scopes '*'   # new one first
 orbit token revoke $OLD_ID                            # then the old one
 ```
 
@@ -625,7 +625,7 @@ audited even from the command line:
 
 ```bash
 orbit token ls
-orbit audit -action token.created
+orbit audit --action token.created
 ```
 
 ```
@@ -734,8 +734,8 @@ of log lines.
 `orbitd` serves Prometheus exposition on **`127.0.0.1:9464/metrics`** by
 default. It binds to localhost deliberately — the output enumerates network
 names, host counts, and blocklist sizes, which is fleet inventory. Move it to an
-overlay address (`-metrics-addr 10.42.0.1:9464`) to scrape it from another
-machine, or `-metrics-addr ""` to turn it off.
+overlay address (`--metrics-addr 10.42.0.1:9464`) to scrape it from another
+machine, or `--metrics-addr ""` to turn it off.
 
 The fleet gauges are read from Postgres **at scrape time**, not held in memory.
 That is why two replicas report identical numbers and why a restart does not
@@ -780,7 +780,7 @@ rotating a CA past these memberships will cut them off
 
 ### The web console
 
-`orbitd -ui-addr 8081` serves an operator console. Off unless you ask for it, and
+`orbitd --ui-addr 8081` serves an operator console. Off unless you ask for it, and
 a bare port binds **loopback** — the listener carries every host name, every
 overlay address, and a control that cuts a membership off the mesh, on the machine
 holding the mesh's root CA key.
@@ -789,7 +789,7 @@ holding the mesh's root CA key.
 ssh -N -L 8081:127.0.0.1:8081 orbit-control    # then http://127.0.0.1:8081/ui/
 ```
 
-Binding it anywhere else without an `https://` `-ui-url` is **refused at
+Binding it anywhere else without an `https://` `--ui-url` is **refused at
 startup**, and not only on principle: the session cookie is `__Host-` prefixed
 and therefore `Secure`, so a browser will not store it over plain http on a
 non-loopback origin. The login form would appear to work and silently return you
@@ -855,7 +855,7 @@ something happened, the log line tells you to which host.
 | `reverted to the previous generation` | a pushed config broke a membership and it rolled back |
 | `CA key written UNENCRYPTED` | fix before anything else |
 | `epoch listener dropped` | push is down; agents fell back to polling |
-| `agent API disabled` / `no -mesh configured` | memberships cannot poll, renew, or receive revocations |
+| `agent API disabled` / `no --mesh configured` | memberships cannot poll, renew, or receive revocations |
 
 The maintenance sweep logs a summary every 15 minutes when it does anything.
 
@@ -870,7 +870,7 @@ Measured, in `e2e/scale_test.go`:
 - Each network `orbitd` **joins** costs ~28 goroutines and ~0.33 MB idle — it is
   a full nebula instance. Low hundreds of joined networks per process.
 - Long-poll watchers cost one connection and one goroutine per agent, capped by
-  `-max-watchers` (5000/network default). Over the cap, agents fall back to
+  `--max-watchers` (5000/network default). Over the cap, agents fall back to
   polling rather than being refused.
 
 **Memory, measured.** An earlier version of this section said `orbitd` peaked at
@@ -908,7 +908,7 @@ to relaying through it.
 
 ```bash
 systemctl stop orbit-control
-orbitd migrate -dsn "postgres://postgres@localhost/orbit"   # forward-only
+orbitd migrate --dsn "postgres://postgres@localhost/orbit"   # forward-only
 install -m755 orbitd /usr/local/bin/orbitd
 systemctl start orbit-control
 ```
@@ -927,7 +927,7 @@ the stock binary rather than embedding it.
 ## 11. Second replica, when you want one
 
 ```bash
-orbitd serve -mesh "$ORBIT_NETWORK=10.42.0.3" ...   # a different overlay address
+orbitd serve --mesh "$ORBIT_NETWORK=10.42.0.3" ...   # a different overlay address
 ```
 
 Each replica registers the endpoint it serves and heartbeats; agents are handed

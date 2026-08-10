@@ -116,7 +116,7 @@ systemctl enable --now firewalld >/dev/null
 # rule rather than a wildcard. Past that, run a second instance over a disjoint
 # set of networks.
 #
-# Opening a port is not listening on it: only networks actually passed to -mesh
+# Opening a port is not listening on it: only networks actually passed to --mesh
 # bind anything, and the rest refuse at the socket layer whatever the firewall
 # says.
 firewall-cmd --permanent --add-port=4242-4257/udp >/dev/null
@@ -233,7 +233,7 @@ set +a
 
 # Correcting .env is only half of a changed public address.
 #
-# -lighthouse is a SEED: it applies when the control plane's host record is
+# --lighthouse is a SEED: it applies when the control plane's host record is
 # first created, and after that the record is the source of truth — exactly as
 # it is for every other host. So a corrected address in .env reaches nebula's
 # own config and NOT the address this control plane advertises to agents, and
@@ -276,7 +276,7 @@ fi
 #------------------------------------------------------------------------------
 say "Database"
 
-docker compose run --rm -T orbitd migrate -app-password "$POSTGRES_APP_PASSWORD" < /dev/null
+docker compose run --rm -T orbitd migrate --app-password "$POSTGRES_APP_PASSWORD" < /dev/null
 
 #------------------------------------------------------------------------------
 say "Bootstrap"
@@ -299,7 +299,7 @@ else
     out=bootstrap-output.txt
     umask 077
     docker compose run --rm -T orbitd bootstrap \
-        -network "$NETWORK" -cidr "$CIDR" -cert-ttl "$CERT_TTL" < /dev/null | tee "$out"
+        --network "$NETWORK" --cidr "$CIDR" --cert-ttl "$CERT_TTL" < /dev/null | tee "$out"
     chmod 0600 "$out"
 
     net=$(sed -n 's/^ *export ORBIT_NETWORK=//p' "$out" | tr -d '\r' | head -1)
@@ -310,7 +310,7 @@ else
 
     ADMIN_TOKEN=$(sed -n 's/^ *export ORBIT_TOKEN=//p' "$out" | tr -d '\r' | head -1)
     [ -n "$ADMIN_TOKEN" ] || die "bootstrap did not yield an admin token ($out).
-Mint one with:  docker compose run --rm -T orbitd token create -name admin -scopes '*'"
+Mint one with:  docker compose run --rm -T orbitd token create --name admin --scopes '*'"
 fi
 
 #------------------------------------------------------------------------------
@@ -339,13 +339,13 @@ say "Break-glass token"
 # "*" tokens nobody is tracking, which is the opposite of what this is for.
 if [ "$FRESH" = 1 ]; then
     BREAK_GLASS=$(docker compose run --rm -T orbitd token create < /dev/null \
-        -name break-glass -scopes '*' 2>/dev/null | tr -d '\r' | tail -1)
+        --name break-glass --scopes '*' 2>/dev/null | tr -d '\r' | tail -1)
     printf 'break-glass %s\n' "$BREAK_GLASS" >> bootstrap-output.txt
     chmod 0600 bootstrap-output.txt
     echo "minted"
 else
     echo "skipped on a re-run; mint one with:"
-    echo "  docker compose run --rm -T orbitd token create -name break-glass -scopes '*'"
+    echo "  docker compose run --rm -T orbitd token create --name break-glass --scopes '*'"
 fi
 
 #------------------------------------------------------------------------------
@@ -381,7 +381,7 @@ else
 This network was already bootstrapped, so no admin token was issued — bootstrap
 prints one exactly once. If you no longer have it:
 
-  docker compose run --rm -T orbitd token create -name admin -scopes '*'
+  docker compose run --rm -T orbitd token create --name admin --scopes '*'
 
 EOF
 fi
@@ -392,27 +392,27 @@ Add a machine. Reserve a place for it, which prints a single-use code:
 
   cd $PWD
   docker compose run --rm -e ORBIT_TOKEN=<admin token> \
-      orbit membership reserve -name macbook -role default
+      orbit membership reserve --name macbook --role default
 
 (or put ORBIT_TOKEN in .env and drop the -e). From your laptop instead:
 
   export ORBIT_URL=http://${PUBLIC_IP}:8080
   export ORBIT_TOKEN=<the admin token>
   export ORBIT_NETWORK=$NETWORK
-  orbit membership reserve -name macbook -role default
+  orbit membership reserve --name macbook --role default
 
 Then on the machine joining, with the code that printed:
 
   sudo orbit agent install
-  sudo orbit join -url http://${PUBLIC_IP}:8080 -network $NETWORK -code orb_1_...
+  sudo orbit join --url http://${PUBLIC_IP}:8080 --network $NETWORK --code orb_1_...
 
-An overlay address is allocated when the machine arrives; -addr pins one if
+An overlay address is allocated when the machine arrives; --addr pins one if
 something outside Orbit already refers to it.
 
--role default matters: a membership with no role gets outbound-only, so nothing
+--role default matters: a membership with no role gets outbound-only, so nothing
 can reach it, not even ICMP.
 
-No code, no reservation: drop the -code and the machine waits in
+No code, no reservation: drop the --code and the machine waits in
 'orbit membership pending' for you to authorize it. Better for a laptop you hand
 to somebody, because no secret has to travel.
 
