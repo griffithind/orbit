@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent/dataplane"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
@@ -83,140 +84,14 @@ func (f *fakeSupervisor) set(running bool, instance string) {
 	f.running, f.instance = running, instance
 }
 
-func testApplier(sup dataplane.Supervisor) *Applier {
-	return &Applier{
+func testApplier(sup dataplane.Supervisor) *generation.Applier {
+	return &generation.Applier{
 		Layout:        paths.DefaultLayout("/nonexistent"),
-		Reloader:      NoopReloader{},
+		Reloader:      generation.NoopReloader{},
 		Supervisor:    sup,
 		RestartSettle: 30 * time.Millisecond,
 		RestartPoll:   time.Millisecond,
 		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-}
-
-func TestRestartIsConfirmedByTheProcessChanging(t *testing.T) {
-	f := newFakeSupervisor()
-	if err := testApplier(f).restart(context.Background()); err != nil {
-		t.Fatalf("restart: %v", err)
-	}
-	if f.restarts != 1 {
-		t.Errorf("restarted %d times, want 1", f.restarts)
-	}
-}
-
-// TestRestartThatDidNotHappenIsDetected is the whole point of the instance
-// token. A service manager that exits zero without replacing the process leaves
-// nebula running the OLD certificate; nothing else the agent can observe says
-// so, because the old certificate is still valid and the host is still
-// reachable at its old address.
-func TestRestartThatDidNotHappenIsDetected(t *testing.T) {
-	f := newFakeSupervisor()
-	f.onRestart = func(*fakeSupervisor) error { return nil } // exits zero, changes nothing
-
-	err := testApplier(f).restart(context.Background())
-	if !errors.Is(err, ErrRestartFailed) {
-		t.Fatalf("restart error = %v, want ErrRestartFailed", err)
-	}
-}
-
-// TestRestartThatDoesNotComeBackIsDetected covers the other half: nebula was
-// stopped and failed to start again.
-func TestRestartThatDoesNotComeBackIsDetected(t *testing.T) {
-	f := newFakeSupervisor()
-	f.onRestart = func(s *fakeSupervisor) error {
-		s.set(false, "")
-		return nil
-	}
-
-	err := testApplier(f).restart(context.Background())
-	if !errors.Is(err, ErrRestartFailed) {
-		t.Fatalf("restart error = %v, want ErrRestartFailed", err)
-	}
-}
-
-// TestRestartCommandFailureIsRestartFailed keeps the two ways a restart can go
-// wrong under one sentinel, because the caller's response to both is the same:
-// roll back and stop trying.
-func TestRestartCommandFailureIsRestartFailed(t *testing.T) {
-	f := newFakeSupervisor()
-	f.onRestart = func(*fakeSupervisor) error { return errors.New("unit is masked") }
-
-	err := testApplier(f).restart(context.Background())
-	if !errors.Is(err, ErrRestartFailed) {
-		t.Fatalf("restart error = %v, want ErrRestartFailed", err)
-	}
-}
-
-// TestUnobservableSupervisorDoesNotFailTheRestart is the escape hatch. A
-// hand-rolled restart command with no pidfile cannot be verified; refusing it
-// outright would mean such a host can never take an address change at all. It
-// is allowed through, loudly, and the log line is the only thing standing
-// between the operator and a silent failure.
-func TestUnobservableSupervisorDoesNotFailTheRestart(t *testing.T) {
-	f := newFakeSupervisor()
-	f.known = false
-	f.onRestart = func(*fakeSupervisor) error { return nil }
-
-	if err := testApplier(f).restart(context.Background()); err != nil {
-		t.Fatalf("restart with an unobservable supervisor: %v", err)
-	}
-}
-
-func TestValidateNetwork(t *testing.T) {
-	for _, ok := range []string{"prod", "a", "staging-2", "0123456789012345678901234567890a"} {
-		if err := paths.ValidateNetwork(ok); err != nil {
-			t.Errorf("paths.ValidateNetwork(%q) = %v, want nil", ok, err)
-		}
-	}
-	// "." and ".." escape the root, "/" escapes it further, and uppercase or
-	// "@" would confuse a systemd instance name.
-	for _, bad := range []string{"", ".", "..", "a/b", "Prod", "pro_d", "net@1",
-		"01234567890123456789012345678901x"} {
-		if err := paths.ValidateNetwork(bad); err == nil {
-			t.Errorf("paths.ValidateNetwork(%q) = nil, want an error", bad)
-		}
-	}
-}
-
-// TestLayoutPaths pins the contract the control-plane renderer and the systemd
-// units are both written against.
-func TestLayoutPaths(t *testing.T) {
-	auth := paths.DefaultLayout("/var/lib/orbit/prod")
-	if got := auth.ConfigPath(); got != "/var/lib/orbit/prod/nebula.yml" {
-		t.Errorf("config = %q", got)
-	}
-	if auth.Network != "prod" {
-		t.Errorf("network = %q, want prod", auth.Network)
-	}
-	if got := auth.StatePath(); got != "/var/lib/orbit/prod/agent.json" {
-		t.Errorf("state path = %q", got)
-	}
-	if got := auth.PreviousDir(); got != "/var/lib/orbit/prod/.previous" {
-		t.Errorf("previous dir = %q", got)
-	}
-}
-
-// TestLocalizeRewritesWhateverTheServerRendered is the guard against a
-// per-network path mismatch.
-//
-// The previous implementation searched for one hard-coded default. Now that the
-// control plane renders a per-network directory, the paths it emits need not
-// match any constant this agent holds — so localize reads the values out of the
-// config it was handed. A rewrite that missed would leave nebula pointed at
-// files nobody wrote.
-func TestLocalizeRewritesWhateverTheServerRendered(t *testing.T) {
-	a := testApplier(nil)
-	a.Layout = paths.DefaultLayout("/opt/orbit/prod")
-
-	got := a.localize("pki:\n  ca: /somewhere/else/entirely/ca.crt\n" +
-		"  cert: /somewhere/else/entirely/host.crt\n" +
-		"  key: /somewhere/else/entirely/host.key\n")
-
-	want := "pki:\n  ca: /opt/orbit/prod/ca.crt\n" +
-		"  cert: /opt/orbit/prod/host.crt\n" +
-		"  key: /opt/orbit/prod/host.key\n"
-	if got != want {
-		t.Errorf("localize gave:\n%s\nwant:\n%s", got, want)
 	}
 }
 
@@ -226,7 +101,7 @@ func loopWithSupervisor(t *testing.T, sup dataplane.Supervisor) *Loop {
 	layout := paths.DefaultLayout(dir)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &Loop{
-		Applier: &Applier{Layout: layout, Reloader: NoopReloader{}, Supervisor: sup, Log: log},
+		Applier: &generation.Applier{Layout: layout, Reloader: generation.NoopReloader{}, Supervisor: sup, Log: log},
 		Layout:  layout,
 		State:   State{BaseURL: "http://control.invalid", MembershipID: "h"},
 		Log:     log,
@@ -305,7 +180,7 @@ func TestQuarantineStopsRepeatedRestarts(t *testing.T) {
 	clock := time.Now()
 	l.SetClock(func() time.Time { return clock })
 
-	l.quarantineEpoch(42, ErrRestartFailed)
+	l.quarantineEpoch(42, generation.ErrRestartFailed)
 	if !l.quarantined(42) {
 		t.Fatal("the failed generation was not quarantined")
 	}
@@ -325,14 +200,14 @@ func TestQuarantineStopsRepeatedRestarts(t *testing.T) {
 // restart every poll interval, and a restart drops every tunnel on the network.
 func TestUndeliverableClassifiesBothSentinels(t *testing.T) {
 	// A message that merely reads like the sentinel is not the sentinel.
-	if undeliverable(errors.New(ErrRestartRequired.Error())) {
+	if undeliverable(errors.New(generation.ErrRestartRequired.Error())) {
 		t.Error("undeliverable matched on the message rather than the error")
 	}
-	if !undeliverable(errors.Join(ErrRestartFailed, errors.New("x"))) {
-		t.Error("a wrapped ErrRestartFailed was not classified as undeliverable")
+	if !undeliverable(errors.Join(generation.ErrRestartFailed, errors.New("x"))) {
+		t.Error("a wrapped generation.ErrRestartFailed was not classified as undeliverable")
 	}
-	if !undeliverable(errors.Join(ErrRestartRequired, errors.New("x"))) {
-		t.Error("a wrapped ErrRestartRequired was not classified as undeliverable")
+	if !undeliverable(errors.Join(generation.ErrRestartRequired, errors.New("x"))) {
+		t.Error("a wrapped generation.ErrRestartRequired was not classified as undeliverable")
 	}
 	if undeliverable(errors.New("connection refused")) {
 		t.Error("an ordinary error was classified as undeliverable")

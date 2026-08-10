@@ -52,6 +52,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/dataplane"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/agent/status"
@@ -178,13 +179,13 @@ func enrollCmd(args []string) error {
 	// No engine here: enrolling writes the first generation, and `orbit agent
 	// run` is what starts nebula on it. Reloading something that is not running
 	// yet is the one case there is nothing useful to do about.
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:            layout,
-		Reloader:          agent.NoopReloader{},
+		Reloader:          generation.NoopReloader{},
 		DisableValidation: true,
 		Log:               log,
 	}
-	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
+	if err := applier.Apply(ctx, generation.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		return err
 	}
 
@@ -698,7 +699,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	nlog := log.With("network", layout.Network)
 
 	engine := &dataplane.Embedded{Log: nlog}
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:   layout,
 		Reloader: engine,
 		// The linked copy IS the copy that will run it, so validating in
@@ -718,7 +719,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	}
 
 	if verifyURL != "" {
-		applier.Verifier = agent.NewReachabilityVerifier(verifyURL)
+		applier.Verifier = generation.NewReachabilityVerifier(verifyURL)
 	} else {
 		nlog.Warn("post-apply verification disabled: set -verify-url to an overlay " +
 			"address so a broken generation is rolled back automatically")

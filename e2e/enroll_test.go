@@ -34,6 +34,7 @@ import (
 	"github.com/slackhq/nebula/service"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
@@ -616,12 +617,12 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 	}
 
 	dir := t.TempDir()
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:   paths.DefaultLayout(dir),
-		Reloader: agent.NoopReloader{},
+		Reloader: generation.NoopReloader{},
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
+	if err := applier.Apply(ctx, generation.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		t.Fatalf("apply %s: %v", name, err)
 	}
 
@@ -958,8 +959,8 @@ func stubNebula(t *testing.T, code int, msg string) string {
 	return path
 }
 
-func badMaterial() agent.Material {
-	return agent.Material{
+func badMaterial() generation.Material {
+	return generation.Material{
 		Config:      "pki:\n  ca: /nonexistent/ca.crt\n  cert: /nonexistent/host.crt\n",
 		CABundle:    "not a certificate",
 		Certificate: "also not a certificate",
@@ -971,9 +972,9 @@ func badMaterial() agent.Material {
 // generation. A config nebula rejects must never reach the running node.
 func TestApplyRejectsBadConfig(t *testing.T) {
 	dir := t.TempDir()
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:       paths.DefaultLayout(dir),
-		Reloader:     agent.NoopReloader{},
+		Reloader:     generation.NoopReloader{},
 		NebulaBinary: stubNebula(t, 1, "invalid pki.ca: open /nonexistent/ca.crt: no such file"),
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -1001,9 +1002,9 @@ func TestApplyRejectsBadConfig(t *testing.T) {
 // the test above honest: a validator that refused everything would pass it.
 func TestApplyProceedsWhenNebulaAccepts(t *testing.T) {
 	dir := t.TempDir()
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:       paths.DefaultLayout(dir),
-		Reloader:     agent.NoopReloader{},
+		Reloader:     generation.NoopReloader{},
 		NebulaBinary: stubNebula(t, 0, ""),
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -1028,9 +1029,9 @@ func TestApplyProceedsWhenNebulaAccepts(t *testing.T) {
 // It makes that rarer and cheaper; it is not what makes it survivable.
 func TestApplyProceedsWhenValidationCannotRun(t *testing.T) {
 	dir := t.TempDir()
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:       paths.DefaultLayout(dir),
-		Reloader:     agent.NoopReloader{},
+		Reloader:     generation.NoopReloader{},
 		NebulaBinary: filepath.Join(t.TempDir(), "no-nebula-here"),
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/slackhq/nebula/config"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
@@ -90,7 +91,7 @@ func TestRenewalKeepsTunnelAlive(t *testing.T) {
 	layout := paths.DefaultLayout(client.dir)
 	loop := &agent.Loop{
 		Client: overlayClient,
-		Applier: &agent.Applier{
+		Applier: &generation.Applier{
 			Layout:   layout,
 			Reloader: configReloader{c: clientNode.cfg, name: "client"},
 			Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -127,11 +128,11 @@ func TestRenewalKeepsTunnelAlive(t *testing.T) {
 	if naAfter.Before(naBefore) {
 		t.Errorf("renewed certificate expires earlier than the old one: %s then %s", naBefore, naAfter)
 	}
-	mode, err := agent.ModeFor(certBefore, certAfter)
+	mode, err := generation.ModeFor(certBefore, certAfter)
 	if err != nil {
 		t.Fatalf("ModeFor: %v", err)
 	}
-	if mode != agent.ModeReload {
+	if mode != generation.ModeReload {
 		t.Errorf("renewal required %v; a routine renewal must be hot-loadable", mode)
 	}
 	_ = nbBefore
@@ -167,13 +168,13 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 	var reloads int
 	loop := &agent.Loop{
 		Client: xffClient(t, ts.URL, host.addr),
-		Applier: &agent.Applier{
+		Applier: &generation.Applier{
 			Layout: layout,
-			Reloader: agent.ReloaderFunc{Name: "count", Fn: func() error {
+			Reloader: generation.ReloaderFunc{Name: "count", Fn: func() error {
 				reloads++
 				return nil
 			}},
-			Verifier: agent.VerifierFunc{
+			Verifier: generation.VerifierFunc{
 				Name: "always-fails",
 				Fn:   func(context.Context) error { return fmt.Errorf("simulated connectivity loss") },
 			},
@@ -229,8 +230,8 @@ func TestRenewRotatesThePrivateKey(t *testing.T) {
 	layout := paths.DefaultLayout(host.dir)
 	loop := &agent.Loop{
 		Client: xffClient(t, ts.URL, host.addr),
-		Applier: &agent.Applier{
-			Layout: layout, Reloader: agent.NoopReloader{},
+		Applier: &generation.Applier{
+			Layout: layout, Reloader: generation.NoopReloader{},
 			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 		Policy: agent.DefaultRenewalPolicy(),
@@ -273,12 +274,12 @@ func TestAddressChangeRefusedWithoutRestarter(t *testing.T) {
 	otherCert := readFile(t, filepath.Join(other.dir, "host.crt"))
 
 	layout := paths.DefaultLayout(host.dir)
-	applier := &agent.Applier{
-		Layout: layout, Reloader: agent.NoopReloader{},
+	applier := &generation.Applier{
+		Layout: layout, Reloader: generation.NoopReloader{},
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err := applier.Apply(context.Background(), agent.Material{
+	err := applier.Apply(context.Background(), generation.Material{
 		Config:      readFile(t, paths.DefaultLayout(host.dir).ConfigPath()),
 		CABundle:    readFile(t, filepath.Join(host.dir, "ca.crt")),
 		Certificate: otherCert,

@@ -15,6 +15,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/notify"
 	"github.com/griffithind/orbit/internal/wire"
@@ -124,7 +125,7 @@ func TestRevocationPropagation(t *testing.T) {
 		layout := paths.DefaultLayout(host.dir)
 		loop := &agent.Loop{
 			Client: client,
-			Applier: &agent.Applier{
+			Applier: &generation.Applier{
 				Layout:   layout,
 				Reloader: configReloader{c: node.cfg, name: name},
 				Log:      alog,

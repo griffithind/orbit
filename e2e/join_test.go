@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/device"
@@ -110,12 +111,12 @@ func TestJoinEndToEnd(t *testing.T) {
 
 	// Real files, the same ones enrollment produces.
 	dir := t.TempDir()
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:   paths.DefaultLayout(dir),
-		Reloader: agent.NoopReloader{},
+		Reloader: generation.NoopReloader{},
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
+	if err := applier.Apply(ctx, generation.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	for _, f := range []string{"ca.crt", "host.crt", "host.key", "nebula.yml"} {

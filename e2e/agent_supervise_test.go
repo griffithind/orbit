@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/dataplane"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
@@ -83,11 +83,11 @@ func (s *scriptedSupervisor) count() int {
 // reAddressed fabricates the generation an operator's address change would
 // produce: this host's configuration, carrying a certificate (and matching key)
 // for a different overlay address.
-func reAddressed(t *testing.T, h *harness, ts *httptest.Server, host *enrolledHost, name, addr string) agent.Material {
+func reAddressed(t *testing.T, h *harness, ts *httptest.Server, host *enrolledHost, name, addr string) generation.Material {
 	t.Helper()
 	other := h.createAndEnroll(t, ts, name, addr, false, false, nil)
 	l, ol := paths.DefaultLayout(host.dir), paths.DefaultLayout(other.dir)
-	return agent.Material{
+	return generation.Material{
 		Config:      readFile(t, l.ConfigPath()),
 		CABundle:    readFile(t, l.Paths.CA),
 		Certificate: readFile(t, ol.Paths.Cert),
@@ -95,10 +95,10 @@ func reAddressed(t *testing.T, h *harness, ts *httptest.Server, host *enrolledHo
 	}
 }
 
-func quietApplier(layout paths.Layout, sup dataplane.Supervisor) *agent.Applier {
-	return &agent.Applier{
+func quietApplier(layout paths.Layout, sup dataplane.Supervisor) *generation.Applier {
+	return &generation.Applier{
 		Layout:     layout,
-		Reloader:   agent.NoopReloader{},
+		Reloader:   generation.NoopReloader{},
 		Supervisor: sup,
 		// Short, and deliberately so: every failing case here is a supervisor
 		// that will NEVER satisfy the check, so the deadline is one the test
@@ -147,7 +147,7 @@ func TestRestartThatDoesNotTakeIsRolledBack(t *testing.T) {
 
 	sup := newScriptedSupervisor(false) // exits zero, replaces nothing
 	err := quietApplier(layout, sup.supervisor()).Apply(context.Background(), m)
-	if !errors.Is(err, agent.ErrRestartFailed) {
+	if !errors.Is(err, generation.ErrRestartFailed) {
 		t.Fatalf("apply error = %v, want ErrRestartFailed", err)
 	}
 	if got := readFile(t, layout.Paths.Cert); got != before {
@@ -168,7 +168,7 @@ func TestAddressChangeStillRefusedWithoutSupervisor(t *testing.T) {
 	m := reAddressed(t, h, ts, host, "readdress-none-other", "10.42.6.14")
 
 	err := quietApplier(layout, nil).Apply(context.Background(), m)
-	if !errors.Is(err, agent.ErrRestartRequired) {
+	if !errors.Is(err, generation.ErrRestartRequired) {
 		t.Fatalf("apply error = %v, want ErrRestartRequired", err)
 	}
 	if got := readFile(t, layout.Paths.Cert); got != before {
@@ -252,7 +252,7 @@ func TestPerNetworkDirectoriesShareNothing(t *testing.T) {
 		dir := filepath.Join(root, net.slug)
 		layout := paths.DefaultLayout(dir)
 		s := paths.DefaultLayout(src.dir)
-		if err := quietApplier(layout, nil).Apply(context.Background(), agent.Material{
+		if err := quietApplier(layout, nil).Apply(context.Background(), generation.Material{
 			Config:      readFile(t, s.ConfigPath()),
 			CABundle:    readFile(t, s.Paths.CA),
 			Certificate: readFile(t, s.Paths.Cert),

@@ -16,6 +16,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/sched"
@@ -245,8 +246,8 @@ func TestFullRotation(t *testing.T) {
 	layout := paths.DefaultLayout(host.dir)
 	loop := &agent.Loop{
 		Client: xffClient(t, ts.URL, host.addr),
-		Applier: &agent.Applier{
-			Layout: layout, Reloader: agent.NoopReloader{},
+		Applier: &generation.Applier{
+			Layout: layout, Reloader: generation.NoopReloader{},
 			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 		Policy: agent.DefaultRenewalPolicy(),

@@ -10,6 +10,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/ca"
 )
 
@@ -356,21 +357,21 @@ func TestModeFor(t *testing.T) {
 		name    string
 		current string
 		next    string
-		want    agent.ApplyMode
+		want    generation.ApplyMode
 	}{
-		{"first enrollment", "", a, agent.ModeReload},
-		{"routine renewal", a, sameAddr, agent.ModeReload},
-		{"address changed", a, otherAddr, agent.ModeRestart},
-		{"curve changed", a, otherCurve, agent.ModeRestart},
+		{"first enrollment", "", a, generation.ModeReload},
+		{"routine renewal", a, sameAddr, generation.ModeReload},
+		{"address changed", a, otherAddr, generation.ModeRestart},
+		{"curve changed", a, otherCurve, generation.ModeRestart},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := agent.ModeFor(tc.current, tc.next)
+			got, err := generation.ModeFor(tc.current, tc.next)
 			if err != nil {
 				t.Fatalf("ModeFor: %v", err)
 			}
 			if got != tc.want {
-				t.Errorf("ModeFor = %v, want %v", got, tc.want)
+				t.Errorf("generation.ModeFor = %v, want %v", got, tc.want)
 			}
 		})
 	}

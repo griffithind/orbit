@@ -13,6 +13,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
@@ -39,8 +40,8 @@ func newLoopWithGuard(t *testing.T, host *enrolledHost, baseURL string, g agent.
 	layout := paths.DefaultLayout(host.dir)
 	loop := &agent.Loop{
 		Client: xffClient(t, baseURL, host.addr),
-		Applier: &agent.Applier{
-			Layout: layout, Reloader: agent.NoopReloader{},
+		Applier: &generation.Applier{
+			Layout: layout, Reloader: generation.NoopReloader{},
 			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 		Policy: agent.DefaultRenewalPolicy(),

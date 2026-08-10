@@ -16,7 +16,7 @@
 // only then is the change delivered — as a hot reload where nebula can take one,
 // and as a verified process restart where it cannot. A failure after that point
 // restores the previous generation and delivers it the same way.
-package agent
+package generation
 
 import (
 	"context"

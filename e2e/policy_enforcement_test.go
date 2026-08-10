@@ -17,6 +17,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
@@ -127,12 +128,12 @@ func (h *harness) enrollExisting(t *testing.T, ts *httptest.Server, membershipID
 	}
 
 	dir := t.TempDir()
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:   paths.DefaultLayout(dir),
-		Reloader: agent.NoopReloader{},
+		Reloader: generation.NoopReloader{},
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
+	if err := applier.Apply(ctx, generation.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 		t.Fatalf("apply %s: %v", name, err)
 	}
 	return &enrolledHost{name: name, addr: netip.MustParseAddr(addr), dir: dir, id: membershipID, respons: resp}

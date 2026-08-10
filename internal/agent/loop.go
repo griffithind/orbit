@@ -14,6 +14,7 @@ import (
 
 	"github.com/slackhq/nebula/cert"
 
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/agent/posture"
@@ -237,7 +238,7 @@ func ReadState(dir string) (State, error) {
 // configuration changes when the control plane has any.
 type Loop struct {
 	Client  *Client
-	Applier *Applier
+	Applier *generation.Applier
 	Policy  RenewalPolicy
 	Layout  paths.Layout
 
@@ -477,7 +478,7 @@ func (l *Loop) quarantineEpoch(epoch int64, cause error) {
 // undeliverable reports whether an apply failed in a way that will fail
 // identically every time it is retried.
 func undeliverable(err error) bool {
-	return errors.Is(err, ErrRestartRequired) || errors.Is(err, ErrRestartFailed)
+	return errors.Is(err, generation.ErrRestartRequired) || errors.Is(err, generation.ErrRestartFailed)
 }
 
 // checkDataPlane notices that nebula is not running.
@@ -813,7 +814,7 @@ func (l *Loop) doRenew(ctx context.Context) error {
 		return err
 	}
 
-	material := Material{
+	material := generation.Material{
 		Config:      resp.Config,
 		CABundle:    resp.CABundle,
 		Certificate: resp.Certificate,
@@ -881,7 +882,7 @@ func (l *Loop) poll(ctx context.Context) error {
 		return err
 	}
 
-	if err := l.Applier.Apply(ctx, Material{
+	if err := l.Applier.Apply(ctx, generation.Material{
 		Config:          resp.Config,
 		CABundle:        resp.CABundle,
 		Certificate:     resp.Certificate,
@@ -1154,7 +1155,7 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 		return watchIdle, err
 	}
 
-	if err := l.Applier.Apply(ctx, Material{
+	if err := l.Applier.Apply(ctx, generation.Material{
 		Config:          resp.Config,
 		CABundle:        resp.CABundle,
 		Certificate:     resp.Certificate,

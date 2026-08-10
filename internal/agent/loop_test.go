@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -104,7 +105,7 @@ func testLoop(t *testing.T, baseURL string) *Loop {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &Loop{
 		Client:  NewClient(baseURL),
-		Applier: &Applier{Layout: layout, Reloader: NoopReloader{}, Log: log},
+		Applier: &generation.Applier{Layout: layout, Reloader: generation.NoopReloader{}, Log: log},
 		Policy:  DefaultRenewalPolicy(),
 		Layout:  layout,
 		State:   State{BaseURL: baseURL, MembershipID: "host-under-test"},

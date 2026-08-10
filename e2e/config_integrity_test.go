@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/wire"
@@ -65,7 +66,7 @@ func TestJoinPinsTheNetworkKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.VerifyMaterial(key, resp.MembershipID, resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
+	if err := generation.VerifyMaterial(key, resp.MembershipID, resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
 		t.Fatalf("the control plane's own material did not verify: %v", err)
 	}
 
@@ -99,7 +100,7 @@ func TestAGenerationDoesNotTransplantBetweenMachines(t *testing.T) {
 	// the two configs are identical — which they are for two hosts with the same
 	// role — so nothing about the BYTES can tell these apart. Only asking who
 	// the envelope names can.
-	err := agent.VerifyMaterial(key, b.id, a.respons.ConfigSig, a.respons.Config, a.respons.CABundle)
+	err := generation.VerifyMaterial(key, b.id, a.respons.ConfigSig, a.respons.Config, a.respons.CABundle)
 	if err == nil {
 		t.Fatal("one machine's generation verified as another machine's")
 	}
@@ -109,7 +110,7 @@ func TestAGenerationDoesNotTransplantBetweenMachines(t *testing.T) {
 
 	// The same material on the machine it was rendered for is fine, which is
 	// what shows the check is the binding and not an accident.
-	if err := agent.VerifyMaterial(key, a.id, a.respons.ConfigSig,
+	if err := generation.VerifyMaterial(key, a.id, a.respons.ConfigSig,
 		a.respons.Config, a.respons.CABundle); err != nil {
 		t.Fatalf("a machine could not verify its own generation: %v", err)
 	}
@@ -128,9 +129,9 @@ func TestAnEditedConfigIsDetected(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "edited", "10.42.80.9", false, false, nil)
 	layout := paths.DefaultLayout(host.dir)
-	applier := &agent.Applier{
+	applier := &generation.Applier{
 		Layout:            layout,
-		Reloader:          agent.NoopReloader{},
+		Reloader:          generation.NoopReloader{},
 		DisableValidation: true,
 		Log:               slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
@@ -178,8 +179,8 @@ func TestForgingTheSignatureFails(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "forged", "10.42.80.20", false, false, nil)
 	layout := paths.DefaultLayout(host.dir)
-	applier := &agent.Applier{
-		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
+	applier := &generation.Applier{
+		Layout: layout, Reloader: generation.NoopReloader{}, DisableValidation: true,
 		Log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 	key := networkKeyOf(t, host.dir)
@@ -237,8 +238,8 @@ func TestEditingTheConfigFileChangesNothing(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "inlined", "10.42.81.4", false, false, nil)
 	layout := paths.DefaultLayout(host.dir)
-	applier := &agent.Applier{
-		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
+	applier := &generation.Applier{
+		Layout: layout, Reloader: generation.NoopReloader{}, DisableValidation: true,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	key := networkKeyOf(t, host.dir)
@@ -282,8 +283,8 @@ func TestATamperedSignedConfigIsNeverLoaded(t *testing.T) {
 
 	host := h.createAndEnroll(t, ts, "tampered-source", "10.42.81.9", false, false, nil)
 	layout := paths.DefaultLayout(host.dir)
-	applier := &agent.Applier{
-		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
+	applier := &generation.Applier{
+		Layout: layout, Reloader: generation.NoopReloader{}, DisableValidation: true,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	key := networkKeyOf(t, host.dir)

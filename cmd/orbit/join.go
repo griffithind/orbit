@@ -15,6 +15,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/generation"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/version"
@@ -192,9 +193,9 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 		switch {
 		case err == nil:
 			layout := paths.DefaultLayout(dir)
-			applier := &agent.Applier{
+			applier := &generation.Applier{
 				Layout:            layout,
-				Reloader:          agent.NoopReloader{},
+				Reloader:          generation.NoopReloader{},
 				DisableValidation: true,
 				Log:               log,
 			}
@@ -207,11 +208,11 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 			if err != nil {
 				return fmt.Errorf("the control plane sent an unreadable network key: %w", err)
 			}
-			if err := agent.VerifyMaterial(key, resp.MembershipID, resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
+			if err := generation.VerifyMaterial(key, resp.MembershipID, resp.ConfigSig, resp.Config, resp.CABundle); err != nil {
 				return fmt.Errorf("refusing the first configuration: %w", err)
 			}
 
-			if err := applier.Apply(ctx, agent.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
+			if err := applier.Apply(ctx, generation.MaterialFromEnroll(resp, kp.PrivatePEM)); err != nil {
 				return err
 			}
 			if err := agent.WriteState(dir, agent.State{
