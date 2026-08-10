@@ -10,12 +10,14 @@
 # reached by reflection.
 #
 # Everything below is the BASELINE as of 2026-08-10, not a permanent exemption.
-# It is 31 entries, mostly *Func adapter types and test-only affordances, and it
+# It is 28 entries, mostly *Func adapter types and test-only affordances, and it
 # exists so the gate can be switched on today rather than after a triage that
 # would block every other change. ADR-0006 says a growing allow file means the
 # rule is being evaded; this one is expected to SHRINK, and a PR that adds a
 # line to it needs the reason in its message.
-cmd/orbit/agent.go dirFlags.networkRef
+#
+# This file only ever covers the ./cmd/... gate. The second gate — nothing may
+# be unreachable even counting tests — takes no exemptions and has none.
 internal/agent/client.go Client.Join
 internal/agent/client.go KeypairFromPrivate
 internal/agent/paths/paths.go Layout.StatePath
@@ -27,8 +29,6 @@ internal/agent/dataplane/supervise.go SupervisorFuncs.Describe
 internal/agent/dataplane/supervise.go SupervisorFuncs.Ensure
 internal/agent/dataplane/supervise.go SupervisorFuncs.Restart
 internal/agent/dataplane/supervise.go SupervisorFuncs.Status
-internal/agent/generation/verify.go NoopVerifier.Describe
-internal/agent/generation/verify.go NoopVerifier.Verify
 internal/agent/generation/verify.go VerifierFunc.Describe
 internal/agent/generation/verify.go VerifierFunc.Verify
 internal/api/routes.go ReadOnlyScopes

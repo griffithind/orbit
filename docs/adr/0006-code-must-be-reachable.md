@@ -52,6 +52,15 @@ Unreachable code does not merge.
 3. **Existing findings are triaged before the gate is enabled**, into exactly two buckets — *wire
    it* or *delete it*. There is no third bucket, and "keep it for later" is the third bucket.
 
+4. **A second gate runs over `./...` with tests as roots, and takes no exemptions.** Point 1's
+   narrow scope is what makes it useful and also what makes it blind: code that NOTHING calls is
+   already unreachable from `./cmd/...`, so it hides behind whatever allowlist entry was added for
+   it. This gate asks the complement — unreachable even when every test counts as a caller — and
+   there is no honest reason for a function nothing in the repository calls to exist, so it has no
+   allow file. Added 2026-08-11, when the first gate's allowlist was triaged; it found six, one of
+   which was a test helper the agent split had duplicated into a second package and never called
+   there.
+
 An allowlist file exists for genuine exceptions — platform-specific implementations that are
 unreachable on the CI host, and nothing else. Every entry carries a one-line reason. A growing
 allowlist is the signal that this ADR is being evaded.

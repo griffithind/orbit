@@ -19,16 +19,6 @@ type Verifier interface {
 	Describe() string
 }
 
-// NoopVerifier accepts everything.
-//
-// Correct when something else owns liveness (a test harness, or an operator
-// watching a rollout by hand), and wrong as a production default: it turns the
-// rollback machinery into dead code, because nothing ever reports failure.
-type NoopVerifier struct{}
-
-func (NoopVerifier) Verify(context.Context) error { return nil }
-func (NoopVerifier) Describe() string             { return "none" }
-
 // VerifierFunc adapts a function.
 type VerifierFunc struct {
 	Name string
@@ -47,8 +37,8 @@ func (v VerifierFunc) Describe() string                 { return v.Name }
 // alive, or that the config parses, proves none of those.
 //
 // It requires the agent endpoint to be an overlay address. When Orbit is not
-// yet running on the overlay the agent has no such signal and should use
-// NoopVerifier, accepting that rollback is then untested in production.
+// yet running on the overlay the agent has no such signal and should leave
+// Applier.Verifier nil, accepting that rollback is then untested in production.
 type ReachabilityVerifier struct {
 	// URL is polled until it answers. Any 2xx, 4xx, or 5xx response counts as
 	// reachable: the question is whether packets flow, not whether the endpoint

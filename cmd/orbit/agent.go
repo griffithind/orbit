@@ -83,21 +83,6 @@ func (d *dirFlags) explicit() bool {
 	return *d.dir != "" || *d.network != ""
 }
 
-// networkRef is the network the caller named, for passing on to a subcommand.
-//
-// The slug when they gave one, otherwise the directory's base name — which is
-// what LayoutFor already treats as the network's name, so the two agree by
-// construction rather than by a caller remembering to keep them in step.
-func (d *dirFlags) networkRef() string {
-	if *d.network != "" {
-		return *d.network
-	}
-	if *d.dir != "" {
-		return filepath.Base(filepath.Clean(*d.dir))
-	}
-	return ""
-}
-
 func (d *dirFlags) layout() (paths.Layout, error) {
 	switch {
 	case *d.dir != "" && *d.network != "":

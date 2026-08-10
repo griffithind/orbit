@@ -1,9 +1,7 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/netip"
@@ -119,34 +117,6 @@ func TestAddressExhaustionIsAClear409(t *testing.T) {
 	if !strings.Contains(apiErr.Message, "10.61.0.0/30") {
 		t.Errorf("the refusal does not name the prefix that ran out: %q", apiErr.Message)
 	}
-}
-
-// adminPostExpectingFailure decodes an error body, which the shared helper
-// deliberately does not: it only unmarshals on success, and the message is the
-// thing under test here.
-func (h *harness) adminPostExpectingFailure(t *testing.T, url string, body any) (int, wire.Error) {
-	t.Helper()
-
-	raw, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+h.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	var out wire.Error
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	return resp.StatusCode, out
 }
 
 // TestHostReportsItsInstanceResources.

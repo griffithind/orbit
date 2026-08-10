@@ -103,6 +103,30 @@ jobs:
             exit 1
           fi
 
+      # The second gate, and it catches what the first structurally cannot.
+      #
+      # The gate above is scoped to ./cmd/... so that a test does not count as a
+      # caller. The cost of that scope is that it says nothing about code which
+      # NOTHING calls — not production, not tests — because such code is already
+      # unreachable from ./cmd/... and sits behind an allow-file entry that was
+      # added for a different reason.
+      #
+      # This one is the complement: unreachable even when every test counts as a
+      # root. There is no allow file, because there is no honest reason for a
+      # function that nothing in the repository calls to exist. It found six the
+      # day it was added, one of which was a test helper duplicated into a second
+      # package by the agent split and never called there.
+      - name: no code that nothing calls
+        run: |
+          go run golang.org/x/tools/cmd/deadcode@latest -test ./... > all.txt || true
+          if grep -q 'unreachable func:' all.txt; then
+            echo "These functions are called by nothing at all, tests included:"
+            sed -nE 's#^(.+): unreachable func: (.+)$#  \2  (\1)#p' all.txt
+            echo
+            echo "Delete them. See docs/adr/0006-code-must-be-reachable.md."
+            exit 1
+          fi
+
       # Uninstrumented, and that is required rather than merely convenient:
       # e2e/revocation_test.go asserts a propagation deadline, and under -race
       # that assertion measures the race detector instead of the system.

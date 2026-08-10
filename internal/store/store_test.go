@@ -98,8 +98,6 @@ func setup(t *testing.T) *store.Store {
 	return testStore
 }
 
-func quoteLiteral(s string) string { return "'" + s + "'" }
-
 // newNetwork creates an isolated network. Every test gets its own so they can
 // run in any order without interfering.
 func newNetwork(t *testing.T, s *store.Store, cidr string) *store.Network {

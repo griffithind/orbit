@@ -84,17 +84,6 @@ func (f *fakeSupervisor) set(running bool, instance string) {
 	f.running, f.instance = running, instance
 }
 
-func testApplier(sup dataplane.Supervisor) *generation.Applier {
-	return &generation.Applier{
-		Layout:        paths.DefaultLayout("/nonexistent"),
-		Reloader:      generation.NoopReloader{},
-		Supervisor:    sup,
-		RestartSettle: 30 * time.Millisecond,
-		RestartPoll:   time.Millisecond,
-		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-}
-
 func loopWithSupervisor(t *testing.T, sup dataplane.Supervisor) *Loop {
 	t.Helper()
 	dir := t.TempDir()
