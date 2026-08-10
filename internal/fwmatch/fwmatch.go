@@ -194,8 +194,23 @@ type Query struct {
 	PeerCertKnown bool
 	PeerName      string
 	PeerGroups    []string
-	PeerCAName    string
-	PeerCASha     string
+
+	// PeerCAName and PeerCASha identify the CA that issued the peer's
+	// certificate, and are SEPARATE from PeerCertKnown on purpose.
+	//
+	// A caller can hold a verified certificate and still not know its issuer —
+	// the agent's peer table carries name and groups but not the issuer, so it
+	// sets PeerCertKnown and leaves both of these empty. Folding the two into
+	// one flag is what made a ca_sha rule report Matches for a peer issued by a
+	// different CA: the guard read "known certificate" as "known issuer" and
+	// compared against an empty string. See judge.
+	PeerCAName string
+	PeerCASha  string
+}
+
+// caKnown reports whether this query can answer a question about the issuing CA.
+func (q Query) caKnown() bool {
+	return q.PeerCertKnown && (q.PeerCAName != "" || q.PeerCASha != "")
 }
 
 // Outcome is a rule's relationship to a query.
@@ -276,14 +291,26 @@ func judge(r Rule, q Query) (Outcome, string) {
 	if !portMatches(r, q.Port) {
 		return Misses, "port"
 	}
+	// The CA term is a DISJUNCTION of positive matches: nebula's grammar is
+	// (ca_sha OR ca_name), so the rule applies if either names the peer's
+	// issuer, and misses if neither does.
+	//
+	// Written as positive matches rather than as negative guards, because the
+	// negative form fails OPEN. The previous
+	//
+	//	if r.CASha != "" && r.CASha != q.PeerCASha && r.CAName != q.PeerCAName
+	//
+	// collapsed for a ca_sha-only rule against a query with an empty
+	// PeerCAName: the third conjunct is "" != "", which is false, so the guard
+	// never fired and a rule pinned to a CA the peer was NOT issued by was
+	// reported as permitting the traffic.
 	if r.CAName != "" || r.CASha != "" {
-		if !q.PeerCertKnown {
-			return Unknown, "needs the peer's certificate to check the issuing CA"
+		if !q.caKnown() {
+			return Unknown, "needs the peer's issuing CA to check this rule"
 		}
-		if r.CASha != "" && r.CASha != q.PeerCASha && r.CAName != q.PeerCAName {
-			return Misses, "issuing CA"
-		}
-		if r.CASha == "" && r.CAName != q.PeerCAName {
+		shaOK := r.CASha != "" && r.CASha == q.PeerCASha
+		nameOK := r.CAName != "" && r.CAName == q.PeerCAName
+		if !shaOK && !nameOK {
 			return Misses, "issuing CA"
 		}
 	}
@@ -295,6 +322,17 @@ func judge(r Rule, q Query) (Outcome, string) {
 
 func protoMatches(rule, want uint8) bool {
 	if rule == firewall.ProtoAny {
+		return true
+	}
+	// "Any protocol" as a QUESTION is weaker than a rule's "any", exactly as it
+	// is for ports below: it asks whether anything at all is permitted, so every
+	// rule answers it.
+	//
+	// Its absence here was not cosmetic. `orbit why` defaults -proto to "any",
+	// which is firewall.ProtoAny, so the DEFAULT invocation of the diagnostic
+	// reported "no rule permits this traffic" against every tcp-only policy and
+	// listed the rules that did permit it as near-misses on "protocol".
+	if want == firewall.ProtoAny {
 		return true
 	}
 	// ICMP and ICMPv6 share a table in nebula and a name in the config.

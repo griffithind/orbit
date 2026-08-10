@@ -139,6 +139,14 @@ func Explain(eng *Embedded, layout Layout, req ExplainRequest) (Explanation, err
 	if err != nil {
 		return ex, err
 	}
+	// PeerCAName and PeerCASha are deliberately left empty: the peer table
+	// carries a verified certificate's name and groups but not its issuer, so a
+	// rule scoped with ca_name or ca_sha is genuinely unevaluable here and
+	// fwmatch reports Unknown rather than guessing.
+	//
+	// That is the honest answer, not a gap to be closed by filling these in with
+	// whatever is to hand. Conflating "certificate known" with "issuer known" is
+	// exactly what made a ca_sha rule report a false allow.
 	q := fwmatch.Query{
 		PeerAddr:      peerAddr,
 		LocalAddr:     local,
