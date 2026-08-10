@@ -1,8 +1,7 @@
-package agent
+package dataplane
 
 import (
 	"context"
-	"time"
 )
 
 // Supervision, as opposed to signalling.
@@ -112,8 +111,3 @@ func (s SupervisorFuncs) Describe() string {
 	}
 	return s.Name
 }
-
-const (
-	restartSettleDefault = 45 * time.Second
-	restartPollDefault   = 500 * time.Millisecond
-)

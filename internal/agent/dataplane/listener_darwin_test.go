@@ -1,4 +1,4 @@
-package agent
+package dataplane
 
 import (
 	"errors"
@@ -26,7 +26,7 @@ func TestPhysicalDefaultInterface(t *testing.T) {
 		t.Skip("route(8) reported no interface for the default route")
 	}
 
-	idx, name, err := physicalDefaultInterface()
+	idx, name, err := PhysicalDefaultInterface()
 	if err != nil {
 		t.Fatalf("physicalDefaultInterface: %v", err)
 	}

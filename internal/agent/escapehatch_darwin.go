@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"syscall"
+
+	"github.com/griffithind/orbit/internal/agent/dataplane"
 )
 
 // pinSocket scopes this socket to the physical default route's interface.
@@ -13,7 +15,7 @@ import (
 // unpinned: the caller is the recovery path, and a recovery path silently routed into the
 // tunnel is the failure this exists to prevent.
 func pinSocket(network string, fd uintptr, _ int) error {
-	idx, _, err := physicalDefaultInterface()
+	idx, _, err := dataplane.PhysicalDefaultInterface()
 	if err != nil {
 		return err
 	}

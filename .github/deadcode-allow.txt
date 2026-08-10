@@ -23,10 +23,10 @@ internal/agent/loop.go Loop.RenewNow
 internal/agent/loop.go Loop.SetClock
 internal/agent/reload.go ReloaderFunc.Describe
 internal/agent/reload.go ReloaderFunc.Reload
-internal/agent/supervise.go SupervisorFuncs.Describe
-internal/agent/supervise.go SupervisorFuncs.Ensure
-internal/agent/supervise.go SupervisorFuncs.Restart
-internal/agent/supervise.go SupervisorFuncs.Status
+internal/agent/dataplane/supervise.go SupervisorFuncs.Describe
+internal/agent/dataplane/supervise.go SupervisorFuncs.Ensure
+internal/agent/dataplane/supervise.go SupervisorFuncs.Restart
+internal/agent/dataplane/supervise.go SupervisorFuncs.Status
 internal/agent/verify.go NoopVerifier.Describe
 internal/agent/verify.go NoopVerifier.Verify
 internal/agent/verify.go VerifierFunc.Describe

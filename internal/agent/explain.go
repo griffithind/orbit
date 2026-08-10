@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/griffithind/orbit/internal/agent/dataplane"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/agent/status"
 	"github.com/griffithind/orbit/internal/fwmatch"
@@ -35,7 +36,7 @@ import (
 // It deliberately does NOT return an error for a peer with no tunnel, an
 // expired certificate, or a stopped nebula. Every one of those is the answer,
 // and failing would deny the caller the diagnosis they asked for.
-func Explain(eng *Embedded, layout paths.Layout, req status.ExplainRequest) (status.Explanation, error) {
+func Explain(eng *dataplane.Embedded, layout paths.Layout, req status.ExplainRequest) (status.Explanation, error) {
 	proto, err := fwmatch.ParseProto(req.Proto)
 	if err != nil {
 		return status.Explanation{}, err

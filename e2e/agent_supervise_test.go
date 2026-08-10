@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/dataplane"
 	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
@@ -43,13 +44,13 @@ func newScriptedSupervisor(take bool) *scriptedSupervisor {
 	return &scriptedSupervisor{instance: "run-1", running: true, take: take}
 }
 
-func (s *scriptedSupervisor) supervisor() agent.Supervisor {
-	return agent.SupervisorFuncs{
+func (s *scriptedSupervisor) supervisor() dataplane.Supervisor {
+	return dataplane.SupervisorFuncs{
 		Name: "scripted",
-		StatusFn: func(context.Context) (agent.Status, error) {
+		StatusFn: func(context.Context) (dataplane.Status, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return agent.Status{
+			return dataplane.Status{
 				Known: true, Running: s.running, Instance: s.instance,
 				Detail: "scripted " + s.instance,
 			}, nil
@@ -94,7 +95,7 @@ func reAddressed(t *testing.T, h *harness, ts *httptest.Server, host *enrolledHo
 	}
 }
 
-func quietApplier(layout paths.Layout, sup agent.Supervisor) *agent.Applier {
+func quietApplier(layout paths.Layout, sup dataplane.Supervisor) *agent.Applier {
 	return &agent.Applier{
 		Layout:     layout,
 		Reloader:   agent.NoopReloader{},

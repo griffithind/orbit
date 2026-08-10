@@ -1,6 +1,6 @@
 //go:build !darwin
 
-package agent
+package dataplane
 
 import (
 	"log/slog"

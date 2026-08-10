@@ -1,4 +1,4 @@
-package agent
+package dataplane
 
 import (
 	"context"
@@ -53,7 +53,7 @@ type pinnedConn struct {
 var _ udp.Conn = (*pinnedConn)(nil)
 
 func newPinnedConn(l *slog.Logger, ip netip.Addr, port int, multi bool) (udp.Conn, error) {
-	idx, name, err := physicalDefaultInterface()
+	idx, name, err := PhysicalDefaultInterface()
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func bindFd(fd uintptr, v4 bool, idx int) error {
 // a departed interface fails to send, which recovers on the next change, while an unpinned
 // socket sends into the tunnel and takes the machine off the network entirely.
 func (p *pinnedConn) Rebind() error {
-	idx, name, err := physicalDefaultInterface()
+	idx, name, err := PhysicalDefaultInterface()
 	if err != nil {
 		p.l.Warn("network changed but no physical default route to pin to; keeping the previous pin",
 			"error", err)
@@ -190,14 +190,14 @@ func (p *pinnedConn) ReloadConfig(*config.C) {}
 
 func (p *pinnedConn) SupportsMultipleReaders() bool { return false }
 
-// physicalDefaultInterface finds the interface index of the default route that actually
+// PhysicalDefaultInterface finds the interface index of the default route that actually
 // leaves this machine, skipping tunnels.
 //
 // The skip is the whole reason this is not one line. Once an exit node is in use there is
 // a default route pointing at nebula's own utun, and it is more specific than nothing —
 // pinning to it would send nebula's UDP into the tunnel that carries it, which is the
 // failure this code exists to prevent. Tailscale's netns_darwin.go refuses the same way.
-func physicalDefaultInterface() (int, string, error) {
+func PhysicalDefaultInterface() (int, string, error) {
 	rib, err := route.FetchRIB(unix.AF_UNSPEC, route.RIBTypeRoute, 0)
 	if err != nil {
 		return 0, "", fmt.Errorf("read the routing table: %w", err)

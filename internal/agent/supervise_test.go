@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/griffithind/orbit/internal/agent/dataplane"
 	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
@@ -42,10 +43,10 @@ func newFakeSupervisor() *fakeSupervisor {
 
 func (f *fakeSupervisor) Describe() string { return "fake" }
 
-func (f *fakeSupervisor) Status(context.Context) (Status, error) {
+func (f *fakeSupervisor) Status(context.Context) (dataplane.Status, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return Status{Known: f.known, Running: f.running, Instance: f.instance, Detail: "fake"}, nil
+	return dataplane.Status{Known: f.known, Running: f.running, Instance: f.instance, Detail: "fake"}, nil
 }
 
 func (f *fakeSupervisor) Restart(context.Context) error {
@@ -82,7 +83,7 @@ func (f *fakeSupervisor) set(running bool, instance string) {
 	f.running, f.instance = running, instance
 }
 
-func testApplier(sup Supervisor) *Applier {
+func testApplier(sup dataplane.Supervisor) *Applier {
 	return &Applier{
 		Layout:        paths.DefaultLayout("/nonexistent"),
 		Reloader:      NoopReloader{},
@@ -219,7 +220,7 @@ func TestLocalizeRewritesWhateverTheServerRendered(t *testing.T) {
 	}
 }
 
-func loopWithSupervisor(t *testing.T, sup Supervisor) *Loop {
+func loopWithSupervisor(t *testing.T, sup dataplane.Supervisor) *Loop {
 	t.Helper()
 	dir := t.TempDir()
 	layout := paths.DefaultLayout(dir)

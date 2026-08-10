@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -32,6 +31,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/griffithind/orbit/internal/agent/dataplane"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/wire"
@@ -63,6 +63,12 @@ type Reloader interface {
 }
 
 // Applier writes control-plane state to disk and delivers it to nebula.
+// Restart timings the Applier uses when its own are unset.
+const (
+	restartSettleDefault = 45 * time.Second
+	restartPollDefault   = 500 * time.Millisecond
+)
+
 type Applier struct {
 	Layout   paths.Layout
 	Reloader Reloader
@@ -74,7 +80,7 @@ type Applier struct {
 	// certificate networks differ. Nil means such a generation is REFUSED rather
 	// than applied in a way that would silently leave the old certificate
 	// running until it expires.
-	Supervisor Supervisor
+	Supervisor dataplane.Supervisor
 
 	// Verifier confirms the host still works after the change is delivered. Nil
 	// means no verification, which also means the rollback path is never
@@ -362,7 +368,7 @@ func (a *Applier) restart(ctx context.Context) error {
 }
 
 // confirmRestarted waits for nebula to come back as a different process.
-func (a *Applier) confirmRestarted(ctx context.Context, before Status) error {
+func (a *Applier) confirmRestarted(ctx context.Context, before dataplane.Status) error {
 	settle := a.RestartSettle
 	if settle <= 0 {
 		settle = restartSettleDefault
@@ -375,7 +381,7 @@ func (a *Applier) confirmRestarted(ctx context.Context, before Status) error {
 	ctx, cancel := context.WithTimeout(ctx, settle)
 	defer cancel()
 
-	var last Status
+	var last dataplane.Status
 	for {
 		st, err := a.Supervisor.Status(ctx)
 		if err == nil {
@@ -770,10 +776,6 @@ func syncDir(path string) error {
 	}
 	defer d.Close()
 	return d.Sync()
-}
-
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // MaterialFromEnroll converts an enrollment response into a generation.

@@ -1,4 +1,4 @@
-package agent
+package dataplane
 
 // The UDP socket nebula sends from, when this host has to be told which way is out.
 //

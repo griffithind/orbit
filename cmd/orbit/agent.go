@@ -51,6 +51,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/dataplane"
 	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/agent/status"
@@ -627,7 +628,7 @@ func networksToRun(df *dirFlags, root string) ([]string, error) {
 // loop, its own control plane.
 type networkLoop struct {
 	loop   *agent.Loop
-	engine *agent.Embedded
+	engine *dataplane.Embedded
 	log    *slog.Logger
 }
 
@@ -696,7 +697,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	}
 	nlog := log.With("network", layout.Network)
 
-	engine := &agent.Embedded{Log: nlog}
+	engine := &dataplane.Embedded{Log: nlog}
 	applier := &agent.Applier{
 		Layout:   layout,
 		Reloader: engine,

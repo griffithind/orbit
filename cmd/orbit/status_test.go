@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/dataplane"
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/agent/status"
 	"github.com/griffithind/orbit/internal/fwmatch"
@@ -39,7 +40,7 @@ func TestStatusIsSafeWhileTheAgentRuns(t *testing.T) {
 	// makes this constructible without a control plane.
 	nl := &networkLoop{
 		loop:   &agent.Loop{Layout: paths.DefaultLayout(dir), Log: quiet},
-		engine: &agent.Embedded{Config: func() (string, error) { return "", errNoConfig }, Log: quiet},
+		engine: &dataplane.Embedded{Config: func() (string, error) { return "", errNoConfig }, Log: quiet},
 		log:    quiet,
 	}
 	slot := &netSlot{dir: dir}

@@ -1,9 +1,10 @@
-package agent
+package dataplane
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -27,12 +28,12 @@ import (
 // is narrower — agent liveness and tunnel liveness are now the same liveness,
 // bounded by however fast the service manager restarts it.
 //
-// Embedded satisfies both Reloader and Supervisor, so everything above it — the
-// apply sequence, the revert guard, verification — is unchanged and untested
+// Embedded satisfies the generation package's Reloader and Supervisor, so
+// everything above it — the apply sequence, the revert guard, verification — is unchanged and untested
 // code paths are not introduced alongside the ones that already work.
 type Embedded struct {
 	// Config produces the configuration to run, verified, with the certificate
-	// material inlined. Applier.VerifiedConfig is what supplies it.
+	// material inlined. The applier's VerifiedConfig is what supplies it.
 	//
 	// A CALLBACK RATHER THAN A PATH, and that is the whole design. Nebula is
 	// never told where to find a file, so there is no second read for an edit to
@@ -58,11 +59,6 @@ type Embedded struct {
 	lastExit error
 }
 
-var (
-	_ Reloader   = (*Embedded)(nil)
-	_ Supervisor = (*Embedded)(nil)
-)
-
 // StopGrace bounds how long a restart waits for the previous nebula to finish.
 //
 // Bounded for the reason every wait in this codebase is: nebula's shutdown
@@ -79,7 +75,7 @@ func (e *Embedded) Describe() string { return "nebula (embedded)" }
 // worst place to find that out.
 func (e *Embedded) logger() *slog.Logger {
 	if e.Log == nil {
-		return discardLogger()
+		return slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return e.Log
 }
