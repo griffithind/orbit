@@ -9,6 +9,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -407,7 +408,7 @@ func (l *Loop) reconcileHost() {
 		// configuration; saying it twice per cycle would bury it.
 		return
 	}
-	want, err := HostStateFromConfig(yamlCfg)
+	want, err := hostcfg.HostStateFromConfig(yamlCfg)
 	if err != nil {
 		l.Log.Error("could not read this host's forwarding instructions", "error", err)
 		return
@@ -430,7 +431,7 @@ func (l *Loop) reconcileHost() {
 	// a name table that lags that change resolves to answers the routing no
 	// longer agrees with.
 	if l.DNS != nil {
-		if d, err := DNSStateFromConfig(yamlCfg); err != nil {
+		if d, err := hostcfg.DNSStateFromConfig(yamlCfg); err != nil {
 			l.Log.Error("could not read this network's name table", "error", err)
 		} else if err := l.DNS.Apply(d); err != nil {
 			// Not fatal: nebula is running and tunnels are unaffected. What is

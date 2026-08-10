@@ -22,6 +22,8 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/griffithind/orbit/internal/agent/hostcfg"
 )
 
 // The agent's local status socket.
@@ -538,7 +540,7 @@ func (h HostStatus) Empty() bool {
 func HostStatusFromConfig(yamlCfg string) (HostStatus, error) {
 	var out HostStatus
 
-	hs, err := HostStateFromConfig(yamlCfg)
+	hs, err := hostcfg.HostStateFromConfig(yamlCfg)
 	if err != nil {
 		return out, err
 	}
@@ -548,7 +550,7 @@ func HostStatusFromConfig(yamlCfg string) (HostStatus, error) {
 		out.Masquerade = append(out.Masquerade, p.String())
 	}
 
-	if d, err := DNSStateFromConfig(yamlCfg); err == nil && !d.Empty() {
+	if d, err := hostcfg.DNSStateFromConfig(yamlCfg); err == nil && !d.Empty() {
 		out.Resolver = d.Listen.String()
 		out.Domain = d.Domain
 		// Halved: every machine is stored under both its bare and its qualified

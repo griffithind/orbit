@@ -14,6 +14,7 @@ import (
 
 	"github.com/slackhq/nebula/cert"
 
+	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/agent/posture"
 	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/wire"
@@ -251,12 +252,12 @@ type Loop struct {
 
 	// Host applies forwarding and NAT for a gateway. Nil on a machine that is
 	// not one, and on any platform that cannot be one.
-	Host HostConfigurer
+	Host hostcfg.HostConfigurer
 
 	// DNS serves the network's name table on this host's overlay address. Nil
 	// disables it, which is what every test and every platform that cannot read
 	// its own resolver configuration gets.
-	DNS *Resolver
+	DNS *hostcfg.Resolver
 
 	// lastHostState is the last state successfully applied, so a reconcile that
 	// changes nothing does not log every cycle.

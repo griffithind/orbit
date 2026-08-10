@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -97,7 +98,7 @@ func TestAGatewayIsToldToForwardAndNAT(t *testing.T) {
 	}
 
 	mat := h.rerender(t, ts, gw)
-	state, err := agent.HostStateFromConfig(mat.Config)
+	state, err := hostcfg.HostStateFromConfig(mat.Config)
 	if err != nil {
 		t.Fatalf("read host state: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestAGatewayIsToldToForwardAndNAT(t *testing.T) {
 			t.Errorf("a non-gateway was given %q:\n%s", instruction, pcfg)
 		}
 	}
-	pstate, err := agent.HostStateFromConfig(pcfg)
+	pstate, err := hostcfg.HostStateFromConfig(pcfg)
 	if err != nil {
 		t.Fatal(err)
 	}

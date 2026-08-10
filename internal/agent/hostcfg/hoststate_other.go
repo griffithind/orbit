@@ -1,6 +1,6 @@
 //go:build !linux
 
-package agent
+package hostcfg
 
 // Not a gateway platform.
 //

@@ -51,6 +51,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/version"
 )
@@ -732,8 +733,8 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	loop := &agent.Loop{
 		Client:  agent.NewClient(st.ControlURL()),
 		Applier: applier,
-		Host:    agent.NewHostConfigurer(nlog),
-		DNS:     agent.NewResolver(nlog),
+		Host:    hostcfg.NewHostConfigurer(nlog),
+		DNS:     hostcfg.NewResolver(nlog),
 		Policy:  agent.DefaultRenewalPolicy(),
 		Layout:  layout,
 		Curve:   c,
@@ -935,14 +936,14 @@ func uninstallCmd(args []string) error {
 	// and works even if somebody edited the rules. A machine that had rules
 	// left behind here would keep forwarding for a network it is no longer part
 	// of, which is the one uninstall failure with a security consequence.
-	if err := agent.NewHostConfigurer(newLogger()).Remove(); err != nil {
+	if err := hostcfg.NewHostConfigurer(newLogger()).Remove(); err != nil {
 		// Reported, not fatal. The rest of the uninstall is still worth doing,
 		// and stopping here would leave a machine half-removed with no obvious
 		// way forward.
 		fmt.Fprintf(errOut, "WARNING: could not remove forwarding rules: %v\n"+
-			"Remove them by hand with: nft destroy table inet %s\n", err, agent.TableName)
+			"Remove them by hand with: nft destroy table inet %s\n", err, hostcfg.TableName)
 	} else {
-		fmt.Fprintf(errOut, "removed any forwarding rules (nft table inet %s)\n", agent.TableName)
+		fmt.Fprintf(errOut, "removed any forwarding rules (nft table inet %s)\n", hostcfg.TableName)
 	}
 
 	removed, err := plan.RemoveUnit(len(others) > 0)
