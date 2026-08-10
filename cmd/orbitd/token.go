@@ -101,7 +101,7 @@ func tokenCreate(args []string) error {
 			Action:       store.ActionTokenCreated,
 			TargetType:   "token",
 			TargetID:     tokenID,
-			Meta:         []byte(fmt.Sprintf(`{"via":"orbitd token create","name":%q}`, *name)),
+			Meta:         store.AuditMeta(map[string]any{"via": "orbitd token create", "name": *name}),
 		}
 		return tx.AppendAudit(ctx, e)
 	})

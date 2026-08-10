@@ -30,11 +30,6 @@ func identityFrom(ctx context.Context) *store.Identity {
 	return id
 }
 
-// IdentityFrom returns the authenticated caller, or nil outside an
-// authenticated handler. Exported for internal/web, whose handlers run behind
-// the same middleware and read the identity the same way.
-func IdentityFrom(ctx context.Context) *store.Identity { return identityFrom(ctx) }
-
 // credential is one way of turning a request into a store.Identity.
 //
 // This is the seam. Authentication and the scope check are separate steps, and
@@ -816,7 +811,7 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		e := id.Audit(store.ActionMembershipDeleted, "host", membershipID.String())
-		e.Meta = []byte(fmt.Sprintf(`{"name":%q,"reason":%q}`, name, reason))
+		e.Meta = store.AuditMeta(map[string]any{"name": name, "reason": reason})
 		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {
@@ -1221,7 +1216,7 @@ func (s *Server) handleAddNetworkCIDR(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		e := id.Audit(store.ActionNetworkCIDRAdded, "network", net.ID.String())
-		e.Meta = []byte(fmt.Sprintf(`{"cidr":%q}`, p.Masked().String()))
+		e.Meta = store.AuditMeta(map[string]any{"cidr": p.Masked().String()})
 		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {
@@ -1286,7 +1281,7 @@ func (s *Server) handleRemoveNetworkCIDR(w http.ResponseWriter, r *http.Request)
 			return err
 		}
 		e := id.Audit(store.ActionNetworkCIDRRemoved, "network", net.ID.String())
-		e.Meta = []byte(fmt.Sprintf(`{"cidr":%q}`, p.Masked().String()))
+		e.Meta = store.AuditMeta(map[string]any{"cidr": p.Masked().String()})
 		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {
@@ -1438,8 +1433,11 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		e := id.Audit(store.ActionNetworkRenamed, "network", net.ID.String())
-		e.Meta = []byte(fmt.Sprintf(`{"slug":%q,"name_before":%q,"name_after":%q}`,
-			net.Slug, before, out.Name))
+		e.Meta = store.AuditMeta(map[string]any{
+			"slug":        net.Slug,
+			"name_before": before,
+			"name_after":  out.Name,
+		})
 		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {

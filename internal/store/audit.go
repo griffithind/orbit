@@ -2,10 +2,32 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
-
-	"github.com/google/uuid"
 )
+
+// AuditMeta encodes v as the meta column's jsonb payload.
+//
+// Use this rather than building the JSON by hand. Every site that did used
+// fmt.Sprintf with %q, which is GO quoting, not JSON quoting: it escapes " and
+// \ but emits \a, \v, \x01 and raw invalid UTF-8 verbatim, none of which are
+// legal JSON escapes. meta is jsonb NOT NULL, so Postgres rejected the cast, the
+// transaction aborted, and an authenticated destructive endpoint returned 500
+// for a reason nothing in the response explained — reachable on the delete-host
+// path with nothing more exotic than ?reason=%07.
+//
+// Errors are folded into the payload rather than returned. A caller cannot
+// usefully handle "your audit metadata did not marshal", and failing the
+// mutation over its own description is worse than recording the description
+// imperfectly.
+func AuditMeta(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		b, _ = json.Marshal(map[string]string{"meta_encode_error": err.Error()})
+	}
+	return b
+}
+
 
 // Audit returns an append-only record of what happened in this deployment.
 //
@@ -149,8 +171,3 @@ const (
 	ActionTokenCreated         = "token.created"
 	ActionTokenRevoked         = "token.revoked"
 )
-
-// AuditTarget is a small helper for the common "target is a UUID" case.
-func AuditTarget(kind string, id uuid.UUID) (string, string) {
-	return kind, id.String()
-}

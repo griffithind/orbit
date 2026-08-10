@@ -332,7 +332,7 @@ func (s *Server) handleActivateCA(w http.ResponseWriter, r *http.Request) error 
 				"total", total, "actor", id.Display)
 		}
 		e := s.audit(r, *id, action, "ca", caID.String())
-		e.Meta = []byte(fmt.Sprintf(`{"via":"ui","hosts_cut_off":%d,"hosts_total":%d}`, cutOff, total))
+		e.Meta = store.AuditMeta(map[string]any{"via": "ui", "hosts_cut_off": cutOff, "hosts_total": total})
 		return tx.AppendAudit(ctx, e)
 	})
 	if err != nil {

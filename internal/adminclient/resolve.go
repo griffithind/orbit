@@ -191,11 +191,18 @@ func preview(names []string) string {
 	return fmt.Sprintf("%s, and %d more", strings.Join(names[:max], ", "), len(names)-max)
 }
 
+// resolvePageSize bounds the substring lookup. Named rather than inlined
+// because the error message quotes it, and a message that disagrees with the
+// query it describes is worse than no message.
+const resolvePageSize = 50
+
 // ResolveHost accepts a host name or uuid and returns the id.
 //
 // Membership names are UNIQUE (network_id, name), so an exact name match is unique by
 // construction — but name_contains is a substring filter, so the page it returns
-// has to be narrowed to the exact match here rather than assumed to hold one row.
+// has to be narrowed to the exact match here rather than assumed to hold one row,
+// and a full page that did not contain it means "ask a narrower question", not
+// "no such host".
 func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref string) (uuid.UUID, error) {
 	if id, err := uuid.Parse(ref); err == nil {
 		return id, nil
@@ -204,7 +211,7 @@ func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref strin
 	res, err := c.ListHosts(ctx, MembershipFilter{
 		NetworkID:    networkID,
 		NameContains: ref,
-		Limit:        50,
+		Limit:        resolvePageSize,
 	})
 	if err != nil {
 		return uuid.Nil, err
@@ -220,6 +227,21 @@ func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref strin
 			return id, nil
 		}
 		near = append(near, h.Name)
+	}
+
+	// The page was full and the exact match was not on it.
+	//
+	// Reporting "no such host" here would be a lie, and the most expensive kind:
+	// name_contains is a SUBSTRING filter, so on a fleet where more than Limit
+	// names contain the typed string the exact match can sit on page two. An
+	// operator running `orbit membership rm web-1` mid-incident would be told
+	// web-1 does not exist. Say what is actually true instead, and name the
+	// command that gives an unambiguous answer.
+	if res.Value.NextCursor != "" {
+		return uuid.Nil, fmt.Errorf(
+			"more than %d hosts have %q in their name and none of the first %d matched it exactly; "+
+				"narrow the name or pass the uuid from `orbit membership ls`",
+			resolvePageSize, ref, resolvePageSize)
 	}
 
 	// Nothing matched the substring. The suggestion list must NOT come from the

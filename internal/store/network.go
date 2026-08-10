@@ -340,7 +340,32 @@ var ErrLastCIDR = errors.New("a network must keep at least one prefix")
 // and the host's role, and the network's prefixes appear in none of them. They
 // reach a host only through the certificate, and only at issuance. Bumping
 // would wake every agent in the network to re-render a byte-identical file.
+// lockNetwork takes the network's row lock, serializing everything that reads
+// its prefix list and then writes it back.
+//
+// Required because cidrs is an array column mutated with array_append and
+// array_remove: those re-evaluate against whatever tuple is current when the
+// statement finally runs, not against the snapshot the caller validated. Two
+// concurrent removals of DIFFERENT prefixes from a two-prefix network therefore
+// both passed the "this is not the last one" guard, and the second re-evaluated
+// array_remove against the already-shortened array and left the network with NO
+// address space — after which every issuance for that network fails.
+//
+// PutPolicy and UpdateRole already do this on the same table for the same
+// reason; the CIDR pair were the outliers.
+func (t *Tx) lockNetwork(ctx context.Context, id uuid.UUID) error {
+	var locked uuid.UUID
+	if err := t.tx.QueryRow(ctx,
+		`SELECT id FROM orbit.network WHERE id = $1 FOR UPDATE`, id).Scan(&locked); err != nil {
+		return mapErr(err, "lock network")
+	}
+	return nil
+}
+
 func (t *Tx) AddNetworkCIDR(ctx context.Context, id uuid.UUID, p netip.Prefix) (*Network, error) {
+	if err := t.lockNetwork(ctx, id); err != nil {
+		return nil, err
+	}
 	net, err := t.GetNetwork(ctx, id)
 	if err != nil {
 		return nil, err
@@ -410,6 +435,9 @@ func (t *Tx) CIDRHolders(ctx context.Context, networkID uuid.UUID, p netip.Prefi
 // Also refused when it is the last prefix: a network with no address space can
 // hold no host that can be issued a certificate.
 func (t *Tx) RemoveNetworkCIDR(ctx context.Context, id uuid.UUID, p netip.Prefix) (*Network, error) {
+	if err := t.lockNetwork(ctx, id); err != nil {
+		return nil, err
+	}
 	net, err := t.GetNetwork(ctx, id)
 	if err != nil {
 		return nil, err

@@ -337,7 +337,7 @@ func (s *Service) auditEnrollFailure(ctx context.Context, redeemed *store.Redeem
 			ActorType: store.ActorAgent, ActorID: target,
 			Action:     store.ActionEnrollFailed,
 			TargetType: "host", TargetID: target,
-			Meta:     []byte(fmt.Sprintf(`{"reason":%q}`, cause.Error())),
+			Meta:     store.AuditMeta(map[string]any{"reason": cause.Error()}),
 			SourceIP: ip,
 		})
 	})

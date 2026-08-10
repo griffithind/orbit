@@ -134,11 +134,23 @@ func (t *Tx) nextBlocklistEpoch(ctx context.Context, networkID uuid.UUID) (int64
 	return t.BumpEpoch(ctx, networkID, EpochBlocklist)
 }
 
-// UnblockHost returns a host to active and removes its blocklist entries.
+// UnblockHost lifts a block and removes the host's blocklist entries.
 //
 // Note this does not un-revoke the certificates: those are gone for good and
 // the host must enroll or renew to get a new one. Removing the entries only
 // stops distributing fingerprints that are no longer meaningful.
+//
+// The state it returns to is DERIVED from what the host actually has, not set to
+// a constant. BlockHost suspends a host from whatever state it held — pending,
+// created, enrolled or active — and revokes any certificate it had, so returning
+// every host to 'active' promoted hosts that had never enrolled and, worse,
+// hosts that had never been authorized and therefore hold no address.
+//
+// That was not merely untidy. Convergence and FleetStats both count
+// state IN ('enrolled','active'), so such a host sits in the denominator and can
+// never report an epoch — pinning convergence below 100% forever, and convergence
+// is the gate on CA rotation. One unblock of a never-enrolled host blocked CA
+// rotation for that network indefinitely.
 func (t *Tx) UnblockHost(ctx context.Context, membershipID uuid.UUID) (int64, error) {
 	host, err := t.GetHost(ctx, membershipID)
 	if err != nil {
@@ -154,8 +166,18 @@ func (t *Tx) UnblockHost(ctx context.Context, membershipID uuid.UUID) (int64, er
 		return 0, mapErr(err, "remove blocklist entries")
 	}
 
-	if err := t.SetHostState(ctx, membershipID, MembershipActive); err != nil {
-		return 0, err
+	// Evidence, in descending order of what it proves: a live certificate means
+	// enrolled; an allocated address means authorized but not yet enrolled;
+	// neither means it is still waiting to be authorized.
+	if _, err := t.tx.Exec(ctx, `
+		UPDATE orbit.membership SET state = CASE
+		  WHEN EXISTS (SELECT 1 FROM orbit.certificate
+		                WHERE membership_id = $1 AND state = 'active') THEN 'enrolled'
+		  WHEN EXISTS (SELECT 1 FROM orbit.membership_address
+		                WHERE membership_id = $1)                      THEN 'created'
+		  ELSE 'pending' END
+		 WHERE id = $1`, membershipID); err != nil {
+		return 0, mapErr(err, "restore membership state")
 	}
 	return t.nextBlocklistEpoch(ctx, host.NetworkID)
 }
