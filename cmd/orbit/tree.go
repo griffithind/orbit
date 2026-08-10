@@ -164,6 +164,13 @@ removes one NETWORK, and the machine keeps serving every other one.`,
 				mutating("revoke", "end one", func(ctx context.Context, a []string) error { return sessionRevoke(ctx, a) }),
 			}),
 			{
+				Name: "api", Short: "an authenticated request against the admin API",
+				Args: "<path>", Raw: true, Mutating: true,
+				Long: `Every route this CLI has not wrapped, with the profile, URL and token
+already resolved. The body is emitted verbatim, so it is interchangeable with curl.`,
+				Run: apiCmd,
+			},
+			{
 				Name: "audit", Short: "read the audit trail",
 				Raw: true,
 				Run: func(ctx context.Context, a []string) error { return auditCmd(ctx, a) },

@@ -56,6 +56,8 @@ func main() {
 		err = serve(os.Args[2:])
 	case "bootstrap":
 		err = bootstrap(os.Args[2:])
+	case "doctor":
+		err = doctorCmd(os.Args[2:])
 	case "migrate":
 		err = migrateCmd(os.Args[2:])
 	case "token":
@@ -189,6 +191,7 @@ func usage() {
 
   serve      run the control plane
   bootstrap  create the first network, CA, role, and admin token
+  doctor     preflight: listen addresses, mesh ports, database, migration state
   migrate    apply database migrations (needs the admin DSN, not the app one)
   token      manage API tokens offline (break-glass; see docs/deployment.md)
   version    print the build version

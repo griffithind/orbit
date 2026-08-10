@@ -46,6 +46,28 @@ stranger can reach is exposed by it beyond enrollment.
 
 ---
 
+
+## Before you start it
+
+`orbitd doctor` runs every check `serve` would run, without starting anything.
+
+```bash
+orbitd doctor --dsn "$ORBIT_DSN" --addr :8080 --enroll-url https://orbit.example.com
+```
+
+It exists because `serve` validates as it goes, and validates `-addr` at the very
+last statement — after the store is open, the vault is unsealed, the CA registry
+is built and every mesh node has joined. A typo'd listen address therefore costs
+a full startup and fails on the final line. `doctor` binds and releases each
+address first, so the cheap mistakes are reported before the expensive work is
+attempted.
+
+Every check is read-only, so it is safe to run against a control plane that is
+already serving. In particular it never applies a migration; it only compares
+what is applied against what this binary bundles, which is also the one place
+that will tell you the database was migrated by a *newer* orbitd than the one
+you are about to start.
+
 ## 1a. Ports
 
 | Port | Proto | Open to | Why |

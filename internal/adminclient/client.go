@@ -243,3 +243,23 @@ func send[T any](ctx context.Context, c *Client, method, path string, q url.Valu
 func (c *Client) WhoAmI(ctx context.Context) (Result[wire.WhoAmIResponse], error) {
 	return get[wire.WhoAmIResponse](ctx, c, "/v1/whoami", nil)
 }
+
+// Raw performs an arbitrary authenticated request against the admin API and
+// returns the response body verbatim.
+//
+// The escape hatch behind `orbit api`, and the reason it exists is that a CLI
+// which only exposes what someone remembered to wrap becomes a ceiling on the
+// API. ZeroTier arrived at the same idea from the other end: any argument
+// beginning with "/" is passed straight through.
+//
+// The body is returned unparsed. A caller that wanted a typed response would
+// use the typed method; this one exists precisely for the routes that have none
+// yet, and re-encoding would put this command's opinion between the server and
+// jq.
+func (c *Client) Raw(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
+	var payload any
+	if len(body) > 0 {
+		payload = json.RawMessage(body)
+	}
+	return c.doStatus(ctx, method, path, nil, payload, nil)
+}

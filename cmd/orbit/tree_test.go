@@ -83,18 +83,14 @@ func mutatingTargets(t *testing.T) map[string]bool {
 	}
 
 	out := map[string]bool{}
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		id, ok := call.Fun.(*ast.Ident)
-		if !ok || id.Name != "mutating" || len(call.Args) < 3 {
-			return true
-		}
-		// The last argument is the closure; the single call inside it is the
-		// leaf function.
-		ast.Inspect(call.Args[len(call.Args)-1], func(n ast.Node) bool {
+
+	// Two spellings, because the table has two: the mutating() helper for verbs
+	// under a noun, and a struct literal with Mutating: true for the top-level
+	// entries that also carry Args or Long. Handling only the helper would let
+	// the second form escape the check silently — which it did, until `orbit api`
+	// was added and this test failed for the right reason.
+	record := func(node ast.Node) {
+		ast.Inspect(node, func(n ast.Node) bool {
 			inner, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -105,6 +101,48 @@ func mutatingTargets(t *testing.T) map[string]bool {
 			}
 			return true
 		})
+	}
+
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			id, ok := node.Fun.(*ast.Ident)
+			if !ok || id.Name != "mutating" || len(node.Args) < 3 {
+				return true
+			}
+			record(node.Args[len(node.Args)-1])
+
+		case *ast.CompositeLit:
+			var runValue ast.Expr
+			isMutating := false
+			for _, el := range node.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				switch key.Name {
+				case "Mutating":
+					if lit, ok := kv.Value.(*ast.Ident); ok && lit.Name == "true" {
+						isMutating = true
+					}
+				case "Run":
+					runValue = kv.Value
+				}
+			}
+			if isMutating && runValue != nil {
+				// A bare identifier (Run: apiCmd) names the target directly; a
+				// closure wraps it.
+				if id, ok := runValue.(*ast.Ident); ok {
+					out[id.Name] = true
+				} else {
+					record(runValue)
+				}
+			}
+		}
 		return true
 	})
 

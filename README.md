@@ -50,7 +50,7 @@ those should be run deliberately rather than by a pipe.
 | Binary | Platforms | Runs on |
 |---|---|---|
 | `orbit` | macOS, Linux · amd64, arm64 | your laptop, and every managed host as `orbit agent run` |
-| `orbitd` | Linux · amd64, arm64 | the control plane, including `orbitd migrate` |
+| `orbitd` | Linux · amd64, arm64 | the control plane, including `orbitd migrate` and `orbitd doctor` |
 
 They stay separate for one reason: `orbitd token create` mints a `*` token
 straight from the database, bypassing every scope check — it is the documented
