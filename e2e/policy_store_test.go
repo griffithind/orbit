@@ -391,7 +391,7 @@ func TestPolicyCheckCompilesForAHost(t *testing.T) {
 
 	body := h.checkPolicyFor(t, ts.URL, policyDocV1, "policy-web")
 	if body.Membership == nil {
-		t.Fatal("check with ?host= returned no host")
+		t.Fatal("check with ?membership= returned no membership")
 	}
 	if body.Membership.ID != web.ID {
 		t.Errorf("check resolved host %s, want %s", body.Membership.ID, web.ID)
@@ -401,7 +401,7 @@ func TestPolicyCheckCompilesForAHost(t *testing.T) {
 			"the half of this answer that explains a rule that did not appear", body.Membership.Tags)
 	}
 	if body.Compiled == nil {
-		t.Fatal("check with ?host= returned no compiled rule set")
+		t.Fatal("check with ?membership= returned no compiled rule set")
 	}
 
 	// web is a src of the 5432 rule, so it gets an OUTBOUND rule to the db host
@@ -425,7 +425,7 @@ func TestPolicyCheckCompilesForAHost(t *testing.T) {
 	// The failure mode being avoided: a typo'd host name silently answering
 	// "this host gets no rules", which reads as a policy problem.
 	code, raw := h.adminRawBody(t, http.MethodPost,
-		h.policyURL(ts.URL)+"/check?host=no-such-host", policyDocV1)
+		h.policyURL(ts.URL)+"/check?membership=no-such-host", policyDocV1)
 	if code != http.StatusNotFound {
 		t.Errorf("check against an unknown host: %d, want 404 (%s)", code, raw)
 	}
@@ -448,7 +448,7 @@ func TestPolicySelectorNamingNothingIsRefusedAtCheck(t *testing.T) {
 		 "proto":"tcp","ports":["443"]}]}`
 
 	code, body := h.adminRawBody(t, http.MethodPost,
-		h.policyURL(ts.URL)+"/check?host=policy-lonely", doc)
+		h.policyURL(ts.URL)+"/check?membership=policy-lonely", doc)
 	if code != http.StatusBadRequest {
 		t.Fatalf("a selector naming no host was accepted: %d (%s)", code, body)
 	}
@@ -822,7 +822,7 @@ func (h *harness) createTaggedHost(t *testing.T, baseURL, name, addr string, tag
 func (h *harness) checkPolicyFor(t *testing.T, baseURL, doc, host string) wire.PolicyCheckResponse {
 	t.Helper()
 	code, body := h.adminRawBody(t, http.MethodPost,
-		h.policyURL(baseURL)+"/check?host="+host, doc)
+		h.policyURL(baseURL)+"/check?membership="+host, doc)
 	if code != http.StatusOK {
 		t.Fatalf("check policy for %s: %d (%s)", host, code, body)
 	}

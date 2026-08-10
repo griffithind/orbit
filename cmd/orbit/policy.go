@@ -91,12 +91,12 @@ func policyCheck(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("policy check", flag.ContinueOnError)
 	var o options
 	o.bind(fs)
-	host := fs.String("host", "", "report what this host would compile to (name or uuid)")
+	membership := fs.String("membership", "", "report what this membership would compile to (name or uuid)")
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit policy check <file|-> [-host name]")
+		return usageErrorf("usage: orbit policy check <file|-> [-membership name]")
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -111,7 +111,7 @@ func policyCheck(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := o.client.CheckPolicy(ctx, network.Slug, doc, *host)
+	res, err := o.client.CheckPolicy(ctx, network.Slug, doc, *membership)
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func policyCheck(ctx context.Context, args []string) error {
 func renderCompiled(o options, v wire.PolicyCheckResponse) {
 	if v.Membership == nil {
 		fmt.Fprintf(errOut,
-			"\nTo see what a specific host would get:  orbit policy check <file> -host <name>\n")
+			"\nTo see what one membership would get:  orbit policy check <file> -membership <name>\n")
 		return
 	}
 

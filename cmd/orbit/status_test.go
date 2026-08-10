@@ -304,8 +304,8 @@ func TestReachabilityRendersBothEndsEvenWhenOneSettlesIt(t *testing.T) {
 
 	printReachability(newRenderer(), wire.ReachabilityResponse{
 		Network: "prod",
-		Src:     wire.PolicyCheckHost{Name: "web-01", OverlayAddrs: []string{"10.42.0.7"}},
-		Dst:     wire.PolicyCheckHost{Name: "db-01", OverlayAddrs: []string{"10.42.0.9"}},
+		Src:     wire.PolicyCheckMembership{Name: "web-01", OverlayAddrs: []string{"10.42.0.7"}},
+		Dst:     wire.PolicyCheckMembership{Name: "db-01", OverlayAddrs: []string{"10.42.0.9"}},
 		Proto:   "tcp", Port: "5432",
 		FirewallSource: "policy", PolicyVersion: 12,
 		Allowed: false,

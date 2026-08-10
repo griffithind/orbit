@@ -179,7 +179,7 @@ func TestCLIExitCodeByErrorClass(t *testing.T) {
 		{
 			name: "usage: unresolvable host name", token: h.token,
 			args: []string{"membership", "show", "no-such-host"}, want: 2,
-			contains: `no host named "no-such-host"`,
+			contains: `no membership named "no-such-host"`,
 		},
 		{
 			name: "401: token rejected", token: "orbat_notarealtoken",

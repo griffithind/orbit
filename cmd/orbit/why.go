@@ -174,14 +174,14 @@ func printWhy(ex status.Explanation) {
 	// diagnostic becomes a source of wrong conclusions.
 	//
 	// It points at what exists rather than at a bidirectional command, because
-	// there is not one: `orbit policy check <file> -host <peer>` compiles a
+	// there is not one: `orbit policy check <file> -membership <peer>` compiles a
 	// DOCUMENT for one host, so it needs the policy file and an admin token and
 	// it answers about that host's rules, not about this pair.
 	fmt.Fprintf(out, "\n%s\n",
 		"This is one direction of two. The peer enforces its own inbound rules\n"+
 			"against this host's certificate and they cannot be read from here; to see\n"+
-			"them, run `orbit policy check <file> -host "+peerLabel(ex)+"` where an admin\n"+
-			"token is available.")
+			"them, run `orbit policy check <file> -membership "+peerLabel(ex)+"` where\n"+
+			"an admin token is available.")
 }
 
 func printIdentity(r renderer, ex status.Explanation) {

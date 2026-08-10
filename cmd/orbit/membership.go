@@ -528,7 +528,7 @@ func membershipSet(ctx context.Context, args []string) error {
 		req.AdvertisePort = advertisePort
 	}
 
-	o.announce(fmt.Sprintf("Updating host %q in network %s", fs.Arg(0), network.Name))
+	o.announce(fmt.Sprintf("Updating membership %q in network %s", fs.Arg(0), network.Name))
 
 	res, err := o.client.UpdateHost(ctx, membershipID, req)
 	if err != nil {
@@ -645,11 +645,11 @@ func membershipBlock(ctx context.Context, args []string, unblock bool) error {
 		return err
 	}
 
-	// Announced, but not prompted. Blocking is reversible with `orbit host
+	// Announced, but not prompted. Blocking is reversible with `orbit membership
 	// unblock`, and a prompt on a reversible action trains people to type y
-	// without reading — which is what would make the prompt on `host rm`
+	// without reading — which is what would make the prompt on `membership rm`
 	// worthless.
-	o.announce(fmt.Sprintf("About to %s host %q", verb, fs.Arg(0)))
+	o.announce(fmt.Sprintf("About to %s membership %q", verb, fs.Arg(0)))
 
 	var res adminclient.Result[wire.BlockResponse]
 	if unblock {
@@ -700,7 +700,7 @@ func membershipRm(ctx context.Context, args []string) error {
 		return err
 	}
 
-	o.announce(fmt.Sprintf("About to DECOMMISSION host %q in network %s", fs.Arg(0), network.Name))
+	o.announce(fmt.Sprintf("About to DECOMMISSION membership %q in network %s", fs.Arg(0), network.Name))
 	if err := o.confirm(fmt.Sprintf(
 		"This revokes %s's certificates and removes the record, releasing its name and address. It cannot be undone. Continue?",
 		fs.Arg(0))); err != nil {

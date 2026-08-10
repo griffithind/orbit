@@ -812,9 +812,9 @@ type PolicyCheckResponse struct {
 	// their change is live.
 	FirewallSource string `json:"firewall_source"`
 
-	// Membership is the host named by ?host=, when one was named, resolved to what the
-	// compiler will be given for it. Absent when no host was named.
-	Membership *PolicyCheckHost `json:"membership,omitempty"`
+	// Membership is the membership named by ?membership=, when one was named, resolved to
+	// what the compiler will be given for it. Absent when none was named.
+	Membership *PolicyCheckMembership `json:"membership,omitempty"`
 
 	// Compiled is exactly what this host would render: the real compiler, the
 	// current fleet, and the management floor included. Absent when no host was
@@ -853,13 +853,13 @@ type PolicyRule struct {
 	LocalCIDR string `json:"local_cidr,omitempty"`
 }
 
-// PolicyCheckHost is the host a check was scoped to.
+// PolicyCheckMembership is the host a check was scoped to.
 //
 // It carries the inputs a selector is resolved against — addresses, groups, the
 // role — rather than a rendered rule set, because those are what an operator
 // actually gets wrong: a selector that matches nothing matches nothing because
 // the host's tags or addresses are not what the author assumed.
-type PolicyCheckHost struct {
+type PolicyCheckMembership struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	OverlayAddrs []string `json:"overlay_addrs"`
@@ -1205,11 +1205,11 @@ type AuditRecordResponse struct {
 // STORED policy, so this says what the network's configuration means — not
 // whether a tunnel happens to be up, which only the hosts know.
 type ReachabilityResponse struct {
-	Network string          `json:"network"`
-	Src     PolicyCheckHost `json:"src"`
-	Dst     PolicyCheckHost `json:"dst"`
-	Proto   string          `json:"proto"`
-	Port    string          `json:"port"`
+	Network string                `json:"network"`
+	Src     PolicyCheckMembership `json:"src"`
+	Dst     PolicyCheckMembership `json:"dst"`
+	Proto   string                `json:"proto"`
+	Port    string                `json:"port"`
 
 	// FirewallSource is "policy" or "role". A network still on per-role rules
 	// has no policy document to compile, and saying so is the answer rather

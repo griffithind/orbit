@@ -1532,7 +1532,7 @@ func firewallSourceGateDetail(from, to string, hosts int) string {
 		return base + fmt.Sprintf(
 			"Per-role rules are kept, not deleted, so switching back to %q restores them exactly. "+
 				"Check the document against a specific host first: "+
-				"POST /v1/networks/{ref}/policy/check?host=<name>", from)
+				"POST /v1/networks/{ref}/policy/check?membership=<name>", from)
 	}
 	return base + "The policy document is kept, not deleted, so switching back restores it exactly."
 }

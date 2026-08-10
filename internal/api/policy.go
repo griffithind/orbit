@@ -245,7 +245,7 @@ func policyDetail(net *store.Network, change *store.PolicyChange) string {
 // typo is found before it reaches four hundred hosts. It is what `orbit policy
 // check` runs, and what a CI job should run against a policy file in review.
 //
-// ?host=<name|uuid> scopes the check to one host and answers the question people
+// ?membership=<name|uuid> scopes the check to one membership and answers the question people
 // actually have, which is not "is this document well-formed" but "will web-01
 // still reach the database". It reports two things, and both are needed.
 //
@@ -276,7 +276,7 @@ func (s *Server) handleCheckPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hostRef := r.URL.Query().Get("host")
+	hostRef := r.URL.Query().Get("membership")
 
 	var out wire.PolicyCheckResponse
 	err = s.store.Read(r.Context(), func(ctx context.Context, tx *store.Tx) error {
@@ -315,7 +315,7 @@ func (s *Server) handleCheckPolicy(w http.ResponseWriter, r *http.Request) {
 		if hostRef == "" {
 			return nil
 		}
-		host, err := resolveCheckHost(ctx, tx, net.ID, hostRef)
+		host, err := resolveCheckMembership(ctx, tx, net.ID, hostRef)
 		if err != nil {
 			return err
 		}
@@ -348,7 +348,7 @@ func (s *Server) handleCheckPolicy(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errPolicyCheckHostNotFound) {
+		if errors.Is(err, errPolicyCheckMembershipNotFound) {
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -399,16 +399,16 @@ func ruleResponses(rules []policy.Rule) []wire.PolicyRule {
 	return out
 }
 
-var errPolicyCheckHostNotFound = errors.New("no such host in this network")
+var errPolicyCheckMembershipNotFound = errors.New("no such membership in this network")
 
-// resolveCheckHost reads the host a check was scoped to, by uuid or by name.
+// resolveCheckMembership reads the membership a check was scoped to, by uuid or by name.
 //
 // By name as well as by uuid because the operator asking "will web-01 still reach
 // the database" has the name, and making them look up a uuid first is the friction
 // that stops the check from being run at all. Names are unique within a network
 // (orbit.membership UNIQUE (network_id, name)), so the lookup is unambiguous — which is
 // not true across networks, and is why this takes a network id.
-func resolveCheckHost(ctx context.Context, tx *store.Tx, networkID uuid.UUID, ref string) (*wire.PolicyCheckHost, error) {
+func resolveCheckMembership(ctx context.Context, tx *store.Tx, networkID uuid.UUID, ref string) (*wire.PolicyCheckMembership, error) {
 	var (
 		host *store.Membership
 		err  error
@@ -420,19 +420,19 @@ func resolveCheckHost(ctx context.Context, tx *store.Tx, networkID uuid.UUID, re
 			// as a mismatch, for the reason notFoundOr conflates absent and
 			// forbidden: a lookup that distinguishes them confirms the existence
 			// of something the caller was not shown.
-			return nil, fmt.Errorf("%w: %s", errPolicyCheckHostNotFound, ref)
+			return nil, fmt.Errorf("%w: %s", errPolicyCheckMembershipNotFound, ref)
 		}
 	} else {
 		host, err = tx.GetHostByName(ctx, networkID, ref)
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("%w: %s", errPolicyCheckHostNotFound, ref)
+			return nil, fmt.Errorf("%w: %s", errPolicyCheckMembershipNotFound, ref)
 		}
 		return nil, err
 	}
 
-	out := &wire.PolicyCheckHost{
+	out := &wire.PolicyCheckMembership{
 		ID: host.ID.String(), Name: host.Name, Tags: host.Tags,
 		State: host.State, RoleName: host.RoleName,
 	}

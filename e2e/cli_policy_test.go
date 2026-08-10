@@ -208,9 +208,9 @@ func TestCLIPolicyCheckForAHost(t *testing.T) {
 	h.createTaggedHost(t, ts.URL, "cli-web", "10.42.95.1", []string{"web"})
 	h.createTaggedHost(t, ts.URL, "cli-db", "10.42.95.2", []string{"db"})
 
-	res := h.cli(t, ts, "policy", "check", policyFile(t, policyDocV1), "-host", "cli-web")
+	res := h.cli(t, ts, "policy", "check", policyFile(t, policyDocV1), "-membership", "cli-web")
 	if res.code != 0 {
-		t.Fatalf("check -host exited %d\nstdout: %s\nstderr: %s", res.code, res.stdout, res.stderr)
+		t.Fatalf("check -membership exited %d\nstdout: %s\nstderr: %s", res.code, res.stdout, res.stderr)
 	}
 	// The compiled rules, naming the peer's ADDRESS. That the rule is an address
 	// and not a group is the whole reason this feature exists: it is what makes
@@ -231,7 +231,7 @@ func TestCLIPolicyCheckForAHost(t *testing.T) {
 	// An unknown host is exit 5, not a compiled empty rule set. A typo'd name that
 	// answered "this host gets no rules" reads as a policy problem rather than a
 	// typo.
-	missing := h.cli(t, ts, "policy", "check", policyFile(t, policyDocV1), "-host", "cli-nope")
+	missing := h.cli(t, ts, "policy", "check", policyFile(t, policyDocV1), "-membership", "cli-nope")
 	if missing.code != 5 {
 		t.Errorf("check against an unknown host exited %d, want 5 (not found)\nstderr: %s",
 			missing.code, missing.stderr)

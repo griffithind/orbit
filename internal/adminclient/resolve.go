@@ -256,7 +256,7 @@ func (c *Client) ResolveHost(ctx context.Context, networkID uuid.UUID, ref strin
 			}
 		}
 	}
-	return uuid.Nil, &NoMatchError{Kind: "host", Ref: ref, Available: near}
+	return uuid.Nil, &NoMatchError{Kind: "membership", Ref: ref, Available: near}
 }
 
 // ResolveRole accepts a role name or uuid. Role names are UNIQUE (network_id,

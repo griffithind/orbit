@@ -83,8 +83,8 @@ func sessionLs(ctx context.Context, args []string) error {
 
 // sessionRevoke signs one browser out.
 //
-// No confirmation prompt, matching `orbit membership block` rather than `orbit host
-// rm`. The cost of being wrong is one sign-in, and confirm's own doc says why
+// No confirmation prompt, matching `orbit membership block` rather than `orbit
+// membership rm`. The cost of being wrong is one sign-in, and confirm's own doc says why
 // that matters: a prompt on something cheap teaches people to type y without
 // reading, which is what makes the prompt on an irreversible action worthless.
 func sessionRevoke(ctx context.Context, args []string) error {

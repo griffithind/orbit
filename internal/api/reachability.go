@@ -62,11 +62,11 @@ func (s *Server) handleReachability(w http.ResponseWriter, r *http.Request) {
 		out.Port = fwmatch.PortRange(port, port)
 		out.FirewallSource = net.FirewallSource
 
-		src, err := resolveCheckHost(ctx, tx, net.ID, srcRef)
+		src, err := resolveCheckMembership(ctx, tx, net.ID, srcRef)
 		if err != nil {
 			return err
 		}
-		dst, err := resolveCheckHost(ctx, tx, net.ID, dstRef)
+		dst, err := resolveCheckMembership(ctx, tx, net.ID, dstRef)
 		if err != nil {
 			return err
 		}
@@ -142,7 +142,7 @@ func (s *Server) handleReachability(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errPolicyCheckHostNotFound) {
+		if errors.Is(err, errPolicyCheckMembershipNotFound) {
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
 		}

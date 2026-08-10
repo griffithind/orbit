@@ -39,7 +39,7 @@ func (o *options) resolveMembership(ctx context.Context, ref string) (uuid.UUID,
 		return id, nil
 	}
 
-	// A RESERVED name is not a host yet, and saying "no host named X" to
+	// A RESERVED name is not a membership yet, and saying "no membership named X" to
 	// somebody who just reserved X sends them looking for a typo. Reservations
 	// live in orbit.enrollment_credential; the membership row is created when
 	// the machine joins with its code, so until then there is genuinely nothing
@@ -50,10 +50,10 @@ func (o *options) resolveMembership(ctx context.Context, ref string) (uuid.UUID,
 	var nm *adminclient.NoMatchError
 	if errors.As(err, &nm) {
 		return uuid.Nil, fail(exitNotFound,
-			"no host named %q in this network.\n\n"+
-				"If you reserved that name, it is not a host until the machine joins with\n"+
-				"its code — a reservation has no certificate, and a route needs one. Check\n"+
-				"what has joined with:\n\n  orbit membership ls\n\n"+
+			"no membership named %q in this network.\n\n"+
+				"If you reserved that name, it is not a membership until the machine joins\n"+
+				"with its code — a reservation has no certificate, and a route needs one.\n"+
+				"Check what has joined with:\n\n  orbit membership ls\n\n"+
 				"already joined: %s", ref, strings.Join(nm.Available, ", "))
 	}
 	return uuid.Nil, err

@@ -52,10 +52,10 @@ func (c *Client) PutPolicy(ctx context.Context, ref string, document []byte) (Re
 // "is this well-formed" into "what would web-01 actually get", which is the
 // question an operator has — the response then carries the compiled rule set and
 // the selector inputs it was resolved against.
-func (c *Client) CheckPolicy(ctx context.Context, ref string, document []byte, host string) (Result[wire.PolicyCheckResponse], error) {
+func (c *Client) CheckPolicy(ctx context.Context, ref string, document []byte, membership string) (Result[wire.PolicyCheckResponse], error) {
 	var q url.Values
-	if host != "" {
-		q = url.Values{"host": {host}}
+	if membership != "" {
+		q = url.Values{"membership": {membership}}
 	}
 	return send[wire.PolicyCheckResponse](ctx, c, http.MethodPost,
 		"/v1/networks/"+url.PathEscape(ref)+"/policy/check", q, json.RawMessage(document))
