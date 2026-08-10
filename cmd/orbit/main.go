@@ -48,61 +48,26 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	var err error
+	root := rootCommand()
+
+	// --version and -version are accepted here rather than in the tree because
+	// they are flags in spelling and a command in effect, and putting them in
+	// the table would make them a subcommand named "--version".
 	switch os.Args[1] {
-	case "whoami":
-		err = whoamiCmd(ctx, os.Args[2:])
-	case "membership", "member":
-		err = membershipCmd(ctx, os.Args[2:])
-	case "device":
-		err = deviceCmd(ctx, os.Args[2:])
-	case "route":
-		err = routeCmd(ctx, os.Args[2:])
-	case "exit-node":
-		err = exitNodeCmd(ctx, os.Args[2:])
-	case "converge":
-		err = convergeCmd(ctx, os.Args[2:])
-	case "network":
-		err = networkCmd(ctx, os.Args[2:])
-	case "role":
-		err = roleCmd(ctx, os.Args[2:])
-	case "policy":
-		err = policyCmd(ctx, os.Args[2:])
-	case "ca":
-		err = caCmd(ctx, os.Args[2:])
-	case "token":
-		err = tokenCmd(ctx, os.Args[2:])
-	case "session":
-		err = sessionCmd(ctx, os.Args[2:])
-	case "agent":
-		err = agentCmd(ctx, os.Args[2:])
-	case "status":
-		err = statusCmd(ctx, os.Args[2:])
-	case "peers":
-		err = peersCmd(ctx, os.Args[2:])
-	case "why":
-		err = whyCmd(ctx, os.Args[2:])
-	case "audit":
-		err = auditCmd(ctx, os.Args[2:])
-	case "version", "-version", "--version":
-		fmt.Println(version.Version)
+	case "-version", "--version":
+		fmt.Fprintln(out, version.Version)
 		return
-	case "-h", "--help", "help":
-		usage()
-		return
-	default:
-		fmt.Fprintf(os.Stderr, "orbit: unknown command %q\n\n", os.Args[1])
-		usage()
-		os.Exit(exitUsage)
 	}
 
-	// Same shape as orbitd — dispatch returns an error, main
-	// prints it and exits — with the one difference that the status is a class
-	// rather than always 1. A caller that cannot tell a revoked token from an
-	// unreachable control plane retries the wrong one.
+	err := root.dispatch(ctx, "", os.Args[1:])
+
+	// Same shape as orbitd — dispatch returns an error, main prints it and
+	// exits — with the one difference that the status is a class rather than
+	// always 1. A caller that cannot tell a revoked token from an unreachable
+	// control plane retries the wrong one.
 	code, msg := exitCode(err)
 	if code != exitOK && msg != "" {
-		fmt.Fprintln(os.Stderr, "orbit: "+msg)
+		fmt.Fprintln(errOut, "orbit: "+msg)
 	}
 	os.Exit(code)
 }

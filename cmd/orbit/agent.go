@@ -113,62 +113,6 @@ func (d *dirFlags) layout() (agent.Layout, error) {
 	return agent.DefaultLayout(filepath.Clean(*d.dir)), nil
 }
 
-const agentVerbs = "install, uninstall, join, enroll, run"
-
-func agentCmd(_ context.Context, args []string) error {
-	if len(args) == 0 {
-		return agentUsage()
-	}
-	switch args[0] {
-	case "install":
-		return installCmd(args[1:])
-	case "uninstall":
-		return uninstallCmd(args[1:])
-	case "join":
-		return joinCmd(args[1:])
-	case "enroll":
-		return enrollCmd(args[1:])
-	case "run":
-		return runCmd(args[1:])
-	case "-h", "--help", "help":
-		return agentUsage()
-	default:
-		return unknownSub("agent", args[0], agentVerbs)
-	}
-}
-
-func agentUsage() error {
-	fmt.Fprint(errOut, `orbit agent <command> [flags]
-
-  install    set THIS MACHINE up: generate its device identity, install the service
-  uninstall  leave a network and remove its local state
-  join       join a network — repeat once per network
-  enroll     re-enrol an existing membership with a code
-  run        serve every joined network: poll, apply, renew
-
-Install once per MACHINE, join once per NETWORK. That split is the model: a
-machine has one agent, one service and one device identity however many networks
-it joins, and a membership is what belongs to a network. The service rescans its
-root, so a join lands without a restart.
-
-A machine can join SEVERAL networks, including ones run by different control
-planes that have never heard of each other. Each keeps its own directory under
-`+agent.DefaultRoot+`, its own certificate, and its own
-nebula instance — two overlays cannot share a UDP port or a tun device — but
-they are served by one process under one service.
-
-So `+"`run`"+` takes no -dir: it runs everything joined under -root. The other
-commands act on one network and take -network (or -dir).
-
-None of these need an admin token. They are what runs ON a managed host; every
-other orbit command is what an operator runs about one.
-
-Run "orbit agent <command> -h" for flags.
-`)
-	// No message: the listing above is the message, matching subUsage.
-	return &exitError{code: exitUsage}
-}
-
 func newLogger() *slog.Logger {
 	level := slog.LevelInfo
 	if os.Getenv("ORBIT_DEBUG") != "" {
