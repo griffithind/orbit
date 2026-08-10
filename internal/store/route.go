@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 
@@ -78,7 +79,7 @@ func (t *Tx) DeleteRoute(ctx context.Context, id uuid.UUID) error {
 		`DELETE FROM orbit.route WHERE id = $1 RETURNING network_id, membership_id`,
 		id).Scan(&networkID, &membershipID)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		return mapErr(err, "delete route")
@@ -222,7 +223,7 @@ func (t *Tx) SetExitRoute(ctx context.Context, membershipID uuid.UUID, routeID *
 			`SELECT prefix, network_id FROM orbit.route WHERE id = $1`, routeID).
 			Scan(&prefix, &networkID)
 		if err != nil {
-			if err == pgx.ErrNoRows {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
 			return mapErr(err, "read exit route")
@@ -276,8 +277,11 @@ func (t *Tx) ExitRoute(ctx context.Context, membershipID uuid.UUID) (*Route, err
 		Scan(&r.ID, &r.NetworkID, &r.MembershipID, &r.Prefix, &r.Weight,
 			&r.Masquerade, &r.Install, &r.MTU, &r.CreatedAt, &addr)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil // no exit node chosen, which is the normal case
+		if errors.Is(err, pgx.ErrNoRows) {
+			// nil, nil is the answer, not a miss: most hosts have no exit node
+			// and the callers all nil-check. errors.Is rather than ==, because a
+			// wrapped ErrNoRows would otherwise become a 500 on the common path.
+			return nil, nil
 		}
 		return nil, mapErr(err, "exit route")
 	}

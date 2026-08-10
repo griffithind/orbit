@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // AuditMeta encodes v as the meta column's jsonb payload.
@@ -85,7 +87,7 @@ func (t *Tx) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRecord, error
 		f.Limit = 100
 	}
 
-	rows, err := t.tx.Query(ctx, `
+	return collect(ctx, t, "list audit", `
 		SELECT id, actor_type, coalesce(actor_id, ''), coalesce(actor_display, ''), action,
 		       coalesce(target_type, ''), coalesce(target_id, ''), meta, source_ip, at
 		  FROM orbit.audit_log
@@ -96,23 +98,16 @@ func (t *Tx) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRecord, error
 		   AND ($5::timestamptz IS NULL OR at <= $5)
 		 ORDER BY at DESC, id DESC
 		 LIMIT $6`,
+		scanAudit,
 		f.Action, f.TargetType, f.TargetID,
 		nullIfZeroTime(f.Since), nullIfZeroTime(f.Until), f.Limit)
-	if err != nil {
-		return nil, mapErr(err, "list audit")
-	}
-	defer rows.Close()
+}
 
-	var out []AuditRecord
-	for rows.Next() {
-		var r AuditRecord
-		if err := rows.Scan(&r.ID, &r.ActorType, &r.ActorID, &r.ActorDisplay, &r.Action,
-			&r.TargetType, &r.TargetID, &r.Meta, &r.SourceIP, &r.At); err != nil {
-			return nil, mapErr(err, "scan audit")
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+func scanAudit(row pgx.CollectableRow) (AuditRecord, error) {
+	var r AuditRecord
+	err := row.Scan(&r.ID, &r.ActorType, &r.ActorID, &r.ActorDisplay, &r.Action,
+		&r.TargetType, &r.TargetID, &r.Meta, &r.SourceIP, &r.At)
+	return r, err
 }
 
 func nullIfEmpty(s string) any {

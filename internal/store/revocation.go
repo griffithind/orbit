@@ -6,7 +6,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
+
+// revokedCert is what BlockHost captured while revoking, so each blocklist entry
+// can carry its certificate's own expiry rather than a guess.
+type revokedCert struct {
+	fingerprint string
+	notAfter    time.Time
+}
 
 // BlockHost revokes every active certificate a host holds, adds each
 // fingerprint to the network blocklist, suspends the host, advances the
@@ -33,31 +41,18 @@ func (t *Tx) BlockHost(ctx context.Context, membershipID uuid.UUID, reason strin
 
 	// Move every active certificate to revoked and capture what we revoked, so
 	// the blocklist entries carry the correct expiry for later pruning.
-	rows, err := t.tx.Query(ctx, `
+	list, err := collect(ctx, t, "revoke certificates", `
 		UPDATE orbit.certificate
 		   SET state = 'revoked'
 		 WHERE membership_id = $1 AND state IN ('active', 'pending')
-		RETURNING fingerprint, not_after`, membershipID)
+		RETURNING fingerprint, not_after`,
+		func(row pgx.CollectableRow) (revokedCert, error) {
+			var r revokedCert
+			err := row.Scan(&r.fingerprint, &r.notAfter)
+			return r, err
+		}, membershipID)
 	if err != nil {
-		return 0, mapErr(err, "revoke certificates")
-	}
-
-	type revoked struct {
-		fingerprint string
-		notAfter    time.Time
-	}
-	var list []revoked
-	for rows.Next() {
-		var r revoked
-		if err := rows.Scan(&r.fingerprint, &r.notAfter); err != nil {
-			rows.Close()
-			return 0, mapErr(err, "scan revoked certificate")
-		}
-		list = append(list, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, mapErr(err, "revoke certificates")
+		return 0, err
 	}
 
 	for _, r := range list {

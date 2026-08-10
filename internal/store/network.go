@@ -402,26 +402,17 @@ type AddressHolder struct {
 // membership_address rows still exist and still block the removal, so a blocker list
 // that omitted them would report an empty set for a refusal.
 func (t *Tx) CIDRHolders(ctx context.Context, networkID uuid.UUID, p netip.Prefix) ([]AddressHolder, error) {
-	rows, err := t.tx.Query(ctx, `
+	return collect(ctx, t, "cidr holders", `
 		SELECT a.membership_id, h.name, a.addr
 		  FROM orbit.membership_address a
 		  JOIN orbit.membership h ON (h.network_id, h.id) = (a.network_id, a.membership_id)
 		 WHERE a.network_id = $1 AND a.addr <<= $2::cidr
-		 ORDER BY h.name, a.addr`, networkID, p)
-	if err != nil {
-		return nil, mapErr(err, "cidr holders")
-	}
-	defer rows.Close()
-
-	var out []AddressHolder
-	for rows.Next() {
-		var h AddressHolder
-		if err := rows.Scan(&h.MembershipID, &h.Name, &h.Addr); err != nil {
-			return nil, mapErr(err, "scan cidr holder")
-		}
-		out = append(out, h)
-	}
-	return out, rows.Err()
+		 ORDER BY h.name, a.addr`,
+		func(row pgx.CollectableRow) (AddressHolder, error) {
+			var h AddressHolder
+			err := row.Scan(&h.MembershipID, &h.Name, &h.Addr)
+			return h, err
+		}, networkID, p)
 }
 
 // RemoveNetworkCIDR drops a prefix no host has an address in.
@@ -998,23 +989,14 @@ func (t *Tx) NetworkTopology(ctx context.Context, networkID uuid.UUID) ([]Topolo
 
 // ListRoles returns every role in a network.
 func (t *Tx) ListRoles(ctx context.Context, networkID uuid.UUID) ([]Role, error) {
-	rows, err := t.tx.Query(ctx, `
+	return collect(ctx, t, "list roles", `
 		SELECT id, network_id, name, groups, firewall_rules, created_at
-		  FROM orbit.role WHERE network_id = $1 ORDER BY name`, networkID)
-	if err != nil {
-		return nil, mapErr(err, "list roles")
-	}
-	defer rows.Close()
-
-	var out []Role
-	for rows.Next() {
-		var r Role
-		if err := rows.Scan(&r.ID, &r.NetworkID, &r.Name, &r.Groups, &r.FirewallRules, &r.CreatedAt); err != nil {
-			return nil, mapErr(err, "scan role")
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+		  FROM orbit.role WHERE network_id = $1 ORDER BY name`,
+		func(row pgx.CollectableRow) (Role, error) {
+			var r Role
+			err := row.Scan(&r.ID, &r.NetworkID, &r.Name, &r.Groups, &r.FirewallRules, &r.CreatedAt)
+			return r, err
+		}, networkID)
 }
 
 // GetCA fetches one certificate authority by id.
@@ -1071,26 +1053,17 @@ func (t *Tx) RegisterControlPlane(ctx context.Context, networkID, membershipID u
 // in the same order. Agents then rotate through it themselves, which spreads
 // load without the control plane having to coordinate anything.
 func (t *Tx) LiveControlPlanes(ctx context.Context, networkID uuid.UUID, staleAfter time.Duration) ([]ControlPlane, error) {
-	rows, err := t.tx.Query(ctx, `
+	return collect(ctx, t, "live control planes", `
 		SELECT membership_id, addr, agent_port, last_seen_at
 		  FROM orbit.control_plane
 		 WHERE network_id = $1
 		   AND last_seen_at > now() - make_interval(secs => $2)
-		 ORDER BY addr`, networkID, staleAfter.Seconds())
-	if err != nil {
-		return nil, mapErr(err, "live control planes")
-	}
-	defer rows.Close()
-
-	var out []ControlPlane
-	for rows.Next() {
-		var c ControlPlane
-		if err := rows.Scan(&c.MembershipID, &c.Addr, &c.AgentPort, &c.LastSeenAt); err != nil {
-			return nil, mapErr(err, "scan control plane")
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
+		 ORDER BY addr`,
+		func(row pgx.CollectableRow) (ControlPlane, error) {
+			var c ControlPlane
+			err := row.Scan(&c.MembershipID, &c.Addr, &c.AgentPort, &c.LastSeenAt)
+			return c, err
+		}, networkID, staleAfter.Seconds())
 }
 
 // PruneControlPlanes removes replicas that stopped heartbeating.

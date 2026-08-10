@@ -595,23 +595,15 @@ func (t *Tx) SetDevicePublicAddrs(ctx context.Context, deviceID uuid.UUID, addrs
 		return nil
 	}
 
-	rows, err := t.tx.Query(ctx,
-		`SELECT DISTINCT network_id FROM orbit.membership WHERE device_id = $1`, deviceID)
+	networks, err := collect(ctx, t, "set device public addresses",
+		`SELECT DISTINCT network_id FROM orbit.membership WHERE device_id = $1`,
+		func(row pgx.CollectableRow) (uuid.UUID, error) {
+			var id uuid.UUID
+			err := row.Scan(&id)
+			return id, err
+		}, deviceID)
 	if err != nil {
-		return mapErr(err, "set device public addresses")
-	}
-	var networks []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return mapErr(err, "set device public addresses")
-		}
-		networks = append(networks, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return mapErr(err, "set device public addresses")
+		return err
 	}
 
 	for _, networkID := range networks {
