@@ -21,22 +21,6 @@ import (
 
 const exitNodeVerbs = "ls, use, off"
 
-func exitNodeCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return usageErrorf("usage: orbit exit-node <%s>", exitNodeVerbs)
-	}
-	switch args[0] {
-	case "ls":
-		return exitNodeList(ctx, args[1:])
-	case "use":
-		return exitNodeUse(ctx, args[1:], false)
-	case "off":
-		return exitNodeUse(ctx, args[1:], true)
-	default:
-		return usageErrorf("unknown exit-node command %q; want one of: %s", args[0], exitNodeVerbs)
-	}
-}
-
 func exitNodeList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("exit-node ls", flag.ExitOnError)
 	var o options

@@ -125,7 +125,7 @@ else
 Next, on this host:
 
   sudo orbit agent install
-sudo orbit agent join -url https://<control-plane> -network prod
+sudo orbit join -url https://<control-plane> -network prod
 
 That generates this machine's device identity, asks to join, and waits for an
 operator to authorize it with 'orbit membership authorize <id>'.
@@ -133,6 +133,6 @@ operator to authorize it with 'orbit membership authorize <id>'.
 To skip the wait, have someone with an admin token reserve a place first —
 'orbit membership reserve -name <name>' prints a single-use code — and pass it:
 
-  sudo orbit agent join -url https://<control-plane> -network prod -code orb_1_…
+  sudo orbit join -url https://<control-plane> -network prod -code orb_1_…
 EOF
 fi

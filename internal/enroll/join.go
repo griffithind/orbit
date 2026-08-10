@@ -539,7 +539,7 @@ var ErrLighthouseNeedsAddr = errors.New(
 
 // Reserve holds a place in a network for a machine that has not arrived.
 //
-// This is what replaced `orbit host create` followed by `orbit host code`. The
+// This is what replaced `orbit membership create` followed by `orbit membership code`. The
 // operator's intent — the name, optionally the address, optionally the role — is
 // recorded on the CREDENTIAL rather than on a host row, so nothing exists until
 // a machine presents the code, and what does come into existence names that

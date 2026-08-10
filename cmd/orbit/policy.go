@@ -31,28 +31,6 @@ import (
 
 const policyVerbs = "show, check, apply, use"
 
-func policyCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return subUsage("policy",
-			"show    the network's current policy document",
-			"check   validate a document without storing it",
-			"apply   validate a document and store it, replacing the current one",
-			"use     switch the network between per-role rules and the policy document")
-	}
-	switch args[0] {
-	case "show":
-		return policyShow(ctx, args[1:])
-	case "check":
-		return policyCheck(ctx, args[1:])
-	case "apply":
-		return policyApply(ctx, args[1:])
-	case "use":
-		return policyUse(ctx, args[1:])
-	default:
-		return unknownSub("policy", args[0], policyVerbs)
-	}
-}
-
 func policyShow(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("policy show", flag.ExitOnError)
 	var o options

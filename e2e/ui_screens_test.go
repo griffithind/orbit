@@ -330,7 +330,7 @@ func TestUIReserveHandsOutACode(t *testing.T) {
 	// `join`, not `enroll`. A reservation is redeemed by a machine that has no
 	// membership yet; printing the enroll command would fail on the machine, in
 	// a way that reads as a broken code rather than a wrong instruction.
-	if !strings.Contains(page, "orbit agent join") {
+	if !strings.Contains(page, "orbit join") {
 		t.Error("the handout does not include the command to run on the new machine")
 	}
 

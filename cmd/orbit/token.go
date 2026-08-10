@@ -13,25 +13,6 @@ import (
 
 const tokenVerbs = "ls, create, revoke"
 
-func tokenCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return subUsage("token",
-			"ls       list admin tokens, including revoked ones",
-			"create   mint a token; the plaintext is shown once",
-			"revoke   make a token unusable from the next request onward")
-	}
-	switch args[0] {
-	case "ls":
-		return tokenLs(ctx, args[1:])
-	case "create":
-		return tokenCreate(ctx, args[1:])
-	case "revoke":
-		return tokenRevoke(ctx, args[1:])
-	default:
-		return unknownSub("token", args[0], tokenVerbs)
-	}
-}
-
 func tokenLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("token ls", flag.ExitOnError)
 	var o options

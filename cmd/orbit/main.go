@@ -12,19 +12,10 @@
 // and gvisor, so merging would mean a `go install` of the admin CLI pulled down a
 // userspace TCP/IP stack.
 //
-// Commands:
-//
-//	whoami    describe the credential in use
-//	host      list, inspect, create, edit, enroll, block, and decommission hosts
-//	converge  how much of the fleet has applied the current configuration
-//	network   list networks
-//	role      list, inspect, edit, and delete roles
-//	policy    read, check, and apply the network policy document
-//	ca        list, activate, and retire certificate authorities
-//	token     list, mint, and revoke admin tokens
-//	session   list and end browser sessions on the operator console
-//	audit     read the audit trail
-//	agent     join a network, keep its nebula configuration current
+// The command tree is data, in tree.go, and `orbit --help` renders it. This
+// comment deliberately does not restate it: the listing it used to carry named
+// `host`, a command renamed two releases earlier, which is what a duplicated
+// index does.
 package main
 
 import (
@@ -40,26 +31,28 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(exitUsage)
-	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// No args is the same as --help, but a mistake rather than a request, so it
+	// exits 2. dispatch renders it from the tree.
+	args := os.Args[1:]
 
 	root := rootCommand()
 
 	// --version and -version are accepted here rather than in the tree because
 	// they are flags in spelling and a command in effect, and putting them in
 	// the table would make them a subcommand named "--version".
-	switch os.Args[1] {
-	case "-version", "--version":
-		fmt.Fprintln(out, version.Version)
-		return
+	if len(args) > 0 {
+		switch args[0] {
+		case "-version", "--version":
+			fmt.Fprintln(out, version.Version)
+			return
+		}
 	}
 
-	err := root.dispatch(ctx, "", os.Args[1:])
+	err := root.dispatch(ctx, "", args)
 
 	// Same shape as orbitd — dispatch returns an error, main prints it and
 	// exits — with the one difference that the status is a class rather than
@@ -72,44 +65,9 @@ func main() {
 	os.Exit(code)
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `orbit <command> [flags]
-
-  whoami     describe the credential in use
-  membership ls, show, pending, authorize, reserve, set, code, block, unblock, rm
-             a machine IN a network. Aliased as "member"
-  device     ls, show, block, unblock — the machines themselves, across every network
-  converge   how much of the fleet has applied the current configuration
-  network    ls
-  role       ls, show, edit, rm
-  policy     show, check, apply, use
-  ca         ls, activate, retire
-  token      ls, create, revoke
-  session    ls, revoke — browser sessions on the operator console
-  audit      read the audit trail
-  agent      install, uninstall, join, enroll, run — what runs ON a managed host
-  status     what the agent on THIS host is doing, on every network it joined
-  peers      the tunnels THIS host actually has, from nebula's own hostmap
-  why        why THIS host can or cannot reach a peer
-  version    print the build version
-
-Every command takes -json, which emits the API response verbatim.
-
-Configuration:
-  ORBIT_URL         control plane admin URL           (or -url)
-  ORBIT_TOKEN       admin token                       (or ORBIT_TOKEN_FILE, -token-file)
-  ORBIT_NETWORK     network name or uuid              (or -network)
-  ORBIT_CONFIG      profile file, default ~/.config/orbit/config.yaml
-
-There is no -token flag: an argument is visible in ps to every user on the box.
-
-Run "orbit <command> -h" for flags.
-`)
-}
-
 // parseFlags parses args, tolerating flags written after the operand.
 //
-// Go's flag package stops at the first non-flag argument, so `orbit host rm
+// Go's flag package stops at the first non-flag argument, so `orbit membership rm
 // web-01 -y` would silently leave -y unparsed and prompt anyway — and `orbit
 // host show web-01 -json` would print human output while the operator's script
 // waited for JSON. Both are worse than an error, because both look like they
@@ -155,25 +113,4 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 		}
 	}
 	return fs.Parse(append(flags, operands...))
-}
-
-// subUsage renders a command group's verbs. Kept in the same shape as usage() so
-// the two do not drift into different styles.
-func subUsage(group string, verbs ...string) error {
-	var b []byte
-	b = fmt.Appendf(b, "orbit %s <subcommand> [flags]\n\n", group)
-	for _, v := range verbs {
-		b = fmt.Appendf(b, "  %s\n", v)
-	}
-	b = fmt.Appendf(b, "\nRun \"orbit %s <subcommand> -h\" for flags.\n", group)
-	os.Stderr.Write(b)
-	// No message: the listing above is the message, and prefixing "orbit: no
-	// subcommand given" under it says nothing the empty invocation did not.
-	return &exitError{code: exitUsage}
-}
-
-// unknownSub is the same listing, for a verb that does not exist.
-func unknownSub(group, sub string, verbs ...string) error {
-	_ = subUsage(group, verbs...)
-	return usageErrorf("unknown %s subcommand %q", group, sub)
 }

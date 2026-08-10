@@ -591,7 +591,7 @@ func TestInstallThenJoinPicksUpTheNetwork(t *testing.T) {
 		t.Fatal("`run -once` with no networks exited 0; a single pass with nothing to do " +
 			"should say so rather than look like success")
 	}
-	if !strings.Contains(idle.stderr, "orbit agent join") {
+	if !strings.Contains(idle.stderr, "orbit join") {
 		t.Errorf("the message does not say how to fix it:\n%s", idle.stderr)
 	}
 

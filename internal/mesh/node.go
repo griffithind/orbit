@@ -197,7 +197,7 @@ func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger)
 	// Report immediately, not at the first maintenance tick. The node is
 	// running a generation from the moment it joins, and until it says so its
 	// host record reads "never seen" — the machine serving the request, shown
-	// in `orbit host ls` as though it were offline.
+	// in `orbit membership ls` as though it were offline.
 	cfgEpoch, blockEpoch, err := es.ControlPlaneEpochs(ctx, issued.MembershipID)
 	if err == nil {
 		err = es.ReportControlPlaneApplied(ctx, issued.MembershipID, cfgEpoch, blockEpoch)

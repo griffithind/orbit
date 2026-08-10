@@ -78,7 +78,7 @@ func termWidth() int {
 
 // piped output is deliberately plain: no truncation, no colour, no footer.
 //
-// The point is that `orbit host ls | awk '{print $1}'` keeps working. An
+// The point is that `orbit membership ls | awk '{print $1}'` keeps working. An
 // ellipsis in a hostname is a value the next command cannot use, an ANSI escape
 // is a byte awk will happily include in a field, and a summary line is a row
 // that is not a row.
@@ -336,7 +336,7 @@ func shortDuration(d time.Duration) string {
 
 // emitJSON writes the API response exactly as it arrived.
 //
-// Verbatim, not re-encoded. The docs are still full of curl, so `orbit host ls
+// Verbatim, not re-encoded. The docs are still full of curl, so `orbit membership ls
 // -json | jq` and `curl … | jq` have to be interchangeable — and a re-encode
 // would change field order, change how the same numbers are spelled, and drop
 // every field this build does not know about. The one thing worth normalising is

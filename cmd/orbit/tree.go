@@ -99,16 +99,65 @@ removes one NETWORK, and the machine keeps serving every other one.`,
 				Raw: true,
 				Run: func(ctx context.Context, a []string) error { return convergeCmd(ctx, a) },
 			},
-			group("membership", "a machine IN a network", []string{"member"}, membershipCmd),
-			group("device", "the machines themselves, across every network", nil, deviceCmd),
-			group("network", "networks on this control plane", nil, networkCmd),
-			group("role", "roles and their firewall rules", nil, roleCmd),
-			group("policy", "the network policy document", nil, policyCmd),
-			group("ca", "certificate authorities", nil, caCmd),
-			group("route", "routes a membership advertises", nil, routeCmd),
-			group("exit-node", "which route a membership uses for the internet", nil, exitNodeCmd),
-			group("token", "admin tokens", nil, tokenCmd),
-			group("session", "browser sessions on the operator console", nil, sessionCmd),
+			subgroup("membership", "a machine IN a network", []string{"member"}, []*command{
+				leaf("ls", "list the fleet, filtered and paginated", func(ctx context.Context, a []string) error { return membershipLs(ctx, a) }),
+				leaf("show", "everything about one membership", func(ctx context.Context, a []string) error { return membershipShow(ctx, a) }),
+				leaf("pending", "memberships waiting for authorization", func(ctx context.Context, a []string) error { return membershipPending(ctx, a) }),
+				leaf("authorize", "admit a pending membership", func(ctx context.Context, a []string) error { return membershipAuthorize(ctx, a) }),
+				leaf("reserve", "reserve a place, printing a single-use code", func(ctx context.Context, a []string) error { return membershipReserve(ctx, a) }),
+				leaf("set", "change role, tags, or lighthouse/relay flags", func(ctx context.Context, a []string) error { return membershipSet(ctx, a) }),
+				leaf("code", "mint a fresh enrollment code", func(ctx context.Context, a []string) error { return membershipCode(ctx, a) }),
+				leaf("block", "revoke its certificates and cut it off", func(ctx context.Context, a []string) error { return membershipBlock(ctx, a, false) }),
+				leaf("unblock", "lift a block", func(ctx context.Context, a []string) error { return membershipBlock(ctx, a, true) }),
+				leaf("rm", "remove it permanently", func(ctx context.Context, a []string) error { return membershipRm(ctx, a) }),
+			}),
+			subgroup("device", "the machines themselves, across every network", nil, []*command{
+				leaf("ls", "every machine this control plane knows", func(ctx context.Context, a []string) error { return deviceLs(ctx, a) }),
+				leaf("show", "one machine and its memberships", func(ctx context.Context, a []string) error { return deviceShow(ctx, a) }),
+				leaf("set-addrs", "set the public addresses peers dial", func(ctx context.Context, a []string) error { return deviceSetAddrs(ctx, a) }),
+				leaf("block", "cut a machine off every network at once", func(ctx context.Context, a []string) error { return deviceBlock(ctx, a, false) }),
+				leaf("unblock", "lift a machine-wide block", func(ctx context.Context, a []string) error { return deviceBlock(ctx, a, true) }),
+			}),
+			subgroup("network", "networks on this control plane", nil, []*command{
+				leaf("ls", "list networks", func(ctx context.Context, a []string) error { return networkLs(ctx, a) }),
+			}),
+			subgroup("role", "roles and their firewall rules", nil, []*command{
+				leaf("ls", "list roles", func(ctx context.Context, a []string) error { return roleLs(ctx, a) }),
+				leaf("show", "one role, with its rules", func(ctx context.Context, a []string) error { return roleShow(ctx, a) }),
+				leaf("edit", "change a role's name, groups or firewall", func(ctx context.Context, a []string) error { return roleEdit(ctx, a) }),
+				leaf("rm", "delete a role", func(ctx context.Context, a []string) error { return roleRm(ctx, a) }),
+			}),
+			subgroup("policy", "the network policy document", nil, []*command{
+				leaf("show", "the document in force", func(ctx context.Context, a []string) error { return policyShow(ctx, a) }),
+				leaf("check", "validate a document without applying it", func(ctx context.Context, a []string) error { return policyCheck(ctx, a) }),
+				leaf("apply", "install a document", func(ctx context.Context, a []string) error { return policyApply(ctx, a) }),
+				leaf("use", "switch the network between role and policy firewalls", func(ctx context.Context, a []string) error { return policyUse(ctx, a) }),
+			}),
+			subgroup("ca", "certificate authorities", nil, []*command{
+				leaf("create", "mint a new authority", func(ctx context.Context, a []string) error { return caCreate(ctx, a) }),
+				leaf("ls", "list authorities and their state", func(ctx context.Context, a []string) error { return caLs(ctx, a) }),
+				leaf("activate", "promote one to sign new certificates", func(ctx context.Context, a []string) error { return caActivate(ctx, a) }),
+				leaf("retire", "stop trusting one", func(ctx context.Context, a []string) error { return caRetire(ctx, a) }),
+			}),
+			subgroup("route", "routes a membership advertises", nil, []*command{
+				leaf("ls", "routes on a membership, or the whole network", func(ctx context.Context, a []string) error { return routeList(ctx, a) }),
+				leaf("add", "advertise a prefix from a membership", func(ctx context.Context, a []string) error { return routeAdd(ctx, a) }),
+				leaf("rm", "stop advertising one", func(ctx context.Context, a []string) error { return routeRemove(ctx, a) }),
+			}),
+			subgroup("exit-node", "which route a membership uses for the internet", nil, []*command{
+				leaf("ls", "exit nodes available to a membership", func(ctx context.Context, a []string) error { return exitNodeList(ctx, a) }),
+				leaf("use", "send a membership's default route through one", func(ctx context.Context, a []string) error { return exitNodeUse(ctx, a, false) }),
+				leaf("off", "stop using an exit node", func(ctx context.Context, a []string) error { return exitNodeUse(ctx, a, true) }),
+			}),
+			subgroup("token", "admin tokens", nil, []*command{
+				leaf("ls", "list tokens", func(ctx context.Context, a []string) error { return tokenLs(ctx, a) }),
+				leaf("create", "mint a scoped token", func(ctx context.Context, a []string) error { return tokenCreate(ctx, a) }),
+				leaf("revoke", "revoke one", func(ctx context.Context, a []string) error { return tokenRevoke(ctx, a) }),
+			}),
+			subgroup("session", "browser sessions on the operator console", nil, []*command{
+				leaf("ls", "list sessions", func(ctx context.Context, a []string) error { return sessionLs(ctx, a) }),
+				leaf("revoke", "end one", func(ctx context.Context, a []string) error { return sessionRevoke(ctx, a) }),
+			}),
 			{
 				Name: "audit", Short: "read the audit trail",
 				Raw: true,
@@ -128,16 +177,23 @@ removes one NETWORK, and the machine keeps serving every other one.`,
 	}
 }
 
-// group adapts a command that still does its own subcommand dispatch.
+// subgroup is a noun with verbs under it.
 //
-// Transitional. The leaves have not moved into the table yet, so these keep
-// their existing switch and their existing help; what they gain immediately is
-// the corrected top-level structure and one consistent unknown-command message.
-// Migrating them is mechanical and independent, one group per change.
-func group(name, short string, aliases []string, run func(context.Context, []string) error) *command {
-	return &command{
-		Name: name, Short: short, Aliases: aliases,
-		Args: "<subcommand>", Raw: true,
-		Run: func(ctx context.Context, a []string) error { return run(ctx, a) },
-	}
+// The verbs are real table entries now, so `orbit membership --help` and
+// `orbit membership nosuch` are rendered by the same code as every other level
+// — which is what removed the three dialects of "unknown subcommand" and the
+// nine flag sets still named after a command renamed two releases ago.
+func subgroup(name, short string, aliases []string, subs []*command) *command {
+	return &command{Name: name, Short: short, Aliases: aliases, Subs: subs}
+}
+
+// leaf is one verb, still parsing its own flags.
+//
+// Raw because the flag definitions live in the leaf functions, which have not
+// moved into the table yet. That is the remaining half of the migration and it
+// is what unlocks the Mutating bit, the operand checks, and completion. Doing it
+// in the same change as the restructure would have meant rewriting forty
+// functions before anything could be run.
+func leaf(name, short string, run func(context.Context, []string) error) *command {
+	return &command{Name: name, Short: short, Raw: true, Run: run}
 }

@@ -51,7 +51,7 @@ func New(baseURL, token string) *Client {
 
 // Result is a decoded response together with the exact bytes it came from.
 //
-// Raw exists so `orbit host ls -json` can emit what the server sent, byte for
+// Raw exists so `orbit membership ls -json` can emit what the server sent, byte for
 // byte, rather than a re-encoding of Value. The docs are still full of curl, so
 // a pipeline that works against one has to work against the other — and a
 // re-encode would differ in field order, in how timestamps and numbers are

@@ -22,31 +22,6 @@ import (
 
 const deviceVerbs = "ls, show, set-addrs, block, unblock"
 
-func deviceCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return subUsage("device",
-			"ls        list every machine this control plane knows",
-			"show      one machine: its posture, and the networks it is on",
-			"set-addrs where this machine is reachable from outside (lighthouse or relay)",
-			"block     refuse a machine everywhere on this control plane",
-			"unblock   allow a blocked machine again")
-	}
-	switch args[0] {
-	case "ls":
-		return deviceLs(ctx, args[1:])
-	case "show":
-		return deviceShow(ctx, args[1:])
-	case "set-addrs":
-		return deviceSetAddrs(ctx, args[1:])
-	case "block":
-		return deviceBlock(ctx, args[1:], false)
-	case "unblock":
-		return deviceBlock(ctx, args[1:], true)
-	default:
-		return unknownSub("device", args[0], deviceVerbs)
-	}
-}
-
 func deviceLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("device ls", flag.ExitOnError)
 	var o options
@@ -201,7 +176,7 @@ func deviceBlock(ctx context.Context, args []string, unblock bool) error {
 	}
 
 	// Announced with its blast radius, because this is the one action in the
-	// CLI whose scope is every network at once. `orbit host block` cuts a
+	// CLI whose scope is every network at once. `orbit membership block` cuts a
 	// machine out of one mesh; this refuses it on the whole control plane.
 	if !unblock {
 		o.announce(fmt.Sprintf(
@@ -230,7 +205,7 @@ func deviceBlock(ctx context.Context, args []string, unblock bool) error {
 		fmt.Fprintf(errOut, "\nEffective immediately: there is one enforcement point and no "+
 			"propagation.\nExisting nebula tunnels are unaffected — this refuses the machine at the\n"+
 			"control plane, it does not revoke certificates. To cut its traffic too:\n\n"+
-			"  orbit host rm <name>\n")
+			"  orbit membership rm <name>\n")
 	}
 	return nil
 }

@@ -260,7 +260,7 @@ orbit membership reserve -name web-01 -role web
 
 # On the machine: install once, join once per network.
 sudo orbit agent install
-sudo orbit agent join -url https://orbit.example.com -network prod -code orb_1_…
+sudo orbit join -url https://orbit.example.com -network prod -code orb_1_…
 ```
 
 `install` is a MACHINE-level action — it generates the device identity at
@@ -396,7 +396,7 @@ in an nftables table it owns whole:
 nft list table inet orbit     # exactly what Orbit did, in nft's own syntax
 ```
 
-Removal is `nft destroy table inet orbit`, which `orbit agent uninstall` runs —
+Removal is `nft destroy table inet orbit`, which `orbit leave` runs —
 it needs no record of what was in the table, so it works even if the rules were
 edited. Nothing Orbit adds goes into a chain anything else writes to. IP
 forwarding is left enabled on uninstall, because a container runtime probably
@@ -476,7 +476,7 @@ apart because they have different causes and different answers:
 
 | Locked out | Cause | Way back |
 |---|---|---|
-| A **machine** | its certificate expired while it was offline | re-run `orbit agent join` — the device key never expires |
+| A **machine** | its certificate expired while it was offline | re-run `orbit join` — the device key never expires |
 | A **person** | every admin token expired, revoked, or lost | `orbitd token create`, which authenticates with the database |
 
 The device key removed the first entirely (`enrollment.md` §6.1), and removed

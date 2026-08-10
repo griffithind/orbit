@@ -196,7 +196,7 @@ func TestTheSetupScriptsSecretsAreIgnored(t *testing.T) {
 // TestTheAdminCLIIsReachable.
 //
 // Both binaries have always been in the image, and the CLI was effectively
-// unreachable: `docker compose run --rm orbitd orbit host code web-01` swallows
+// unreachable: `docker compose run --rm orbitd orbit membership code web-01` swallows
 // "orbit" as an argument to orbitd's entrypoint and prints orbitd's usage —
 // which reads exactly like the binary not being in the image at all.
 //

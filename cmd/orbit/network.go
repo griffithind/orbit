@@ -11,18 +11,6 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-func networkCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return subUsage("network", "ls   list networks")
-	}
-	switch args[0] {
-	case "ls":
-		return networkLs(ctx, args[1:])
-	default:
-		return unknownSub("network", args[0], "ls")
-	}
-}
-
 func networkLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("network ls", flag.ExitOnError)
 	var o options

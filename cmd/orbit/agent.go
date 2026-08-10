@@ -967,7 +967,7 @@ This host is off the mesh locally. Its RECORD on the control plane is untouched,
 and its certificate stays valid until it expires — a host that is merely gone is
 not a host that has been revoked. To close that:
 
-  orbit host block %s
+  orbit membership block %s
 `, slug)
 	return nil
 }

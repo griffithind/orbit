@@ -11,8 +11,8 @@ what happens when renewal stops working.
 
 | | Gate | Command | When |
 |---|---|---|---|
-| **Join** | a human says yes | `orbit agent join` | a machine handed to a person; anything provisioned before its name is decided |
-| **Reservation** | a code, made in advance | `orbit membership reserve` then `orbit agent join -code` | unattended provisioning, where nobody is watching a queue |
+| **Join** | a human says yes | `orbit join` | a machine handed to a person; anything provisioned before its name is decided |
+| **Reservation** | a code, made in advance | `orbit membership reserve` then `orbit join -code` | unattended provisioning, where nobody is watching a queue |
 
 A reservation records the whole of the operator's intent — name, address, role,
 and whether the machine will be a lighthouse or a relay and where it is
@@ -359,7 +359,7 @@ nobody, and expires never (`design-device-identity.md` §2). So the circle is
 gone, and the way back is the way in:
 
 ```bash
-orbit agent join -url https://orbit.example.com -network prod
+orbit join -url https://orbit.example.com -network prod
 ```
 
 The join is idempotent: it resolves the device by its key and returns the
@@ -386,7 +386,7 @@ DIFFERENT MACHINE. That is not a limitation to work around — it is the propert
 the whole model rests on. The key is the identity; a control plane that would
 accept "it is really me, I just lost my key" would accept it from anyone.
 
-So it joins again, as new: `orbit agent join` generates a fresh device key and
+So it joins again, as new: `orbit join` generates a fresh device key and
 lands in the pending queue, or redeems a reservation an operator made for it.
 Either way somebody decides, which is the correct amount of ceremony for a
 machine claiming a place it cannot prove it held.

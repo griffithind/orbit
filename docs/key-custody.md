@@ -226,7 +226,7 @@ than nebula's certificate format.
 3. **Recovering the network ID is one variable, not a re-enrolment.** The agent
    verifies the ID at join and *does not persist it* — memberships are keyed on
    the device, not the network ID. So retiring a compromised ID means changing
-   one argument in whatever runs `orbit agent join`, and machines keep their
+   one argument in whatever runs `orbit join`, and machines keep their
    memberships, addresses and certificates. The expensive-sounding recovery is
    not expensive.
 

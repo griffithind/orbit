@@ -1493,7 +1493,7 @@ func ptrStr(s string) *string { return &s }
 //
 // Before this, the only assignment of MembershipActive anywhere was in UnblockHost —
 // so a host reached active solely by being blocked and then unblocked, and a
-// normally enrolled fleet read as permanently mid-setup in `orbit host ls`.
+// normally enrolled fleet read as permanently mid-setup in `orbit membership ls`.
 func TestReportingMakesAHostActive(t *testing.T) {
 	s := setup(t)
 	ctx := context.Background()

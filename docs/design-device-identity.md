@@ -5,7 +5,7 @@ document is the reasoning behind it, kept because the reasoning is what a future
 change has to argue against.
 
 One part is designed and NOT built: the verifiable network ID in §4. It commits
-to a network identity key that nothing generates yet, so `orbit agent join`
+to a network identity key that nothing generates yet, so `orbit join`
 takes a network uuid or slug today.
 
 ---
@@ -227,7 +227,7 @@ and made to pass *before* anything was removed.
 ## 9. What is not built
 
 1. **The verifiable network ID** of §4. It commits to a network identity key
-   that nothing generates yet, so `orbit agent join` takes a network uuid or
+   that nothing generates yet, so `orbit join` takes a network uuid or
    slug. Until it exists, pointing a machine at a hostile URL is defended by
    nothing — which a uuid plus a URL never defended against either, so this is a
    gap the design closes rather than one it opened.

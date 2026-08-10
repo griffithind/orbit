@@ -253,7 +253,7 @@ with an admin token:
       orbit device set-addrs <control-plane-name> ${PUBLIC_IP}
 
 Machines that already joined against the old address cannot receive that
-correction over an overlay they never reached; re-run 'orbit agent join' on
+correction over an overlay they never reached; re-run 'orbit join' on
 them, which is idempotent and returns the membership they already hold.
 
 EOF
@@ -404,7 +404,7 @@ Add a machine. Reserve a place for it, which prints a single-use code:
 Then on the machine joining, with the code that printed:
 
   sudo orbit agent install
-  sudo orbit agent join -url http://${PUBLIC_IP}:8080 -network $NETWORK -code orb_1_...
+  sudo orbit join -url http://${PUBLIC_IP}:8080 -network $NETWORK -code orb_1_...
 
 An overlay address is allocated when the machine arrives; -addr pins one if
 something outside Orbit already refers to it.

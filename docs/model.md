@@ -191,7 +191,7 @@ The sequencing that keeps the tree working:
    No secret travels at any point, so there is nothing to leak from a
    provisioning repository. `POST /enroll/v1/join`, `POST /enroll/v1/claim`,
    `GET /v1/networks/{ref}/pending`, `POST /v1/memberships/{id}/authorize`,
-   `orbit agent join`, `orbit membership pending`, `orbit membership authorize`.
+   `orbit join`, `orbit membership pending`, `orbit membership authorize`.
 2. **Device facts and posture.** *(Done.)* `orbit.device` carries OS, OS
    version, kernel, arch, agent and nebula version, plus disk encryption, secure
    boot, firewall and TPM presence. Native reads, no osquery. The agent sends
@@ -204,7 +204,7 @@ The sequencing that keeps the tree working:
    reservation — name, optional pinned address, optional role — and the
    membership is created at redemption, already naming its device. `POST
    /v1/networks/{ref}/reservations`, `orbit membership reserve`,
-   `orbit agent join -code`.
+   `orbit join -code`.
 
    Two consequences that were not obvious in advance. Address exhaustion moved
    from creation to REDEMPTION, because a reservation holds a name and does not
@@ -230,7 +230,7 @@ The sequencing that keeps the tree working:
    `RecoveryGrace` setting.
 
    The replacement is not a new command: a machine whose certificate expired
-   re-runs `orbit agent join`. The join is idempotent and returns the membership
+   re-runs `orbit join`. The join is idempotent and returns the membership
    it already holds — same address, same role, same name, and NOT the name it
    asked for — and the claim that follows is authenticated by a device key no
    clock can invalidate. Asserted end to end in

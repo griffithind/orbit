@@ -17,28 +17,6 @@ import (
 
 const roleVerbs = "ls, show, edit, rm"
 
-func roleCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return subUsage("role",
-			"ls     list the roles in a network",
-			"show   one role, with its groups and firewall rules",
-			"edit   change a role's name, groups, or firewall",
-			"rm     delete a role no host carries")
-	}
-	switch args[0] {
-	case "ls":
-		return roleLs(ctx, args[1:])
-	case "show":
-		return roleShow(ctx, args[1:])
-	case "edit":
-		return roleEdit(ctx, args[1:])
-	case "rm":
-		return roleRm(ctx, args[1:])
-	default:
-		return unknownSub("role", args[0], roleVerbs)
-	}
-}
-
 func roleLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("role ls", flag.ExitOnError)
 	var o options
@@ -248,7 +226,7 @@ func roleEdit(ctx context.Context, args []string) error {
 
   %s
 
-  To force a host sooner, revoke its certificate:  orbit host block <name>
+  To force a host sooner, revoke its certificate:  orbit membership block <name>
   Watch the configuration half land:               orbit converge -wait 5m
 `,
 		o.r.bold("ACCEPTED, NOT YET IN FORCE"),
@@ -330,7 +308,7 @@ func roleRm(ctx context.Context, args []string) error {
 				fmt.Fprintf(&b, "  %-28s %s\n", truncate(h.Name, 28), h.ID)
 			}
 			b.WriteString("\nReassign them first, one at a time:\n\n" +
-				"  orbit host set <host> -role <other-role>\n\n" +
+				"  orbit membership set <host> -role <other-role>\n\n" +
 				"Deleting it would change the firewall on every one of them at once, which " +
 				"is why the database refuses.")
 			return fail(exitConflict, "%s", b.String())

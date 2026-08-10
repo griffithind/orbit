@@ -327,7 +327,7 @@ the signed config says they should be, and repair. A rule someone edited is
 detected and replaced, and the agent's records are never the authority — the
 host is inspected.
 
-**Uninstall must be total.** `orbit agent uninstall` destroys the table, flushes
+**Uninstall must be total.** `orbit leave` destroys the table, flushes
 the proto, and leaves a machine indistinguishable from one Orbit never touched.
 That is testable, and it should have a test.
 
@@ -594,7 +594,7 @@ survives untouched.
 It is **reconciled every cycle**, not applied once. Firewall rules live where
 other things also write: somebody flushes nftables, a package upgrade reloads a
 ruleset. Applying once and trusting it would leave a gateway the control plane
-believes is forwarding and that silently is not. `orbit agent uninstall`
+believes is forwarding and that silently is not. `orbit leave`
 destroys the table by name, needing no memory of what was in it.
 
 IP forwarding is enabled and deliberately **not** disabled on uninstall —

@@ -157,7 +157,7 @@ func (c *Client) PendingJoins(ctx context.Context, network string) (Result[wire.
 //
 // It issues no certificate. The machine still has to come back and prove it
 // holds the device key it joined with before anything is signed for it, which is
-// why this and `orbit host code` are not two ways to do the same thing.
+// why this and `orbit membership code` are not two ways to do the same thing.
 func (c *Client) Authorize(ctx context.Context, id uuid.UUID, roleID string) (Result[wire.MembershipResponse], error) {
 	return send[wire.MembershipResponse](ctx, c, http.MethodPost,
 		"/v1/memberships/"+id.String()+"/authorize", nil, wire.AuthorizeRequest{RoleID: roleID})

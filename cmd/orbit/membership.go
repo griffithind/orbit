@@ -16,52 +16,12 @@ import (
 
 const membershipVerbs = "ls, show, pending, authorize, reserve, set, code, block, unblock, rm"
 
-func membershipCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return subUsage("membership",
-			"ls        list the fleet, filtered and paginated",
-			"show      one host, its certificate, and whether it has converged",
-			"pending   list machines waiting to be authorized onto the network",
-			"authorize admit a pending machine: allocate its address",
-			"reserve   hold a place for a machine that has not arrived; prints a code",
-			"set       change a host's role, tags, or lighthouse/relay flags",
-			"code      mint a single-use enrollment code",
-			"block     suspend a host (reversible)",
-			"unblock   restore a blocked host",
-			"rm        decommission a host: revoke its certificates and remove it")
-	}
-	switch args[0] {
-	case "ls":
-		return membershipLs(ctx, args[1:])
-	case "show":
-		return membershipShow(ctx, args[1:])
-	case "pending":
-		return membershipPending(ctx, args[1:])
-	case "authorize":
-		return membershipAuthorize(ctx, args[1:])
-	case "reserve":
-		return membershipReserve(ctx, args[1:])
-	case "set":
-		return membershipSet(ctx, args[1:])
-	case "code":
-		return membershipCode(ctx, args[1:])
-	case "block":
-		return membershipBlock(ctx, args[1:], false)
-	case "unblock":
-		return membershipBlock(ctx, args[1:], true)
-	case "rm":
-		return membershipRm(ctx, args[1:])
-	default:
-		return unknownSub("membership", args[0], membershipVerbs)
-	}
-}
-
 //------------------------------------------------------------------------------
 // ls
 //------------------------------------------------------------------------------
 
 func membershipLs(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership ls", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -156,7 +116,7 @@ func membershipLs(ctx context.Context, args []string) error {
 		// says nothing is the failure wire.MembershipListResponse exists to prevent,
 		// and suppressing the notice for pipelines would reintroduce it exactly
 		// where nobody is watching.
-		fmt.Fprintf(errOut, "\nmore hosts match; next page:\n  orbit host ls -cursor %s\n", page.NextCursor)
+		fmt.Fprintf(errOut, "\nmore hosts match; next page:\n  orbit membership ls -cursor %s\n", page.NextCursor)
 	}
 	return nil
 }
@@ -212,7 +172,7 @@ func renderHostTable(r renderer, network *wire.NetworkResponse, hosts []wire.Mem
 // certificate list. Behind curl that is three requests, three JSON blobs, and
 // arithmetic on RFC3339 strings.
 func membershipShow(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host show", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership show", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	history := fs.Int("history", 0, "also list the N most recent certificates")
@@ -220,7 +180,7 @@ func membershipShow(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit host show <name|uuid>")
+		return usageErrorf("usage: orbit membership show <name|uuid>")
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -245,7 +205,7 @@ func membershipShow(ctx context.Context, args []string) error {
 	}
 	if o.json {
 		// The host response verbatim, not a document this command assembled from
-		// three. `orbit host show -json` and `curl /v1/memberships/{id}` have to be the
+		// three. `orbit membership show -json` and `curl /v1/memberships/{id}` have to be the
 		// same bytes; the layout below is the value this command adds, and it is
 		// a human's, not a script's.
 		return emitJSON(res.Raw)
@@ -328,7 +288,7 @@ func renderCertificates(r renderer, h wire.MembershipResponse) {
 		// say which one this is rather than leaving a blank section.
 		switch h.State {
 		case "created":
-			fmt.Fprintln(out, "  none — this host has not enrolled yet; mint a code with `orbit host code`")
+			fmt.Fprintln(out, "  none — this host has not enrolled yet; mint a code with `orbit membership code`")
 		case "suspended":
 			fmt.Fprintln(out, "  none — this host is blocked and its certificates were revoked")
 		default:
@@ -401,14 +361,14 @@ func shortFingerprint(s string) string {
 
 // membershipReserve holds a place in a network for a machine that has not arrived.
 //
-// This replaced `orbit host create` followed by `orbit host code`. Two commands
+// This replaced `orbit membership create` followed by `orbit membership code`. Two commands
 // became one because they were always one intention: an operator decides what a
 // machine will be called, where it goes and what it may do, and hands over a
 // code. What changed underneath is that nothing exists until the code is
 // redeemed — so there is no half-provisioned row to clean up if the machine
 // never arrives, and no membership that names no machine.
 func membershipReserve(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host reserve", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership reserve", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -466,7 +426,7 @@ func membershipReserve(ctx context.Context, args []string) error {
 			return fail(exitConflict,
 				"the name %q is already taken in network %s (%s)\n\n"+
 					"Names are unique per network, and an unspent reservation holds one. "+
-					"Inspect an existing host with `orbit host show %s`, or pick another name.",
+					"Inspect an existing host with `orbit membership show %s`, or pick another name.",
 				*name, network.Name, api.Message, *name)
 		}
 		return err
@@ -501,7 +461,7 @@ func membershipReserve(ctx context.Context, args []string) error {
 }
 
 func membershipSet(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host set", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership set", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	var (
@@ -515,7 +475,7 @@ func membershipSet(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit host set <name|uuid> [flags]")
+		return usageErrorf("usage: orbit membership set <name|uuid> [flags]")
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -523,7 +483,7 @@ func membershipSet(ctx context.Context, args []string) error {
 
 	// Only fields the operator actually named are sent. wire.UpdateHostRequest
 	// uses pointers precisely so "not supplied" differs from "set to false", and
-	// a CLI that sent every flag's zero value would turn `orbit host set -tags x`
+	// a CLI that sent every flag's zero value would turn `orbit membership set -tags x`
 	// into an accidental un-lighthousing. fs.Visit reports what was on the
 	// command line, which is the only honest source for that.
 	supplied := map[string]bool{}
@@ -582,7 +542,7 @@ func membershipSet(ctx context.Context, args []string) error {
 }
 
 // onlyGlobals reports whether the supplied flags are all connection settings, so
-// `orbit host set -network prod web-01` is refused rather than sent as an empty
+// `orbit membership set -network prod web-01` is refused rather than sent as an empty
 // PATCH the server would answer 400 to.
 func onlyGlobals(supplied map[string]bool) bool {
 	globals := map[string]bool{
@@ -605,17 +565,17 @@ func onlyGlobals(supplied map[string]bool) bool {
 //
 // The plaintext goes alone on stdout and every word of prose to stderr — the
 // property `orbitd token create` established and a test there asserts. It is what
-// makes `orbit host code web-01 | op create item` work without the code passing
+// makes `orbit membership code web-01 | op create item` work without the code passing
 // through a shell history or a scrollback buffer.
 func membershipCode(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host code", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership code", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit host code <name|uuid>")
+		return usageErrorf("usage: orbit membership code <name|uuid>")
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -663,14 +623,14 @@ func membershipBlock(ctx context.Context, args []string, unblock bool) error {
 	if unblock {
 		verb = "unblock"
 	}
-	fs := flag.NewFlagSet("host "+verb, flag.ExitOnError)
+	fs := flag.NewFlagSet("membership "+verb, flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit host %s <name|uuid>", verb)
+		return usageErrorf("usage: orbit membership %s <name|uuid>", verb)
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -713,7 +673,7 @@ func membershipBlock(ctx context.Context, args []string, unblock bool) error {
 }
 
 func membershipRm(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership rm", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	reason := fs.String("reason", "", "recorded in the audit log")
@@ -721,7 +681,7 @@ func membershipRm(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit host rm <name|uuid>")
+		return usageErrorf("usage: orbit membership rm <name|uuid>")
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -827,7 +787,7 @@ func csvList(s string) []string {
 // easy to look at, so this is deliberately the shortest command in the CLI: a
 // network, and what is waiting in it.
 func membershipPending(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host pending", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership pending", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	if err := parseFlags(fs, args); err != nil {
@@ -871,7 +831,7 @@ func membershipPending(ctx context.Context, args []string) error {
 
 // membershipAuthorize admits a pending membership.
 func membershipAuthorize(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("host authorize", flag.ExitOnError)
+	fs := flag.NewFlagSet("membership authorize", flag.ExitOnError)
 	var o options
 	o.bind(fs)
 	role := fs.String("role", "", "assign this role while authorizing (name or uuid)")
@@ -879,7 +839,7 @@ func membershipAuthorize(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usageErrorf("usage: orbit host authorize <membership uuid>")
+		return usageErrorf("usage: orbit membership authorize <membership uuid>")
 	}
 	if err := o.load(); err != nil {
 		return err
@@ -891,12 +851,12 @@ func membershipAuthorize(ctx context.Context, args []string) error {
 	// exactly wrong here: a pending row's name is a string the JOINING MACHINE
 	// chose, and resolving by it would let a machine that joined asking to be
 	// called "lighthouse" be authorized by an operator who typed the name of
-	// the host they meant. The membership id comes from `orbit host pending`,
+	// the host they meant. The membership id comes from `orbit membership pending`,
 	// which is where the operator is looking anyway.
 	membershipID, err := uuid.Parse(fs.Arg(0))
 	if err != nil {
 		return usageErrorf("authorize takes a membership uuid, as printed by "+
-			"`orbit host pending`, not a name: %q", fs.Arg(0))
+			"`orbit membership pending`, not a name: %q", fs.Arg(0))
 	}
 
 	var roleID string

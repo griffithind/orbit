@@ -20,7 +20,7 @@ import (
 // options are the flags every subcommand accepts.
 //
 // Registered per subcommand rather than parsed before the verb, so flags come
-// after it: `orbit host ls -network prod`, matching `orbitd serve -addr` and
+// after it: `orbit membership ls -network prod`, matching `orbitd serve -addr` and
 // `orbit agent run -dir`. Go's flag package accepts both -network and --network,
 // so the CLI is forgiving in the direction people actually expect while the
 // product still speaks one dialect.
@@ -311,7 +311,7 @@ func (o *options) announce(action string) {
 //
 // Only for what cannot be undone — deleting a host, retiring a CA, deleting a
 // role, activating a CA past hosts that have not converged, revoking the token
-// in your own hand. Blocking a host is reversible with `orbit host unblock` and
+// in your own hand. Blocking a host is reversible with `orbit membership unblock` and
 // is deliberately not prompted: a prompt on a reversible action teaches people
 // to type y without reading, which is what makes the prompt on an irreversible
 // one worthless.

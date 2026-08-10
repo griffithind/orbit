@@ -16,7 +16,7 @@ is one binary and one service.
 orbit membership reserve -name web-03 -role web        # → orb_1_…, single use
 
 sudo orbit agent install                               # once per machine
-sudo orbit agent join -url https://orbit.example.com \
+sudo orbit join -url https://orbit.example.com \
     -network prod -code orb_1_…                        # once per network
 
 orbit membership block web-03                          # off the mesh in ~5s
@@ -25,7 +25,7 @@ orbit membership block web-03                          # off the mesh in ~5s
 Or with nobody holding a code: the machine asks, and you say yes.
 
 ```bash
-sudo orbit agent join -url https://orbit.example.com -network prod
+sudo orbit join -url https://orbit.example.com -network prod
 orbit membership pending                          # what is waiting
 orbit membership authorize <id>
 ```
@@ -100,7 +100,7 @@ orbit membership reserve -name web-01 -role web        # prints the code
 
 # On the machine. install is once; join is once per network.
 sudo orbit agent install
-sudo orbit agent join -url https://orbit.example.com -network prod -code orb_1_…
+sudo orbit join -url https://orbit.example.com -network prod -code orb_1_…
 ```
 
 `install` generates the machine's device identity and installs the service;
@@ -148,7 +148,7 @@ joins and every control plane it talks to. Joining is a signature over that key,
 so **no secret has to travel** — and a machine whose mesh certificate expired can
 still reach the control plane, because reaching it uses something no clock can
 invalidate. There is no recovery command, because there is nothing to recover
-from: re-run `orbit agent join`.
+from: re-run `orbit join`.
 
 **Enrollment without shared secrets.** The mesh keypair is generated on the
 machine and only the public half is sent. A reservation code, when one is used at

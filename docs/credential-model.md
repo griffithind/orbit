@@ -3,7 +3,7 @@
 Two credentials, not one. This document records why, what each is authoritative
 for, and where the access decision is actually made.
 
-**Status.** The device half is built: `orbit agent join` generates a device key,
+**Status.** The device half is built: `orbit join` generates a device key,
 the control plane records it, and the nebula certificate is issued against a
 membership that names it (`docs/model.md`, `docs/design-device-identity.md`). The
 **user credential is designed and not built** — there is no user noun yet, and

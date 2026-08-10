@@ -59,7 +59,7 @@ func TestReservedLighthouseNeedsNoFollowUp(t *testing.T) {
 
 	// Claim, because a reservation authorizes but does not issue: the machine
 	// still presents a keypair and gets a certificate. This is the ordinary
-	// second half of `orbit agent join`, not a follow-up ADMIN call — nobody
+	// second half of `orbit join`, not a follow-up ADMIN call — nobody
 	// touches the control plane between the reservation and a working
 	// lighthouse, which is the property under test.
 	kp, err := agent.GenerateKeypair(h.curve)

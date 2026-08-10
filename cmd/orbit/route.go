@@ -22,22 +22,6 @@ import (
 
 const routeVerbs = "ls, add, rm"
 
-func routeCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return usageErrorf("usage: orbit route <%s>", routeVerbs)
-	}
-	switch args[0] {
-	case "ls":
-		return routeList(ctx, args[1:])
-	case "add":
-		return routeAdd(ctx, args[1:])
-	case "rm":
-		return routeRemove(ctx, args[1:])
-	default:
-		return usageErrorf("unknown route command %q; want one of: %s", args[0], routeVerbs)
-	}
-}
-
 // resolveMembership turns a name or uuid into a membership id, in the selected
 // network. The same hop `orbit membership set` makes.
 func (o *options) resolveMembership(ctx context.Context, ref string) (uuid.UUID, error) {

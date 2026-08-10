@@ -14,28 +14,6 @@ import (
 
 const caVerbs = "create, ls, activate, retire"
 
-func caCmd(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return subUsage("ca",
-			"create     mint a new CA, ready to distribute but not yet signing",
-			"ls         list a network's certificate authorities",
-			"activate   promote a CA to signing",
-			"retire     drop a CA from distribution once nothing it signed is live")
-	}
-	switch args[0] {
-	case "create":
-		return caCreate(ctx, args[1:])
-	case "ls":
-		return caLs(ctx, args[1:])
-	case "activate":
-		return caActivate(ctx, args[1:])
-	case "retire":
-		return caRetire(ctx, args[1:])
-	default:
-		return unknownSub("ca", args[0], caVerbs)
-	}
-}
-
 // caCreate mints a CA. It does not start signing with it.
 //
 // The two steps are the whole of rotation: every host must hold the new CA before
