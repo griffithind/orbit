@@ -29,12 +29,6 @@ import (
 	"github.com/griffithind/orbit/internal/wire"
 )
 
-// ResourceRoutes registers the network, role, CA, token, and audit endpoints.
-//
-// Split from AdminRoutes so the host-lifecycle surface stays readable, but they
-// mount on the same listener and use the same scoped tokens.
-func (s *Server) ResourceRoutes(mux *http.ServeMux) { register(mux, s.resourceRoutes()) }
-
 func (s *Server) resourceRoutes() []route {
 	a := func(pattern, scope string, h http.HandlerFunc) route {
 		return route{pattern: pattern, surface: surfaceAdmin, scope: scope, h: s.admin(scope, h)}

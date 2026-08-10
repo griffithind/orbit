@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/griffithind/orbit/internal/nebulacfg"
 )
@@ -230,18 +229,4 @@ func (l Layout) targets() map[string]string {
 // without reading flags.
 func (l Layout) Describe() string {
 	return fmt.Sprintf("network %s in %s", l.Network, l.Dir)
-}
-
-// SlugFromUnitInstance recovers a network slug from a systemd instance name.
-//
-// Present so an operator can pass %i straight through. systemd escapes "/" as
-// "-" in instance names, but a valid slug contains neither a "/" nor anything
-// else systemd would have escaped, so the only transformation needed is the
-// validation itself.
-func SlugFromUnitInstance(instance string) (string, error) {
-	s := strings.TrimSpace(instance)
-	if err := ValidateNetwork(s); err != nil {
-		return "", err
-	}
-	return s, nil
 }

@@ -243,36 +243,5 @@ func (n *Notifier) Subscribers(networkID uuid.UUID) int {
 	return len(n.subs[networkID])
 }
 
-// Total reports every waiter across all networks.
-func (n *Notifier) Total() int {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	total := 0
-	for _, m := range n.subs {
-		total += len(m)
-	}
-	return total
-}
-
 // ErrClosed is returned by Wait when the notifier stops.
 var ErrClosed = errors.New("notifier closed")
-
-// Wait blocks until a change arrives for networkID, the timeout elapses, or ctx
-// ends. It reports whether an event actually arrived, so a caller can
-// distinguish "something changed" from "nothing happened, poll again".
-func (n *Notifier) Wait(ctx context.Context, networkID uuid.UUID, timeout time.Duration) bool {
-	ch, cancel := n.Subscribe(networkID)
-	defer cancel()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case <-ch:
-		return true
-	case <-timer.C:
-		return false
-	case <-ctx.Done():
-		return false
-	}
-}

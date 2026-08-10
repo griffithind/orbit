@@ -144,69 +144,6 @@ func PublicFromHostKey(curve cert.Curve, priv []byte) ([]byte, error) {
 	}
 }
 
-// SharedSecret performs Diffie-Hellman between a private key and a peer's
-// public key.
-//
-// Used by the recovery flow to prove possession of a host key without a
-// signature. Nebula host keys on Curve25519 are X25519 — key agreement only,
-// no signing operation — so a signed-nonce challenge is not available and an
-// ECDH challenge is what remains.
-func SharedSecret(curve cert.Curve, priv, peerPub []byte) ([]byte, error) {
-	switch curve {
-	case cert.Curve_CURVE25519:
-		k, err := ecdh.X25519().NewPrivateKey(priv)
-		if err != nil {
-			return nil, fmt.Errorf("parse x25519 private key: %w", err)
-		}
-		p, err := ecdh.X25519().NewPublicKey(peerPub)
-		if err != nil {
-			return nil, fmt.Errorf("parse x25519 public key: %w", err)
-		}
-		return k.ECDH(p)
-
-	case cert.Curve_P256:
-		k, err := ecdh.P256().NewPrivateKey(priv)
-		if err != nil {
-			return nil, fmt.Errorf("parse p256 private key: %w", err)
-		}
-		p, err := ecdh.P256().NewPublicKey(peerPub)
-		if err != nil {
-			return nil, fmt.Errorf("parse p256 public key: %w", err)
-		}
-		return k.ECDH(p)
-
-	default:
-		return nil, fmt.Errorf("unsupported curve: %s", curve)
-	}
-}
-
-// DeriveHostKey turns 32 bytes of key material into a usable host private key.
-//
-// Returns an error for a scalar the curve rejects, which the caller handles by
-// deriving again with a different counter. Vanishingly unlikely on P-256 and
-// impossible on X25519 (every 32-byte string is a valid clamped scalar), but a
-// silent failure here would be a broken challenge nobody could debug.
-func DeriveHostKey(curve cert.Curve, material []byte) (priv, pub []byte, err error) {
-	switch curve {
-	case cert.Curve_CURVE25519:
-		k, err := ecdh.X25519().NewPrivateKey(material)
-		if err != nil {
-			return nil, nil, err
-		}
-		return k.Bytes(), k.PublicKey().Bytes(), nil
-
-	case cert.Curve_P256:
-		k, err := ecdh.P256().NewPrivateKey(material)
-		if err != nil {
-			return nil, nil, err
-		}
-		return k.Bytes(), k.PublicKey().Bytes(), nil
-
-	default:
-		return nil, nil, fmt.Errorf("unsupported curve: %s", curve)
-	}
-}
-
 // ParseCurve reads a curve name.
 //
 // One function so the CLI, the enrollment wire, and the bootstrap flag cannot

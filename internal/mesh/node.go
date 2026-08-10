@@ -419,9 +419,6 @@ type Registrar interface {
 // resolve a source address unambiguously.
 func (n *Node) NetworkID() uuid.UUID { return n.cfg.NetworkID }
 
-// Addr reports the control plane's overlay address on this network.
-func (n *Node) Addr() netip.Addr { return n.cfg.Addr }
-
 // Listen returns a listener bound to the overlay only.
 //
 // Reachable exclusively by peers with a valid certificate for this network.

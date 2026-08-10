@@ -178,14 +178,3 @@ func quoteIdentifier(s string) string {
 func quoteLiteral(s string) string {
 	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
 }
-
-// MigrateDSN opens a single connection, migrates, and closes it. Convenience
-// for bootstrap paths and tests.
-func MigrateDSN(ctx context.Context, dsn string) ([]string, error) {
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("connect: %w", err)
-	}
-	defer conn.Close(ctx)
-	return Migrate(ctx, conn)
-}

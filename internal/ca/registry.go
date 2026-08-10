@@ -3,7 +3,6 @@ package ca
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/slackhq/nebula/cert"
@@ -103,21 +102,4 @@ func (r *Registry) Close() error {
 	}
 	r.cache = map[string]*Issuer{}
 	return nil
-}
-
-// ChainFactories tries each factory in order, returning the first success. Use
-// it to compose the built-in file scheme with a KMS factory the binary
-// registers.
-func ChainFactories(factories ...SignerFactory) SignerFactory {
-	return func(ctx context.Context, ref string) (Signer, error) {
-		var errs []string
-		for _, f := range factories {
-			s, err := f(ctx, ref)
-			if err == nil {
-				return s, nil
-			}
-			errs = append(errs, err.Error())
-		}
-		return nil, fmt.Errorf("no factory handled %q: %s", ref, strings.Join(errs, "; "))
-	}
 }

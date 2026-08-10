@@ -137,13 +137,6 @@ func (l *Limiter) Allow(key string) bool {
 	return k.lim.Allow()
 }
 
-// Size reports the number of tracked keys. For metrics and tests.
-func (l *Limiter) Size() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.keys)
-}
-
 // limitEnroll wraps the enrollment handler.
 //
 // A limited request gets 429 with Retry-After. That is deliberately

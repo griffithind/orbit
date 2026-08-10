@@ -661,16 +661,6 @@ func (s *Server) redirectWithNotice(w http.ResponseWriter, r *http.Request, path
 	return nil
 }
 
-func splitCSV(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 func containsStr(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
