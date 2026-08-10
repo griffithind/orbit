@@ -1,4 +1,4 @@
-package agent
+package status
 
 import (
 	"context"
@@ -167,12 +167,12 @@ type Peer struct {
 // else.
 func (p Peer) Relayed() bool { return len(p.RelaysToMe) > 0 }
 
-// peersFrom maps nebula's hostmap entries.
+// PeersFrom maps nebula's hostmap entries.
 //
 // Deliberately lossy. LocalIndex and RemoteIndex identify a tunnel inside
 // nebula and mean nothing to an operator; carrying them would be two more
 // columns nobody can act on.
-func peersFrom(hosts []nebula.ControlHostInfo) []Peer {
+func PeersFrom(hosts []nebula.ControlHostInfo) []Peer {
 	out := make([]Peer, 0, len(hosts))
 	for _, h := range hosts {
 		p := Peer{
@@ -258,8 +258,8 @@ func (c CertStatus) Expired(now time.Time) bool {
 	return now.Before(c.NotBefore) || now.After(c.NotAfter)
 }
 
-// StatusServer serves the socket.
-type StatusServer struct {
+// Server serves the socket.
+type Server struct {
 	// Path is the socket. Empty disables the server entirely.
 	Path string
 	Log  *slog.Logger
@@ -284,7 +284,7 @@ var ErrUnknownNetwork = errors.New("no such network on this host")
 // A failure here must never stop the agent: diagnostics going missing is worse
 // than not having them, but it is not worth taking a host's overlays down for.
 // Callers log the error and carry on — see cmd/orbit/agent.go.
-func (s *StatusServer) Serve(ctx context.Context) error {
+func (s *Server) Serve(ctx context.Context) error {
 	if s.Path == "" {
 		return nil
 	}
@@ -413,8 +413,8 @@ func writeStatusJSON(w http.ResponseWriter, v any) {
 // agent is not running" rather than surface a dial error about a path.
 var ErrNoAgent = errors.New("the orbit agent is not running")
 
-// FetchStatus reads the whole report from a running agent.
-func FetchStatus(ctx context.Context, path string) (Report, error) {
+// Fetch reads the whole report from a running agent.
+func Fetch(ctx context.Context, path string) (Report, error) {
 	var rep Report
 	err := fetch(ctx, path, "/v1/status", &rep)
 	return rep, err

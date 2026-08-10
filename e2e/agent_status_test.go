@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/status"
 )
 
 // `orbit status`, through the real binaries.
@@ -86,7 +87,7 @@ func (h *harness) startAgent(t *testing.T, root string) *lockedBuffer {
 
 	// Wait for the socket rather than sleeping: the agent binds it after it has
 	// discovered the networks, so its appearance is the readiness signal.
-	sock := agent.SocketPath(root)
+	sock := status.SocketPath(root)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if c, err := net.Dial("unix", sock); err == nil {
@@ -118,7 +119,7 @@ func TestStatusReportsAJoinedNetwork(t *testing.T) {
 		t.Fatalf("status exited %d\n%s", res.code, res.stderr)
 	}
 
-	var rep agent.Report
+	var rep status.Report
 	if err := json.Unmarshal([]byte(res.stdout), &rep); err != nil {
 		t.Fatalf("parse status: %v\n%s", err, res.stdout)
 	}
@@ -168,7 +169,7 @@ func TestStatusSeparatesADeadDataPlaneFromABrokenAgent(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("status exited %d\n%s", res.code, res.stderr)
 	}
-	var rep agent.Report
+	var rep status.Report
 	if err := json.Unmarshal([]byte(res.stdout), &rep); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestStatusShowsANetworkThatNeverCameUp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("status exited %d\n%s", res.code, res.stderr)
 	}
-	var rep agent.Report
+	var rep status.Report
 	if err := json.Unmarshal([]byte(res.stdout), &rep); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +257,7 @@ func TestPeersReportsADeadDataPlaneRatherThanAnEmptyMesh(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("peers exited %d\n%s", res.code, res.stderr)
 	}
-	var rep agent.PeerReport
+	var rep status.PeerReport
 	if err := json.Unmarshal([]byte(res.stdout), &rep); err != nil {
 		t.Fatalf("parse peers: %v\n%s", err, res.stdout)
 	}
@@ -307,7 +308,7 @@ func TestPeersNeedsANetworkWhenThereAreSeveral(t *testing.T) {
 	if ok.code != 0 {
 		t.Fatalf("exit %d with -network\n%s", ok.code, ok.stderr)
 	}
-	var rep agent.PeerReport
+	var rep status.PeerReport
 	if err := json.Unmarshal([]byte(ok.stdout), &rep); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +353,7 @@ func TestWhyExplainsPolicyWithTheDataPlaneDown(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("why exited %d\n%s", res.code, res.stderr)
 	}
-	var ex agent.Explanation
+	var ex status.Explanation
 	if err := json.Unmarshal([]byte(res.stdout), &ex); err != nil {
 		t.Fatalf("parse explanation: %v\n%s", err, res.stdout)
 	}

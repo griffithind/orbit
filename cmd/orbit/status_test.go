@@ -13,6 +13,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/paths"
+	"github.com/griffithind/orbit/internal/agent/status"
 	"github.com/griffithind/orbit/internal/fwmatch"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -143,7 +144,7 @@ func TestPeersOnAnUnjoinedNetworkIs404(t *testing.T) {
 	slot := &netSlot{dir: "/var/lib/orbit/prod"}
 
 	_, err := peerReport(context.Background(), "staging", []*netSlot{slot})
-	if !errors.Is(err, agent.ErrUnknownNetwork) {
+	if !errors.Is(err, status.ErrUnknownNetwork) {
 		t.Fatalf("got %v, want ErrUnknownNetwork", err)
 	}
 	if !strings.Contains(err.Error(), "staging") {
@@ -162,10 +163,10 @@ func TestPeerTableCarriesWhatAnOperatorNeeds(t *testing.T) {
 	out = &buf
 	t.Cleanup(func() { out = prev })
 
-	printPeers(agent.PeerReport{
+	printPeers(status.PeerReport{
 		Network: "prod",
 		Running: true,
-		Established: []agent.Peer{
+		Established: []status.Peer{
 			{
 				Name: "db-01", VpnAddrs: []string{"10.42.0.9"},
 				CurrentRemote: "203.0.113.7:4242", Messages: 8123,
@@ -177,7 +178,7 @@ func TestPeerTableCarriesWhatAnOperatorNeeds(t *testing.T) {
 				CertNotAfter: time.Now().Add(29 * 24 * time.Hour),
 			},
 		},
-		Pending: []agent.Peer{{VpnAddrs: []string{"10.42.0.11"}}},
+		Pending: []status.Peer{{VpnAddrs: []string{"10.42.0.11"}}},
 	})
 
 	got := buf.String()
@@ -214,7 +215,7 @@ func TestWhyRendersADenialWithTheNearMisses(t *testing.T) {
 	t.Cleanup(func() { out = prev })
 
 	reaches := fwmatch.Rule{Proto: 6, StartPort: 22, EndPort: 22, CIDR: "10.42.0.9/32"}
-	printWhy(agent.Explanation{
+	printWhy(status.Explanation{
 		Network:      "prod",
 		Peer:         "10.42.0.9",
 		PeerResolved: "10.42.0.9",
@@ -223,7 +224,7 @@ func TestWhyRendersADenialWithTheNearMisses(t *testing.T) {
 		PeerGroups:   []string{"env-prod"},
 		Proto:        "tcp",
 		Port:         "5432",
-		Certificate: &agent.CertStatus{
+		Certificate: &status.CertStatus{
 			Name: "web-01", Groups: []string{"env-prod"},
 			NotAfter: time.Now().Add(29 * 24 * time.Hour),
 		},
@@ -274,7 +275,7 @@ func TestWhySaysWhatItCannotDecide(t *testing.T) {
 	out = &buf
 	t.Cleanup(func() { out = prev })
 
-	printWhy(agent.Explanation{
+	printWhy(status.Explanation{
 		Network: "prod", PeerResolved: "10.42.0.9", Proto: "tcp", Port: "443",
 		PeerKnown: false, Running: true,
 		Outbound: fwmatch.Decision{Considered: 2, Undecidable: true},

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/griffithind/orbit/internal/agent/status"
 	"github.com/slackhq/nebula"
 	"github.com/slackhq/nebula/config"
 )
@@ -286,15 +287,15 @@ func (e *Embedded) Status(context.Context) (Status, error) {
 // pending is the handshake map — peers being negotiated with rather than
 // established. Reported alongside rather than merged, because "handshaking"
 // and "connected" are different answers to the only question being asked.
-func (e *Embedded) Peers() (established, pending []Peer, err error) {
+func (e *Embedded) Peers() (established, pending []status.Peer, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if !e.running || e.ctrl == nil {
 		return nil, nil, ErrNebulaNotRunning
 	}
-	return peersFrom(e.ctrl.ListHostmapHosts(false)),
-		peersFrom(e.ctrl.ListHostmapHosts(true)), nil
+	return status.PeersFrom(e.ctrl.ListHostmapHosts(false)),
+		status.PeersFrom(e.ctrl.ListHostmapHosts(true)), nil
 }
 
 // ErrNebulaNotRunning distinguishes "no tunnels" from "nothing to ask".

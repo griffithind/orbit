@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/paths"
+	"github.com/griffithind/orbit/internal/agent/status"
 )
 
 // `orbit peers` — who this host actually has a tunnel with.
@@ -31,13 +31,13 @@ func peersCmd(ctx context.Context, args []string) error {
 		return err
 	}
 
-	path := agent.SocketPath(*root)
+	path := status.SocketPath(*root)
 	slug, err := resolveNetwork(ctx, path, *network)
 	if err != nil {
 		return err
 	}
 
-	rep, err := agent.FetchPeers(ctx, path, slug)
+	rep, err := status.FetchPeers(ctx, path, slug)
 	if err != nil {
 		return agentError(err, path)
 	}
@@ -64,7 +64,7 @@ func resolveNetwork(ctx context.Context, path, want string) (string, error) {
 		return want, nil
 	}
 
-	rep, err := agent.FetchStatus(ctx, path)
+	rep, err := status.Fetch(ctx, path)
 	if err != nil {
 		return "", agentError(err, path)
 	}
@@ -88,16 +88,16 @@ func resolveNetwork(ctx context.Context, path, want string) (string, error) {
 // one deserves.
 func agentError(err error, path string) error {
 	switch {
-	case errors.Is(err, agent.ErrNoAgent):
+	case errors.Is(err, status.ErrNoAgent):
 		return fail(exitUnreachable,
 			"the orbit agent is not running (nothing is listening on %s)", path)
-	case errors.Is(err, agent.ErrUnknownNetwork):
+	case errors.Is(err, status.ErrUnknownNetwork):
 		return fail(exitNotFound, "%s\n\nRun `orbit status` for the networks this host has joined.", err)
 	}
 	return err
 }
 
-func printPeers(rep agent.PeerReport) {
+func printPeers(rep status.PeerReport) {
 	r := newRenderer()
 
 	// A stopped data plane is the headline, not a footnote under an empty
@@ -158,7 +158,7 @@ func printPeers(rep agent.PeerReport) {
 	}
 }
 
-func summarise(rep agent.PeerReport) string {
+func summarise(rep status.PeerReport) string {
 	s := plural(len(rep.Established), "tunnel")
 	var relayed int
 	for _, p := range rep.Established {
@@ -178,7 +178,7 @@ func summarise(rep agent.PeerReport) string {
 // nameOf falls back to the address. A pending entry has no verified
 // certificate yet, so it has no name, and a blank first column would make the
 // row unreadable.
-func nameOf(p agent.Peer) string {
+func nameOf(p status.Peer) string {
 	if p.Name != "" {
 		return p.Name
 	}
@@ -190,14 +190,14 @@ func nameOf(p agent.Peer) string {
 
 // pathOf says whether traffic is direct or carried by somebody else, which is
 // the answer to "why is this link slow".
-func pathOf(p agent.Peer) string {
+func pathOf(p status.Peer) string {
 	if !p.Relayed() {
 		return "direct"
 	}
 	return "relay " + strings.Join(p.RelaysToMe, ",")
 }
 
-func certAge(p agent.Peer) string {
+func certAge(p status.Peer) string {
 	if p.CertNotAfter.IsZero() {
 		return "—"
 	}

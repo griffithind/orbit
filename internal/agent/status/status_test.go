@@ -1,4 +1,4 @@
-package agent
+package status
 
 import (
 	"context"
@@ -31,7 +31,7 @@ func serveForTest(t *testing.T, rep Report) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	path := SocketPath(dir)
-	srv := &StatusServer{
+	srv := &Server{
 		Path:   path,
 		Report: func(context.Context) Report { return rep },
 	}
@@ -75,7 +75,7 @@ func servePeersForTest(t *testing.T, peers func(context.Context, string) (PeerRe
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	path := SocketPath(dir)
-	srv := &StatusServer{
+	srv := &Server{
 		Path:   path,
 		Report: func(context.Context) Report { return Report{} },
 		Peers:  peers,
@@ -209,7 +209,7 @@ func TestStatusRoundTrip(t *testing.T) {
 	}
 	path := serveForTest(t, want)
 
-	got, err := FetchStatus(context.Background(), path)
+	got, err := Fetch(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestALiveSocketIsNotStolen(t *testing.T) {
 
 	// And the live one still answers, which is the property the refusal exists
 	// to protect: a failed second bind must not have unlinked the first.
-	if _, err := FetchStatus(context.Background(), path); err != nil {
+	if _, err := Fetch(context.Background(), path); err != nil {
 		t.Errorf("the original socket stopped working after a second bind attempt: %v", err)
 	}
 }
@@ -297,7 +297,7 @@ func TestFetchStatusWithNoAgent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
-	_, err = FetchStatus(context.Background(), SocketPath(dir))
+	_, err = Fetch(context.Background(), SocketPath(dir))
 	if !errors.Is(err, ErrNoAgent) {
 		t.Errorf("got %v, want ErrNoAgent — the caller cannot say "+
 			"'the agent is not running' without it", err)

@@ -53,6 +53,7 @@ import (
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/hostcfg"
 	"github.com/griffithind/orbit/internal/agent/paths"
+	"github.com/griffithind/orbit/internal/agent/status"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/version"
 )
@@ -286,14 +287,14 @@ func runCmd(args []string) error {
 	// A failure to serve it is logged and nothing more. Diagnostics are worth
 	// having; they are not worth taking a host's overlays down for.
 	if !*once {
-		srv := &agent.StatusServer{
-			Path:   agent.SocketPath(socketRoot(df, *root)),
+		srv := &status.Server{
+			Path:   status.SocketPath(socketRoot(df, *root)),
 			Log:    log,
-			Report: func(ctx context.Context) agent.Report { return report(ctx, *root, sup.slots()) },
-			Peers: func(ctx context.Context, network string) (agent.PeerReport, error) {
+			Report: func(ctx context.Context) status.Report { return report(ctx, *root, sup.slots()) },
+			Peers: func(ctx context.Context, network string) (status.PeerReport, error) {
 				return peerReport(ctx, network, sup.slots())
 			},
-			Explain: func(ctx context.Context, network string, req agent.ExplainRequest) (agent.Explanation, error) {
+			Explain: func(ctx context.Context, network string, req status.ExplainRequest) (status.Explanation, error) {
 				return explain(network, req, sup.slots())
 			},
 		}
@@ -456,7 +457,7 @@ func (s *netSlot) setError(err error) {
 	s.nl, s.err = nil, err
 }
 
-func (s *netSlot) status(ctx context.Context) agent.NetworkStatus {
+func (s *netSlot) status(ctx context.Context) status.NetworkStatus {
 	s.mu.Lock()
 	nl, err := s.nl, s.err
 	s.mu.Unlock()
@@ -464,20 +465,20 @@ func (s *netSlot) status(ctx context.Context) agent.NetworkStatus {
 	if nl != nil {
 		return nl.status(ctx)
 	}
-	st := agent.NetworkStatus{Network: filepath.Base(s.dir), Dir: s.dir}
+	st := status.NetworkStatus{Network: filepath.Base(s.dir), Dir: s.dir}
 	if err != nil {
 		st.Error = err.Error()
 	}
 	return st
 }
 
-func report(ctx context.Context, root string, slots []*netSlot) agent.Report {
-	rep := agent.Report{
+func report(ctx context.Context, root string, slots []*netSlot) status.Report {
+	rep := status.Report{
 		Version:  version.Version,
 		Root:     root,
 		PID:      os.Getpid(),
 		Started:  processStart,
-		Networks: make([]agent.NetworkStatus, 0, len(slots)),
+		Networks: make([]status.NetworkStatus, 0, len(slots)),
 	}
 	for _, s := range slots {
 		rep.Networks = append(rep.Networks, s.status(ctx))
@@ -494,7 +495,7 @@ var processStart = time.Now()
 // A network that exists but has not come up answers with Running false rather
 // than 404: the host HAS joined it, and telling an operator it does not exist
 // would send them looking for a typo instead of at the reason it is down.
-func peerReport(ctx context.Context, network string, slots []*netSlot) (agent.PeerReport, error) {
+func peerReport(ctx context.Context, network string, slots []*netSlot) (status.PeerReport, error) {
 	for _, s := range slots {
 		if filepath.Base(s.dir) != network {
 			continue
@@ -503,7 +504,7 @@ func peerReport(ctx context.Context, network string, slots []*netSlot) (agent.Pe
 		nl := s.nl
 		s.mu.Unlock()
 
-		rep := agent.PeerReport{Network: network, Established: []agent.Peer{}}
+		rep := status.PeerReport{Network: network, Established: []status.Peer{}}
 		if nl == nil {
 			rep.Detail = "this network has not started"
 			return rep, nil
@@ -524,11 +525,11 @@ func peerReport(ctx context.Context, network string, slots []*netSlot) (agent.Pe
 		rep.Established, rep.Pending = established, pending
 		return rep, nil
 	}
-	return agent.PeerReport{}, fmt.Errorf("%w: %s", agent.ErrUnknownNetwork, network)
+	return status.PeerReport{}, fmt.Errorf("%w: %s", status.ErrUnknownNetwork, network)
 }
 
 // explain answers a reachability question for one network.
-func explain(network string, req agent.ExplainRequest, slots []*netSlot) (agent.Explanation, error) {
+func explain(network string, req status.ExplainRequest, slots []*netSlot) (status.Explanation, error) {
 	for _, s := range slots {
 		if filepath.Base(s.dir) != network {
 			continue
@@ -541,12 +542,12 @@ func explain(network string, req agent.ExplainRequest, slots []*netSlot) (agent.
 			// Joined but not started. Not a 404 — the network exists — and not
 			// an explanation either, because the rules that would answer it are
 			// whatever the unreadable directory holds.
-			return agent.Explanation{Network: network},
+			return status.Explanation{Network: network},
 				fmt.Errorf("%s has not started; `orbit status` has the reason", network)
 		}
 		return agent.Explain(nl.engine, nl.loop.Layout, req)
 	}
-	return agent.Explanation{}, fmt.Errorf("%w: %s", agent.ErrUnknownNetwork, network)
+	return status.Explanation{}, fmt.Errorf("%w: %s", status.ErrUnknownNetwork, network)
 }
 
 // setupBackoff bounds how fast a network that cannot be set up is retried.
@@ -638,11 +639,11 @@ type networkLoop struct {
 // make a slow control plane block the diagnostic command that exists to
 // report on it. Reading the file is also the more honest answer — it is what
 // survives a restart, and it is what the control plane was last told.
-func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
+func (n *networkLoop) status(ctx context.Context) status.NetworkStatus {
 	lastPoll, lastErr := n.loop.LastPoll()
 
 	layout := n.loop.Layout
-	out := agent.NetworkStatus{
+	out := status.NetworkStatus{
 		Network:  layout.Network,
 		Dir:      layout.Dir,
 		Ready:    true,
@@ -668,11 +669,11 @@ func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
 	}
 
 	if s, err := n.engine.Status(ctx); err == nil {
-		out.Nebula = agent.NebulaStatus{
+		out.Nebula = status.NebulaStatus{
 			Known: s.Known, Running: s.Running, Instance: s.Instance, Detail: s.Detail,
 		}
 	}
-	if cs, err := agent.ReadCertStatus(layout.Paths.Cert); err == nil {
+	if cs, err := status.ReadCertStatus(layout.Paths.Cert); err == nil {
 		out.Certificate = cs
 	}
 
@@ -680,7 +681,7 @@ func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
 	// configuration. Status showing instructions that failed verification would
 	// tell an operator the machine was told something it will never act on.
 	if cfg, err := n.loop.VerifiedConfig(); err == nil {
-		if hs, err := agent.HostStatusFromConfig(cfg); err == nil && !hs.Empty() {
+		if hs, err := status.HostStatusFromConfig(cfg); err == nil && !hs.Empty() {
 			out.Host = &hs
 		}
 	}

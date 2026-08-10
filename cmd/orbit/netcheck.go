@@ -15,6 +15,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/paths"
+	"github.com/griffithind/orbit/internal/agent/status"
 )
 
 // `orbit netcheck` — can this machine do the things it needs to do?
@@ -82,9 +83,9 @@ func netcheckCmd(ctx context.Context, args []string) error {
 	// The agent socket first, because it is also where the control plane URL
 	// comes from when one was not given. Its absence is not a failure: netcheck
 	// is meant to work before an agent exists.
-	sockPath := agent.SocketPath(*root)
+	sockPath := status.SocketPath(*root)
 	statusCtx, cancel := context.WithTimeout(ctx, *timeout)
-	status, statusErr := agent.FetchStatus(statusCtx, sockPath)
+	status, statusErr := status.Fetch(statusCtx, sockPath)
 	cancel()
 	switch {
 	case statusErr == nil:

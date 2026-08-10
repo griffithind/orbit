@@ -11,6 +11,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/paths"
+	"github.com/griffithind/orbit/internal/agent/status"
 )
 
 // `orbit status` — what this host is doing, on every network it has joined.
@@ -35,15 +36,15 @@ func statusCmd(ctx context.Context, args []string) error {
 		return err
 	}
 
-	path := agent.SocketPath(*root)
-	rep, err := agent.FetchStatus(ctx, path)
+	path := status.SocketPath(*root)
+	rep, err := status.Fetch(ctx, path)
 	if err != nil {
 		// The command exists to diagnose a broken host, so its own failure has
 		// to be legible: a dial error naming a socket path is not an answer to
 		// "is the agent running". This one adds the next step, which the shared
 		// handler cannot, because only this command is the one an operator
 		// reaches for first.
-		if errors.Is(err, agent.ErrNoAgent) {
+		if errors.Is(err, status.ErrNoAgent) {
 			return fail(exitUnreachable,
 				"the orbit agent is not running (nothing is listening on %s)\n\n"+
 					"  systemctl status orbit-agent                         # linux\n"+
@@ -64,7 +65,7 @@ func statusCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
-func printStatus(rep agent.Report) {
+func printStatus(rep status.Report) {
 	r := newRenderer()
 
 	started := ""
@@ -86,7 +87,7 @@ func printStatus(rep agent.Report) {
 	}
 }
 
-func printNetwork(r renderer, n agent.NetworkStatus) {
+func printNetwork(r renderer, n status.NetworkStatus) {
 	// A network that never came up is the most important thing on the screen,
 	// so it is loud and it carries the reason rather than a status word that
 	// sends the reader to the logs for it.
@@ -178,7 +179,7 @@ func printNetwork(r renderer, n agent.NetworkStatus) {
 }
 
 // dataPlane is the headline: is nebula up.
-func dataPlane(r renderer, n agent.NetworkStatus) string {
+func dataPlane(r renderer, n status.NetworkStatus) string {
 	switch {
 	case !n.Nebula.Known:
 		// Not the same as down. Saying "down" here would report every host

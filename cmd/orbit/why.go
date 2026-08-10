@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/paths"
+	"github.com/griffithind/orbit/internal/agent/status"
 	"github.com/griffithind/orbit/internal/fwmatch"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -77,19 +77,19 @@ func whyCmd(ctx context.Context, args []string) error {
 
 // whyLocal asks the agent on this machine.
 func whyLocal(ctx context.Context, peer, root, network, proto, port string, asJSON bool) error {
-	path := agent.SocketPath(root)
+	path := status.SocketPath(root)
 	slug, err := resolveNetwork(ctx, path, network)
 	if err != nil {
 		return err
 	}
 
-	ex, err := agent.FetchExplain(ctx, path, slug, agent.ExplainRequest{
+	ex, err := status.FetchExplain(ctx, path, slug, status.ExplainRequest{
 		Peer: peer, Proto: proto, Port: port,
 	})
 	if err != nil {
-		if errors.Is(err, agent.ErrBadQuestion) {
+		if errors.Is(err, status.ErrBadQuestion) {
 			return usageErrorf("%s", strings.TrimPrefix(err.Error(),
-				agent.ErrBadQuestion.Error()+": "))
+				status.ErrBadQuestion.Error()+": "))
 		}
 		return agentError(err, path)
 	}
@@ -155,7 +155,7 @@ func printReachability(r renderer, v wire.ReachabilityResponse) {
 		"and whether a tunnel is up, is `orbit status` and `orbit why` on the hosts.\n")
 }
 
-func printWhy(ex agent.Explanation) {
+func printWhy(ex status.Explanation) {
 	r := newRenderer()
 
 	target := ex.PeerResolved
@@ -184,7 +184,7 @@ func printWhy(ex agent.Explanation) {
 			"token is available.")
 }
 
-func printIdentity(r renderer, ex agent.Explanation) {
+func printIdentity(r renderer, ex status.Explanation) {
 	if c := ex.Certificate; c == nil {
 		layer(r, "identity", bad, "no certificate on disk")
 	} else if ex.CertExpired {
@@ -211,7 +211,7 @@ func printIdentity(r renderer, ex agent.Explanation) {
 	}
 }
 
-func printPath(r renderer, ex agent.Explanation) {
+func printPath(r renderer, ex status.Explanation) {
 	switch {
 	case !ex.Running:
 		detail := ex.Detail
@@ -236,7 +236,7 @@ func printPath(r renderer, ex agent.Explanation) {
 	}
 }
 
-func printPolicy(r renderer, ex agent.Explanation) {
+func printPolicy(r renderer, ex status.Explanation) {
 	printDecision(r, "outbound", ex.Outbound, "to")
 	printDecision(r, "inbound", ex.Inbound, "from")
 }
@@ -297,7 +297,7 @@ func layer(r renderer, label string, m mark, text string) {
 
 // peerLabel is what to call the peer in advice: its name when there is one,
 // since that is what the control plane knows it by, and its address otherwise.
-func peerLabel(ex agent.Explanation) string {
+func peerLabel(ex status.Explanation) string {
 	if ex.PeerName != "" {
 		return ex.PeerName
 	}
