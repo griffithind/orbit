@@ -17,6 +17,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/enroll"
@@ -127,7 +128,7 @@ func (h *harness) enrollExisting(t *testing.T, ts *httptest.Server, membershipID
 
 	dir := t.TempDir()
 	applier := &agent.Applier{
-		Layout:   agent.DefaultLayout(dir),
+		Layout:   paths.DefaultLayout(dir),
 		Reloader: agent.NoopReloader{},
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/hostcfg"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -32,7 +32,7 @@ func TestAnExitNodeReachesOnlyTheMachineThatChoseIt(t *testing.T) {
 
 	// A machine that has NOT chosen it must not receive it.
 	bystander := h.createAndEnroll(t, ts, "bystander", "10.42.95.8", false, false, nil)
-	cfg := readFile(t, agent.DefaultLayout(bystander.dir).ConfigPath())
+	cfg := readFile(t, paths.DefaultLayout(bystander.dir).ConfigPath())
 	if strings.Contains(cfg, "0.0.0.0/1") || strings.Contains(cfg, "0.0.0.0/0") {
 		t.Fatalf("a machine that chose no exit node was given a default route:\n%s", cfg)
 	}
@@ -116,7 +116,7 @@ func TestAGatewayIsToldToForwardAndNAT(t *testing.T) {
 	// matters — a feature existing must not quietly make every machine a
 	// gateway.
 	plain := h.createAndEnroll(t, ts, "plain", "10.42.96.9", false, false, nil)
-	pcfg := readFile(t, agent.DefaultLayout(plain.dir).ConfigPath())
+	pcfg := readFile(t, paths.DefaultLayout(plain.dir).ConfigPath())
 	for _, instruction := range []string{"forward:", "masquerade:", "exit_node:"} {
 		if strings.Contains(pcfg, instruction) {
 			t.Errorf("a non-gateway was given %q:\n%s", instruction, pcfg)

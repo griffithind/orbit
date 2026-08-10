@@ -16,6 +16,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/sched"
 	"github.com/griffithind/orbit/internal/secrets"
@@ -241,7 +242,7 @@ func TestFullRotation(t *testing.T) {
 
 	// The host renews and lands on CA₂.
 	st, _ := agent.ReadState(host.dir)
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	loop := &agent.Loop{
 		Client: xffClient(t, ts.URL, host.addr),
 		Applier: &agent.Applier{

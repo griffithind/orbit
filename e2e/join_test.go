@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/store"
@@ -42,7 +43,7 @@ func TestJoinEndToEnd(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	root := t.TempDir()
-	id, err := device.LoadOrCreate(agent.DeviceKeyPath(root))
+	id, err := device.LoadOrCreate(paths.DeviceKeyPath(root))
 	if err != nil {
 		t.Fatalf("device key: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestJoinEndToEnd(t *testing.T) {
 	// Real files, the same ones enrollment produces.
 	dir := t.TempDir()
 	applier := &agent.Applier{
-		Layout:   agent.DefaultLayout(dir),
+		Layout:   paths.DefaultLayout(dir),
 		Reloader: agent.NoopReloader{},
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

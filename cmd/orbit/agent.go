@@ -52,6 +52,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/hostcfg"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/version"
 )
@@ -68,8 +69,8 @@ type dirFlags struct {
 
 func addDirFlags(fs *flag.FlagSet) *dirFlags {
 	return &dirFlags{
-		dir:     fs.String("dir", "", "per-network directory the agent owns: config, certificate, key, state, rollback copy (default "+agent.DefaultRoot+"/<network>)"),
-		network: fs.String("network", "", "network slug; shorthand for -dir "+agent.DefaultRoot+"/<slug>"),
+		dir:     fs.String("dir", "", "per-network directory the agent owns: config, certificate, key, state, rollback copy (default "+paths.DefaultRoot+"/<network>)"),
+		network: fs.String("network", "", "network slug; shorthand for -dir "+paths.DefaultRoot+"/<slug>"),
 	}
 }
 
@@ -94,24 +95,24 @@ func (d *dirFlags) networkRef() string {
 	return ""
 }
 
-func (d *dirFlags) layout() (agent.Layout, error) {
+func (d *dirFlags) layout() (paths.Layout, error) {
 	switch {
 	case *d.dir != "" && *d.network != "":
 		// Only an error when they disagree: a unit that passes both for
 		// readability is fine, one that passes two different things is not.
-		if filepath.Clean(*d.dir) != agent.DirFor(*d.network) {
-			return agent.Layout{}, fmt.Errorf("-dir %q and -network %q disagree; pass one or the other", *d.dir, *d.network)
+		if filepath.Clean(*d.dir) != paths.DirFor(*d.network) {
+			return paths.Layout{}, fmt.Errorf("-dir %q and -network %q disagree; pass one or the other", *d.dir, *d.network)
 		}
 	case *d.network != "":
-		if err := agent.ValidateNetwork(*d.network); err != nil {
-			return agent.Layout{}, err
+		if err := paths.ValidateNetwork(*d.network); err != nil {
+			return paths.Layout{}, err
 		}
-		*d.dir = agent.DirFor(*d.network)
+		*d.dir = paths.DirFor(*d.network)
 	case *d.dir == "":
-		return agent.Layout{}, errors.New("one of -dir or -network is required; " +
+		return paths.Layout{}, errors.New("one of -dir or -network is required; " +
 			"an agent manages exactly one network and has no default")
 	}
-	return agent.DefaultLayout(filepath.Clean(*d.dir)), nil
+	return paths.DefaultLayout(filepath.Clean(*d.dir)), nil
 }
 
 func newLogger() *slog.Logger {
@@ -227,7 +228,7 @@ func runCmd(args []string) error {
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		interval  = fs.Duration("interval", time.Minute, "poll interval")
 		once      = fs.Bool("once", false, "run one iteration and exit")
-		root      = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
+		root      = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
 	)
 	df := addDirFlags(fs)
 	_ = fs.Parse(args)
@@ -687,7 +688,7 @@ func (n *networkLoop) status(ctx context.Context) agent.NetworkStatus {
 }
 
 func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL string, log *slog.Logger) (*networkLoop, error) {
-	layout := agent.DefaultLayout(dir)
+	layout := paths.DefaultLayout(dir)
 	st, err := agent.ReadState(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read agent state (has this host enrolled?): %w", err)
@@ -801,7 +802,7 @@ func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool
 func installCmd(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	var (
-		root      = fs.String("root", agent.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
+		root      = fs.String("root", paths.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
 		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
 		dryRun    = fs.Bool("dry-run", false, "print what would be written and installed, and change nothing")
 		noStart   = fs.Bool("no-start", false, "write the service definition but do not enable or start it")
@@ -836,7 +837,7 @@ func installCmd(args []string) error {
 	// never expiring, and the same key for every network it will ever join. An
 	// operator can read the fingerprint off this output and recognise the
 	// machine in the authorization queue before it has joined anything.
-	id, err := device.LoadOrCreate(agent.DeviceKeyPath(*root))
+	id, err := device.LoadOrCreate(paths.DeviceKeyPath(*root))
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
 	}
@@ -892,14 +893,14 @@ func uninstallCmd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve this binary's path: %w", err)
 	}
-	plan, err := agent.PlanService(agent.DefaultRoot, binary, "")
+	plan, err := agent.PlanService(paths.DefaultRoot, binary, "")
 	if err != nil {
 		return err
 	}
 
 	// Other networks on this host share the template unit, so say so before
 	// touching it rather than after.
-	others, err := agent.EnabledInstances(agent.DefaultRoot, slug)
+	others, err := agent.EnabledInstances(paths.DefaultRoot, slug)
 	if err != nil {
 		return err
 	}

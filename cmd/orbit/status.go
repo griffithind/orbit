@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // `orbit status` — what this host is doing, on every network it has joined.
@@ -27,7 +28,7 @@ import (
 func statusCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	var (
-		root   = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
+		root   = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
 		asJSON = fs.Bool("json", false, "emit the raw report")
 	)
 	if err := fs.Parse(args); err != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -99,7 +100,7 @@ func TestReservedLighthouseNeedsNoFollowUp(t *testing.T) {
 
 	// And the point of all of it: another machine is told to use it.
 	other := h.createAndEnroll(t, ts, "ordinary", "10.42.71.9", false, false, nil)
-	cfg := readFile(t, agent.DefaultLayout(other.dir).ConfigPath())
+	cfg := readFile(t, paths.DefaultLayout(other.dir).ConfigPath())
 	if !strings.Contains(cfg, want) {
 		t.Errorf("the fleet was not told about the reserved lighthouse at %s:\n%s", want, cfg)
 	}

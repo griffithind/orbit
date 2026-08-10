@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"testing"
+
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // ONE service, every network.
@@ -29,7 +31,7 @@ func execStartOf(t *testing.T, unit string) string {
 }
 
 func TestSystemdExecStartReconstructsTheCommand(t *testing.T) {
-	p := systemdPlan("/usr/local/bin/orbit", []string{"agent", "run"}, DefaultRoot)
+	p := systemdPlan("/usr/local/bin/orbit", []string{"agent", "run"}, paths.DefaultRoot)
 
 	want := "/usr/local/bin/orbit agent run"
 	if got := execStartOf(t, p.Contents); got != want {
@@ -42,7 +44,7 @@ func TestSystemdExecStartReconstructsTheCommand(t *testing.T) {
 // changes and then silently drops or duplicates a flag.
 func TestSystemdExecStartSurvivesAnExtraArgument(t *testing.T) {
 	p := systemdPlan("/usr/local/bin/orbit",
-		[]string{"agent", "run", "-verify-url", "http://10.42.0.1:8443/agent/v1/state"}, DefaultRoot)
+		[]string{"agent", "run", "-verify-url", "http://10.42.0.1:8443/agent/v1/state"}, paths.DefaultRoot)
 
 	exec := execStartOf(t, p.Contents)
 	want := "/usr/local/bin/orbit agent run -verify-url http://10.42.0.1:8443/agent/v1/state"
@@ -67,8 +69,8 @@ func TestTheServiceDefinitionNamesNoNetwork(t *testing.T) {
 	// would leave one renderer untested on any given machine — and a plist has
 	// no ExecStart to assert about.
 	args := []string{"agent", "run"}
-	a := systemdPlan("/usr/local/bin/orbit", args, DefaultRoot)
-	b := systemdPlan("/usr/local/bin/orbit", args, DefaultRoot)
+	a := systemdPlan("/usr/local/bin/orbit", args, paths.DefaultRoot)
+	b := systemdPlan("/usr/local/bin/orbit", args, paths.DefaultRoot)
 
 	if a.Path != b.Path || a.Name != b.Name || a.Contents != b.Contents {
 		t.Error("the service definition varies between installs, so one network's " +
@@ -125,7 +127,7 @@ func TestNonDefaultRootReachesTheService(t *testing.T) {
 }
 
 func TestPlanServiceNeedsABinary(t *testing.T) {
-	if _, err := PlanService(DefaultRoot, "", ""); err == nil {
+	if _, err := PlanService(paths.DefaultRoot, "", ""); err == nil {
 		t.Error("an empty binary path produced a unit that could never start")
 	}
 }
@@ -134,7 +136,7 @@ func TestPlanServiceNeedsABinary(t *testing.T) {
 // PlanService is what decides -root belongs on the command line at all, and it
 // omits it for the default so the common unit stays free of paths.
 func TestPlanServiceBuildsTheRootArgument(t *testing.T) {
-	def, err := PlanService(DefaultRoot, "/usr/local/bin/orbit", "")
+	def, err := PlanService(paths.DefaultRoot, "/usr/local/bin/orbit", "")
 	if err != nil {
 		t.Fatal(err)
 	}

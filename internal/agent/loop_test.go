@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -99,7 +100,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func testLoop(t *testing.T, baseURL string) *Loop {
 	t.Helper()
 	dir := t.TempDir()
-	layout := DefaultLayout(dir)
+	layout := paths.DefaultLayout(dir)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &Loop{
 		Client:  NewClient(baseURL),
@@ -119,7 +120,7 @@ func writePreviousGeneration(t *testing.T, l *Loop) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{CAName, CertName, KeyName, l.Layout.ConfigName()} {
+	for _, name := range []string{paths.CAName, paths.CertName, paths.KeyName, l.Layout.ConfigName()} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("previous "+name), 0o600); err != nil {
 			t.Fatal(err)
 		}

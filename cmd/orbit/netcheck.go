@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // `orbit netcheck` — can this machine do the things it needs to do?
@@ -61,7 +62,7 @@ type netcheckReport struct {
 func netcheckCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("netcheck", flag.ContinueOnError)
 	var (
-		root    = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
+		root    = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
 		rawURL  = fs.String("url", "", "control plane URL to test; defaults to what this host enrolled against")
 		asJSON  = fs.Bool("json", false, "emit the report as JSON")
 		timeout = fs.Duration("timeout", 5*time.Second, "per-check timeout")

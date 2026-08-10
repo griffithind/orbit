@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/fwmatch"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -50,7 +51,7 @@ func whyCmd(ctx context.Context, args []string) error {
 	var o options
 	o.bind(fs)
 	var (
-		root  = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network (local form)")
+		root  = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network (local form)")
 		proto = fs.String("proto", "any", "any, tcp, udp or icmp")
 		port  = fs.String("port", "any", "destination port, or any")
 	)

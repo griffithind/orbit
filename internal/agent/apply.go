@@ -32,6 +32,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -63,7 +64,7 @@ type Reloader interface {
 
 // Applier writes control-plane state to disk and delivers it to nebula.
 type Applier struct {
-	Layout   Layout
+	Layout   paths.Layout
 	Reloader Reloader
 
 	// Supervisor restarts nebula and reports whether it is running.
@@ -193,13 +194,13 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 		return nil
 	}
 
-	if err := stage(CAName, m.CABundle, 0o644); err != nil {
+	if err := stage(paths.CAName, m.CABundle, 0o644); err != nil {
 		return err
 	}
-	if err := stage(CertName, m.Certificate, 0o644); err != nil {
+	if err := stage(paths.CertName, m.Certificate, 0o644); err != nil {
 		return err
 	}
-	if err := stage(KeyName, m.PrivateKey, 0o600); err != nil {
+	if err := stage(paths.KeyName, m.PrivateKey, 0o600); err != nil {
 		return err
 	}
 	if err := stage(a.Layout.ConfigName(), m.Config, 0o644); err != nil {
@@ -215,10 +216,10 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 		if err != nil {
 			return fmt.Errorf("encode config signature: %w", err)
 		}
-		if err := stage(SignedConfigName, signedConfig, 0o644); err != nil {
+		if err := stage(paths.SignedConfigName, signedConfig, 0o644); err != nil {
 			return err
 		}
-		if err := stage(SigName, string(sigJSON), 0o644); err != nil {
+		if err := stage(paths.SigName, string(sigJSON), 0o644); err != nil {
 			return err
 		}
 	}
@@ -250,7 +251,7 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 			"network", a.Layout.Network, "supervisor", a.Supervisor.Describe())
 	}
 
-	targets := a.Layout.targets()
+	targets := a.Layout.Targets()
 	backup, err := a.backup(targets)
 	if err != nil {
 		return fmt.Errorf("back up current generation: %w", err)
@@ -277,7 +278,7 @@ func (a *Applier) Apply(ctx context.Context, m Material) (err error) {
 	// Install in generation() order: certificate material first, configuration
 	// last, so a crash mid-install leaves nebula reading an old config that
 	// still points at files that exist.
-	for _, f := range a.Layout.generation() {
+	for _, f := range a.Layout.Generation() {
 		src, ok := staged[f.Name]
 		if !ok {
 			continue // not part of this generation, e.g. an unchanged key
@@ -523,9 +524,9 @@ func (a *Applier) localize(cfg string) string {
 func (a *Applier) validateStaged(ctx context.Context, staged map[string]string, m Material) error {
 	cfg := m.Config
 	for _, f := range []struct{ live, name string }{
-		{a.Layout.Paths.CA, CAName},
-		{a.Layout.Paths.Cert, CertName},
-		{a.Layout.Paths.Key, KeyName},
+		{a.Layout.Paths.CA, paths.CAName},
+		{a.Layout.Paths.Cert, paths.CertName},
+		{a.Layout.Paths.Key, paths.KeyName},
 	} {
 		if p, ok := staged[f.name]; ok {
 			cfg = strings.ReplaceAll(cfg, f.live, p)
@@ -681,7 +682,7 @@ func (a *Applier) Revert(ctx context.Context) error {
 		return fmt.Errorf("no previous generation to revert to: %w", err)
 	}
 
-	targets := a.Layout.targets()
+	targets := a.Layout.Targets()
 	backup := map[string]string{}
 	for name := range targets {
 		p := filepath.Join(dir, name)
@@ -720,7 +721,7 @@ func (a *Applier) Revert(ctx context.Context) error {
 
 // revertMode compares the certificate about to be restored with the one running.
 func (a *Applier) revertMode(backup map[string]string) (ApplyMode, error) {
-	prev, ok := backup[CertName]
+	prev, ok := backup[paths.CertName]
 	if !ok {
 		return ModeReload, nil
 	}

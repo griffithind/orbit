@@ -16,6 +16,7 @@ import (
 	"github.com/slackhq/nebula/service"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -89,7 +90,7 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	layout := agent.DefaultLayout(dir)
+	layout := paths.DefaultLayout(dir)
 	applier := &agent.Applier{
 		Layout:   layout,
 		Reloader: agent.NoopReloader{},

@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // fakeSupervisor is a nebula process the test can start, stop, and replace.
@@ -82,7 +84,7 @@ func (f *fakeSupervisor) set(running bool, instance string) {
 
 func testApplier(sup Supervisor) *Applier {
 	return &Applier{
-		Layout:        DefaultLayout("/nonexistent"),
+		Layout:        paths.DefaultLayout("/nonexistent"),
 		Reloader:      NoopReloader{},
 		Supervisor:    sup,
 		RestartSettle: 30 * time.Millisecond,
@@ -161,16 +163,16 @@ func TestUnobservableSupervisorDoesNotFailTheRestart(t *testing.T) {
 
 func TestValidateNetwork(t *testing.T) {
 	for _, ok := range []string{"prod", "a", "staging-2", "0123456789012345678901234567890a"} {
-		if err := ValidateNetwork(ok); err != nil {
-			t.Errorf("ValidateNetwork(%q) = %v, want nil", ok, err)
+		if err := paths.ValidateNetwork(ok); err != nil {
+			t.Errorf("paths.ValidateNetwork(%q) = %v, want nil", ok, err)
 		}
 	}
 	// "." and ".." escape the root, "/" escapes it further, and uppercase or
 	// "@" would confuse a systemd instance name.
 	for _, bad := range []string{"", ".", "..", "a/b", "Prod", "pro_d", "net@1",
 		"01234567890123456789012345678901x"} {
-		if err := ValidateNetwork(bad); err == nil {
-			t.Errorf("ValidateNetwork(%q) = nil, want an error", bad)
+		if err := paths.ValidateNetwork(bad); err == nil {
+			t.Errorf("paths.ValidateNetwork(%q) = nil, want an error", bad)
 		}
 	}
 }
@@ -178,7 +180,7 @@ func TestValidateNetwork(t *testing.T) {
 // TestLayoutPaths pins the contract the control-plane renderer and the systemd
 // units are both written against.
 func TestLayoutPaths(t *testing.T) {
-	auth := DefaultLayout("/var/lib/orbit/prod")
+	auth := paths.DefaultLayout("/var/lib/orbit/prod")
 	if got := auth.ConfigPath(); got != "/var/lib/orbit/prod/nebula.yml" {
 		t.Errorf("config = %q", got)
 	}
@@ -203,7 +205,7 @@ func TestLayoutPaths(t *testing.T) {
 // files nobody wrote.
 func TestLocalizeRewritesWhateverTheServerRendered(t *testing.T) {
 	a := testApplier(nil)
-	a.Layout = DefaultLayout("/opt/orbit/prod")
+	a.Layout = paths.DefaultLayout("/opt/orbit/prod")
 
 	got := a.localize("pki:\n  ca: /somewhere/else/entirely/ca.crt\n" +
 		"  cert: /somewhere/else/entirely/host.crt\n" +
@@ -220,7 +222,7 @@ func TestLocalizeRewritesWhateverTheServerRendered(t *testing.T) {
 func loopWithSupervisor(t *testing.T, sup Supervisor) *Loop {
 	t.Helper()
 	dir := t.TempDir()
-	layout := DefaultLayout(dir)
+	layout := paths.DefaultLayout(dir)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &Loop{
 		Applier: &Applier{Layout: layout, Reloader: NoopReloader{}, Supervisor: sup, Log: log},

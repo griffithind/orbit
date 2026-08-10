@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -93,7 +94,7 @@ func TestAgentSurvivesTheControlPlaneGoingAway(t *testing.T) {
 	// Whatever it had must still be there. An agent that cannot reach the
 	// control plane and responds by discarding its configuration would take the
 	// host off the mesh for the length of the outage.
-	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); err != nil {
+	if _, err := os.Stat(paths.DefaultLayout(dir).ConfigPath()); err != nil {
 		t.Errorf("the configuration was lost during the outage: %v", err)
 	}
 	if _, err := agent.ReadState(dir); err != nil {

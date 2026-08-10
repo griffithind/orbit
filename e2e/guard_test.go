@@ -13,6 +13,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // The unreachable-guard.
@@ -35,7 +36,7 @@ func newLoopWithGuard(t *testing.T, host *enrolledHost, baseURL string, g agent.
 	if err != nil {
 		t.Fatal(err)
 	}
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	loop := &agent.Loop{
 		Client: xffClient(t, baseURL, host.addr),
 		Applier: &agent.Applier{
@@ -89,8 +90,8 @@ func TestGuardRevertsUnconfirmedGeneration(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "guarded", "10.42.4.5", false, false, nil)
 
-	certPath := agent.DefaultLayout(host.dir).Paths.Cert
-	cfgPath := agent.DefaultLayout(host.dir).ConfigPath()
+	certPath := paths.DefaultLayout(host.dir).Paths.Cert
+	cfgPath := paths.DefaultLayout(host.dir).ConfigPath()
 	goodCert := readFile(t, certPath)
 	goodCfg := readFile(t, cfgPath)
 
@@ -110,7 +111,7 @@ func TestGuardRevertsUnconfirmedGeneration(t *testing.T) {
 	}
 
 	// The previous generation must have been captured.
-	prev := filepath.Join(host.dir, agent.PreviousDirName)
+	prev := filepath.Join(host.dir, paths.PreviousDirName)
 	if _, err := os.Stat(prev); err != nil {
 		t.Fatalf("previous generation directory missing: %v", err)
 	}
@@ -136,7 +137,7 @@ func TestGuardQuarantinesTheBadGeneration(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "quarantine", "10.42.4.9", false, false, nil)
 
-	certPath := agent.DefaultLayout(host.dir).Paths.Cert
+	certPath := paths.DefaultLayout(host.dir).Paths.Cert
 	goodCert := readFile(t, certPath)
 
 	loop := newLoopWithGuard(t, host, ts.URL, agent.GuardPolicy{
@@ -173,7 +174,7 @@ func TestGuardDoesNotRevertAConfirmedGeneration(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "confirmed", "10.42.4.11", false, false, nil)
 
-	certPath := agent.DefaultLayout(host.dir).Paths.Cert
+	certPath := paths.DefaultLayout(host.dir).Paths.Cert
 
 	// Driven, not slept. With a real clock this test asserts that a tick
 	// completes within ConfirmWithin, which is a statement about the machine
@@ -213,7 +214,7 @@ func TestGuardDisabled(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "unguarded", "10.42.4.13", false, false, nil)
 
-	certPath := agent.DefaultLayout(host.dir).Paths.Cert
+	certPath := paths.DefaultLayout(host.dir).Paths.Cert
 
 	loop := newLoopWithGuard(t, host, ts.URL, agent.GuardPolicy{
 		ConfirmWithin: 10 * time.Millisecond,
@@ -258,7 +259,7 @@ func TestApplyDoesNotLeakBackupDirectories(t *testing.T) {
 	var scratch []string
 	for _, e := range entries {
 		n := e.Name()
-		if n == agent.PreviousDirName {
+		if n == paths.PreviousDirName {
 			continue // exactly one, expected
 		}
 		if len(n) > 6 && n[:7] == ".orbit-" {

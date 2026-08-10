@@ -15,6 +15,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent/hostcfg"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/agent/posture"
 	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/wire"
@@ -201,7 +202,7 @@ func equalStrings(a, b []string) bool {
 }
 
 // StatePath is the agent's state file inside a per-network directory.
-func StatePath(dir string) string { return filepath.Join(dir, StateFileName) }
+func StatePath(dir string) string { return filepath.Join(dir, paths.StateFileName) }
 
 func WriteState(dir string, s State) error {
 	b, err := json.MarshalIndent(s, "", "  ")
@@ -238,7 +239,7 @@ type Loop struct {
 	Client  *Client
 	Applier *Applier
 	Policy  RenewalPolicy
-	Layout  Layout
+	Layout  paths.Layout
 
 	// Curve for newly generated keys. Must match the network.
 	Curve cert.Curve

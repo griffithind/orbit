@@ -34,6 +34,7 @@ import (
 	"github.com/slackhq/nebula/service"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/db"
@@ -616,7 +617,7 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 
 	dir := t.TempDir()
 	applier := &agent.Applier{
-		Layout:   agent.DefaultLayout(dir),
+		Layout:   paths.DefaultLayout(dir),
 		Reloader: agent.NoopReloader{},
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -683,7 +684,7 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 
 	// The client's config must point at the lighthouse; the lighthouse's must
 	// not point at itself.
-	clientCfg := readFile(t, agent.DefaultLayout(client.dir).ConfigPath())
+	clientCfg := readFile(t, paths.DefaultLayout(client.dir).ConfigPath())
 	if !strings.Contains(clientCfg, "10.42.0.1") {
 		t.Fatalf("client config does not reference the lighthouse:\n%s", clientCfg)
 	}
@@ -691,7 +692,7 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 		t.Fatalf("client config lacks the lighthouse underlay address:\n%s", clientCfg)
 	}
 
-	lhCfg := readFile(t, agent.DefaultLayout(lh.dir).ConfigPath())
+	lhCfg := readFile(t, paths.DefaultLayout(lh.dir).ConfigPath())
 	if strings.Contains(lhCfg, "memberships:\n        - ") {
 		t.Errorf("lighthouse was told to query a lighthouse:\n%s", lhCfg)
 	}
@@ -787,7 +788,7 @@ func bootNebula(t *testing.T, dir string, addr netip.Addr) (*nebulaNode, error) 
 	t.Helper()
 
 	c := config.NewC(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := c.Load(agent.DefaultLayout(dir).ConfigPath()); err != nil {
+	if err := c.Load(paths.DefaultLayout(dir).ConfigPath()); err != nil {
 		return nil, fmt.Errorf("load config from %s: %w", dir, err)
 	}
 
@@ -971,7 +972,7 @@ func badMaterial() agent.Material {
 func TestApplyRejectsBadConfig(t *testing.T) {
 	dir := t.TempDir()
 	applier := &agent.Applier{
-		Layout:       agent.DefaultLayout(dir),
+		Layout:       paths.DefaultLayout(dir),
 		Reloader:     agent.NoopReloader{},
 		NebulaBinary: stubNebula(t, 1, "invalid pki.ca: open /nonexistent/ca.crt: no such file"),
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -991,7 +992,7 @@ func TestApplyRejectsBadConfig(t *testing.T) {
 	}
 
 	// Nothing may have been installed.
-	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(paths.DefaultLayout(dir).ConfigPath()); !os.IsNotExist(err) {
 		t.Error("a rejected configuration was installed anyway")
 	}
 }
@@ -1001,7 +1002,7 @@ func TestApplyRejectsBadConfig(t *testing.T) {
 func TestApplyProceedsWhenNebulaAccepts(t *testing.T) {
 	dir := t.TempDir()
 	applier := &agent.Applier{
-		Layout:       agent.DefaultLayout(dir),
+		Layout:       paths.DefaultLayout(dir),
 		Reloader:     agent.NoopReloader{},
 		NebulaBinary: stubNebula(t, 0, ""),
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1010,7 +1011,7 @@ func TestApplyProceedsWhenNebulaAccepts(t *testing.T) {
 	if err := applier.Apply(context.Background(), badMaterial()); err != nil {
 		t.Fatalf("nebula accepted the configuration and the agent refused it anyway: %v", err)
 	}
-	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); err != nil {
+	if _, err := os.Stat(paths.DefaultLayout(dir).ConfigPath()); err != nil {
 		t.Errorf("an accepted configuration was not installed: %v", err)
 	}
 }
@@ -1028,7 +1029,7 @@ func TestApplyProceedsWhenNebulaAccepts(t *testing.T) {
 func TestApplyProceedsWhenValidationCannotRun(t *testing.T) {
 	dir := t.TempDir()
 	applier := &agent.Applier{
-		Layout:       agent.DefaultLayout(dir),
+		Layout:       paths.DefaultLayout(dir),
 		Reloader:     agent.NoopReloader{},
 		NebulaBinary: filepath.Join(t.TempDir(), "no-nebula-here"),
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1039,7 +1040,7 @@ func TestApplyProceedsWhenValidationCannotRun(t *testing.T) {
 			"That host can never converge, and the reason it reports is a "+
 			"configuration problem it never actually observed.", err)
 	}
-	if _, err := os.Stat(agent.DefaultLayout(dir).ConfigPath()); err != nil {
+	if _, err := os.Stat(paths.DefaultLayout(dir).ConfigPath()); err != nil {
 		t.Errorf("nothing was installed: %v", err)
 	}
 }

@@ -27,7 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/slackhq/nebula/cert"
 
-	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/device"
@@ -246,7 +246,7 @@ func serve(args []string) error {
 			"external URL the UI is reached at; required when -ui-addr is not loopback")
 		uiMaxStreams = fs.Int("ui-max-streams", web.DefaultMaxStreams,
 			"cap on concurrent UI event streams")
-		deviceKeyPath = fs.String("device-key", agent.DeviceKeyPath(""),
+		deviceKeyPath = fs.String("device-key", paths.DeviceKeyPath(""),
 			"this control plane's own device identity key; generated on first use. It is a machine on its own network like any other, and this is the key that says which one")
 		metricsAddr = fs.String("metrics-addr", "127.0.0.1:9464",
 			"Prometheus exposition address; empty disables it. Bind to localhost or the overlay: the output is fleet inventory")

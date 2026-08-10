@@ -18,7 +18,7 @@
 cmd/orbit/agent.go dirFlags.networkRef
 internal/agent/client.go Client.Join
 internal/agent/client.go KeypairFromPrivate
-internal/agent/layout.go Layout.StatePath
+internal/agent/paths/paths.go Layout.StatePath
 internal/agent/loop.go Loop.RenewNow
 internal/agent/loop.go Loop.SetClock
 internal/agent/reload.go ReloaderFunc.Describe

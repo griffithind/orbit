@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -126,7 +127,7 @@ func TestAnEditedConfigIsDetected(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "edited", "10.42.80.9", false, false, nil)
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	applier := &agent.Applier{
 		Layout:            layout,
 		Reloader:          agent.NoopReloader{},
@@ -176,7 +177,7 @@ func TestForgingTheSignatureFails(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "forged", "10.42.80.20", false, false, nil)
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	applier := &agent.Applier{
 		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
 		Log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
@@ -235,7 +236,7 @@ func TestEditingTheConfigFileChangesNothing(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "inlined", "10.42.81.4", false, false, nil)
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	applier := &agent.Applier{
 		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -280,7 +281,7 @@ func TestATamperedSignedConfigIsNeverLoaded(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 
 	host := h.createAndEnroll(t, ts, "tampered-source", "10.42.81.9", false, false, nil)
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	applier := &agent.Applier{
 		Layout: layout, Reloader: agent.NoopReloader{}, DisableValidation: true,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),

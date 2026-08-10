@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // `orbit peers` — who this host actually has a tunnel with.
@@ -22,7 +23,7 @@ import (
 func peersCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("peers", flag.ContinueOnError)
 	var (
-		root    = fs.String("root", agent.DefaultRoot, "directory holding one subdirectory per joined network")
+		root    = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
 		network = fs.String("network", "", "which joined network; required only when this host has joined more than one")
 		asJSON  = fs.Bool("json", false, "emit the raw report")
 	)

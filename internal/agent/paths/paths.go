@@ -1,4 +1,4 @@
-package agent
+package paths
 
 import (
 	"fmt"
@@ -191,11 +191,11 @@ func (l Layout) PreviousDir() string { return filepath.Join(l.Dir, PreviousDirNa
 // StatePath is the agent's state file.
 func (l Layout) StatePath() string { return filepath.Join(l.Dir, StateFileName) }
 
-// generation names the files that make up one generation, in the order they are
+// Generation names the files that make up one generation, in the order they are
 // installed. The config goes last so a crash mid-install leaves nebula reading
 // the old config against the old certificate rather than a new config against
 // files that are not there yet.
-func (l Layout) generation() []struct{ Name, Path string } {
+func (l Layout) Generation() []struct{ Name, Path string } {
 	return []struct{ Name, Path string }{
 		{CAName, l.Paths.CA},
 		{CertName, l.Paths.Cert},
@@ -217,9 +217,10 @@ func (l Layout) SignedConfigPath() string { return filepath.Join(l.Dir, SignedCo
 // SigPath is the envelope and signature over SignedConfigPath.
 func (l Layout) SigPath() string { return filepath.Join(l.Dir, SigName) }
 
-func (l Layout) targets() map[string]string {
+// Targets maps each generation file's name to where it is installed.
+func (l Layout) Targets() map[string]string {
 	out := map[string]string{}
-	for _, f := range l.generation() {
+	for _, f := range l.Generation() {
 		out[f.Name] = f.Path
 	}
 	return out

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // scriptedSupervisor stands in for a service manager. take reports whether the
@@ -84,7 +85,7 @@ func (s *scriptedSupervisor) count() int {
 func reAddressed(t *testing.T, h *harness, ts *httptest.Server, host *enrolledHost, name, addr string) agent.Material {
 	t.Helper()
 	other := h.createAndEnroll(t, ts, name, addr, false, false, nil)
-	l, ol := agent.DefaultLayout(host.dir), agent.DefaultLayout(other.dir)
+	l, ol := paths.DefaultLayout(host.dir), paths.DefaultLayout(other.dir)
 	return agent.Material{
 		Config:      readFile(t, l.ConfigPath()),
 		CABundle:    readFile(t, l.Paths.CA),
@@ -93,7 +94,7 @@ func reAddressed(t *testing.T, h *harness, ts *httptest.Server, host *enrolledHo
 	}
 }
 
-func quietApplier(layout agent.Layout, sup agent.Supervisor) *agent.Applier {
+func quietApplier(layout paths.Layout, sup agent.Supervisor) *agent.Applier {
 	return &agent.Applier{
 		Layout:     layout,
 		Reloader:   agent.NoopReloader{},
@@ -115,7 +116,7 @@ func TestAddressChangeRestartsAndIsApplied(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "readdress-ok", "10.42.6.5", false, false, nil)
 
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	before := readFile(t, layout.Paths.Cert)
 	m := reAddressed(t, h, ts, host, "readdress-ok-other", "10.42.6.6")
 
@@ -139,7 +140,7 @@ func TestRestartThatDoesNotTakeIsRolledBack(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "readdress-noop", "10.42.6.9", false, false, nil)
 
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	before := readFile(t, layout.Paths.Cert)
 	m := reAddressed(t, h, ts, host, "readdress-noop-other", "10.42.6.10")
 
@@ -161,7 +162,7 @@ func TestAddressChangeStillRefusedWithoutSupervisor(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "readdress-none", "10.42.6.13", false, false, nil)
 
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	before := readFile(t, layout.Paths.Cert)
 	m := reAddressed(t, h, ts, host, "readdress-none-other", "10.42.6.14")
 
@@ -185,7 +186,7 @@ func TestRevertAcrossAnAddressChangeRestarts(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "revert-readdress", "10.42.6.17", false, false, nil)
 
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	original := readFile(t, layout.Paths.Cert)
 	m := reAddressed(t, h, ts, host, "revert-readdress-other", "10.42.6.18")
 
@@ -217,7 +218,7 @@ func TestAuthoritativeModeInstallsExactlyOneConfigFile(t *testing.T) {
 	ts := h.serve(t, freeUDPPort(t))
 	host := h.createAndEnroll(t, ts, "authoritative", "10.42.6.21", false, false, nil)
 
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	if filepath.Base(layout.ConfigPath()) != "nebula.yml" {
 		t.Fatalf("authoritative config is %q", layout.ConfigPath())
 	}
@@ -248,8 +249,8 @@ func TestPerNetworkDirectoriesShareNothing(t *testing.T) {
 	for _, net := range []struct{ slug, addr string }{{"prod", "10.42.6.29"}, {"staging", "10.42.6.30"}} {
 		src := h.createAndEnroll(t, ts, "multi-"+net.slug, net.addr, false, false, nil)
 		dir := filepath.Join(root, net.slug)
-		layout := agent.DefaultLayout(dir)
-		s := agent.DefaultLayout(src.dir)
+		layout := paths.DefaultLayout(dir)
+		s := paths.DefaultLayout(src.dir)
 		if err := quietApplier(layout, nil).Apply(context.Background(), agent.Material{
 			Config:      readFile(t, s.ConfigPath()),
 			CABundle:    readFile(t, s.Paths.CA),
@@ -271,8 +272,8 @@ func TestPerNetworkDirectoriesShareNothing(t *testing.T) {
 	}
 
 	// Each network's certificate is its own.
-	a := readFile(t, agent.DefaultLayout(filepath.Join(root, "prod")).Paths.Cert)
-	b := readFile(t, agent.DefaultLayout(filepath.Join(root, "staging")).Paths.Cert)
+	a := readFile(t, paths.DefaultLayout(filepath.Join(root, "prod")).Paths.Cert)
+	b := readFile(t, paths.DefaultLayout(filepath.Join(root, "staging")).Paths.Cert)
 	if a == b {
 		t.Error("two networks on one host ended up with the same certificate")
 	}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -33,7 +34,7 @@ func TestRouteReachesPeersAndTheCertificate(t *testing.T) {
 
 	// A peer enrolled AFTER the route exists must be told about it.
 	peer := h.createAndEnroll(t, ts, "consumer", "10.42.90.9", false, false, nil)
-	cfg := readFile(t, agent.DefaultLayout(peer.dir).ConfigPath())
+	cfg := readFile(t, paths.DefaultLayout(peer.dir).ConfigPath())
 
 	if !strings.Contains(cfg, "unsafe_routes") {
 		t.Fatalf("the peer was not told about the route:\n%s", cfg)
@@ -44,7 +45,7 @@ func TestRouteReachesPeersAndTheCertificate(t *testing.T) {
 
 	// The GATEWAY must not route to itself. An unsafe_route naming its own
 	// address as the via is a loop.
-	gwCfg := readFile(t, agent.DefaultLayout(gw.dir).ConfigPath())
+	gwCfg := readFile(t, paths.DefaultLayout(gw.dir).ConfigPath())
 	if strings.Contains(gwCfg, "unsafe_routes") {
 		t.Errorf("the gateway was given a route to its own prefix:\n%s", gwCfg)
 	}
@@ -74,7 +75,7 @@ func TestTwoGatewaysForOnePrefixRenderAsOneEntry(t *testing.T) {
 	}
 
 	peer := h.createAndEnroll(t, ts, "consumer", "10.42.91.9", false, false, nil)
-	cfg := readFile(t, agent.DefaultLayout(peer.dir).ConfigPath())
+	cfg := readFile(t, paths.DefaultLayout(peer.dir).ConfigPath())
 
 	if n := strings.Count(cfg, "- route: 192.168.88.0/24"); n != 1 {
 		t.Fatalf("the prefix rendered %d times; two gateways must be one entry:\n%s", n, cfg)

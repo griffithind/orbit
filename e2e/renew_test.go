@@ -17,6 +17,7 @@ import (
 	"github.com/slackhq/nebula/config"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // configReloader reloads an in-process nebula the same way SIGHUP does.
@@ -86,7 +87,7 @@ func TestRenewalKeepsTunnelAlive(t *testing.T) {
 	overlayClient := agent.NewClient(overlayURL)
 	overlayClient.HTTP = overlayHTTPClient(clientNode)
 
-	layout := agent.DefaultLayout(client.dir)
+	layout := paths.DefaultLayout(client.dir)
 	loop := &agent.Loop{
 		Client: overlayClient,
 		Applier: &agent.Applier{
@@ -153,7 +154,7 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 	host := h.createAndEnroll(t, ts, "rollback", "10.42.2.5", false, false, nil)
 
 	certBefore := readFile(t, filepath.Join(host.dir, "host.crt"))
-	configBefore := readFile(t, agent.DefaultLayout(host.dir).ConfigPath())
+	configBefore := readFile(t, paths.DefaultLayout(host.dir).ConfigPath())
 
 	// Renew with a verifier that always fails, standing in for "the host lost
 	// contact with the control plane after applying".
@@ -161,7 +162,7 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 
 	var reloads int
 	loop := &agent.Loop{
@@ -191,7 +192,7 @@ func TestRollbackRestoresPreviousGeneration(t *testing.T) {
 	}
 
 	certAfter := readFile(t, filepath.Join(host.dir, "host.crt"))
-	configAfter := readFile(t, agent.DefaultLayout(host.dir).ConfigPath())
+	configAfter := readFile(t, paths.DefaultLayout(host.dir).ConfigPath())
 
 	if certAfter != certBefore {
 		t.Error("certificate was not rolled back")
@@ -225,7 +226,7 @@ func TestRenewRotatesThePrivateKey(t *testing.T) {
 	keyBefore := readFile(t, filepath.Join(host.dir, "host.key"))
 
 	st, _ := agent.ReadState(host.dir)
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	loop := &agent.Loop{
 		Client: xffClient(t, ts.URL, host.addr),
 		Applier: &agent.Applier{
@@ -271,14 +272,14 @@ func TestAddressChangeRefusedWithoutRestarter(t *testing.T) {
 	other := h.createAndEnroll(t, ts, "readdress-other", "10.42.3.6", false, false, nil)
 	otherCert := readFile(t, filepath.Join(other.dir, "host.crt"))
 
-	layout := agent.DefaultLayout(host.dir)
+	layout := paths.DefaultLayout(host.dir)
 	applier := &agent.Applier{
 		Layout: layout, Reloader: agent.NoopReloader{},
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	err := applier.Apply(context.Background(), agent.Material{
-		Config:      readFile(t, agent.DefaultLayout(host.dir).ConfigPath()),
+		Config:      readFile(t, paths.DefaultLayout(host.dir).ConfigPath()),
 		CABundle:    readFile(t, filepath.Join(host.dir, "ca.crt")),
 		Certificate: otherCert,
 		PrivateKey:  readFile(t, filepath.Join(other.dir, "host.key")),

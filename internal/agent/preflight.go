@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -26,7 +27,7 @@ import (
 // the other side, and refusing to start would turn a misconfiguration into an
 // outage for a network that was working. Nebula will fail to bind loudly enough
 // if it is real; this exists so the reason is already in the log when it does.
-func WarnInstanceCollisions(l Layout, log *slog.Logger) {
+func WarnInstanceCollisions(l paths.Layout, log *slog.Logger) {
 	root := filepath.Dir(l.Dir)
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -43,7 +44,7 @@ func WarnInstanceCollisions(l Layout, log *slog.Logger) {
 			continue
 		}
 		peerDir := filepath.Join(root, e.Name())
-		theirs, ok := readHostSettings(DefaultLayout(peerDir).ConfigPath())
+		theirs, ok := readHostSettings(paths.DefaultLayout(peerDir).ConfigPath())
 		if !ok {
 			continue
 		}

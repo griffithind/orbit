@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/fwmatch"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -36,7 +37,7 @@ func TestStatusIsSafeWhileTheAgentRuns(t *testing.T) {
 	// the certificate from disk and tolerates both being absent, which is what
 	// makes this constructible without a control plane.
 	nl := &networkLoop{
-		loop:   &agent.Loop{Layout: agent.DefaultLayout(dir), Log: quiet},
+		loop:   &agent.Loop{Layout: paths.DefaultLayout(dir), Log: quiet},
 		engine: &agent.Embedded{Config: func() (string, error) { return "", errNoConfig }, Log: quiet},
 		log:    quiet,
 	}
@@ -356,7 +357,7 @@ func TestSocketRootFollowsAnExplicitDirectory(t *testing.T) {
 
 	explicit := "/tmp/stack/prod"
 	df := &dirFlags{dir: &explicit, network: &empty}
-	if got := socketRoot(df, agent.DefaultRoot); got != "/tmp/stack" {
+	if got := socketRoot(df, paths.DefaultRoot); got != "/tmp/stack" {
 		t.Errorf("with -dir, socket root = %q, want the directory's parent", got)
 	}
 }

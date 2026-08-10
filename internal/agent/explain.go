@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/fwmatch"
 	fwparse "github.com/griffithind/orbit/internal/fwmatch/parse"
 )
@@ -72,7 +73,7 @@ type Explanation struct {
 // It deliberately does NOT return an error for a peer with no tunnel, an
 // expired certificate, or a stopped nebula. Every one of those is the answer,
 // and failing would deny the caller the diagnosis they asked for.
-func Explain(eng *Embedded, layout Layout, req ExplainRequest) (Explanation, error) {
+func Explain(eng *Embedded, layout paths.Layout, req ExplainRequest) (Explanation, error) {
 	proto, err := fwmatch.ParseProto(req.Proto)
 	if err != nil {
 		return Explanation{}, err

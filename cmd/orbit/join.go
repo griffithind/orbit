@@ -15,6 +15,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/version"
 )
@@ -37,7 +38,7 @@ func joinCmd(args []string) error {
 		url     = fs.String("url", "", "control plane base URL")
 		network = fs.String("network", "", "network to join, as a uuid or a slug")
 		name    = fs.String("name", "", "membership name, unique within the network (default: this machine's hostname)")
-		root    = fs.String("root", agent.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
+		root    = fs.String("root", paths.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
 
 		// Waiting is the default because it is what the operator running this
 		// almost always wants: they are about to go and approve it. -wait=0
@@ -52,7 +53,7 @@ func joinCmd(args []string) error {
 		// which object on which token is not something the agent can guess, and
 		// getting it wrong must fail here rather than at the first handshake.
 	)
-	dirFlag := fs.String("dir", "", "per-network directory (default "+agent.DefaultRoot+"/<network slug>)")
+	dirFlag := fs.String("dir", "", "per-network directory (default "+paths.DefaultRoot+"/<network slug>)")
 	_ = fs.Parse(args)
 
 	if *code == "" {
@@ -82,7 +83,7 @@ func joinCmd(args []string) error {
 	// The device key, generated on first use and never again. Everything after
 	// this point is the same key no matter which network is being joined or
 	// which control plane is being talked to.
-	id, err := device.LoadOrCreate(agent.DeviceKeyPath(*root))
+	id, err := device.LoadOrCreate(paths.DeviceKeyPath(*root))
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
 	}
@@ -138,7 +139,7 @@ func joinCmd(args []string) error {
 	// membership that might be refused.
 	dir := *dirFlag
 	if dir == "" {
-		dir = agent.DirFor(*network)
+		dir = paths.DirFor(*network)
 	}
 
 	if authorized {
@@ -190,7 +191,7 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 		resp, err := client.Claim(ctx, id, membershipID, kp, version.Version, time.Now())
 		switch {
 		case err == nil:
-			layout := agent.DefaultLayout(dir)
+			layout := paths.DefaultLayout(dir)
 			applier := &agent.Applier{
 				Layout:            layout,
 				Reloader:          agent.NoopReloader{},

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/griffithind/orbit/internal/agent/paths"
 )
 
 // Service files for the agent, generated rather than copied.
@@ -58,7 +60,7 @@ func PlanService(root, binary, verifyURL string) (ServicePlan, error) {
 	// Naming a directory here is what made the templated version wrong: it
 	// pinned one unit to one network while pretending to serve all of them.
 	args := []string{"agent", "run"}
-	if root != "" && root != DefaultRoot {
+	if root != "" && root != paths.DefaultRoot {
 		args = append(args, "-root", root)
 	}
 	if verifyURL != "" {
@@ -193,7 +195,7 @@ func launchdPlan(binary string, args []string) ServicePlan {
 
 func rootOrDefault(root string) string {
 	if root == "" {
-		return DefaultRoot
+		return paths.DefaultRoot
 	}
 	return root
 }
@@ -294,7 +296,7 @@ func EnabledInstances(root, except string) ([]string, error) {
 		}
 		// A directory is only another network if it holds agent state; a
 		// leftover empty directory is not something to keep a shared unit for.
-		if _, err := os.Stat(filepath.Join(root, e.Name(), StateFileName)); err == nil {
+		if _, err := os.Stat(filepath.Join(root, e.Name(), paths.StateFileName)); err == nil {
 			out = append(out, e.Name())
 		}
 	}
