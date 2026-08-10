@@ -217,7 +217,7 @@ diagnose a broken host, so its own failure mode has to be legible.
 ## 6. Order of work
 
 1. ~~The socket, `/v1/status`, and `orbit status`.~~ **Built.**
-   `internal/agent/status.go` and `cmd/orbit/status.go`.
+   `internal/agent/status/status.go` and `cmd/orbit/status.go`.
 2. ~~`/v1/networks/{slug}/peers` and `orbit peers`.~~ **Built.**
    `Embedded.Peers` and `cmd/orbit/peers.go`.
 3. ~~The explainer, its cross-check test, and node-local `orbit why`.~~

@@ -148,7 +148,7 @@ produce identical bytes.
 
 **The agent rewrites the config after receiving it.**
 
-`Applier.localize` (`internal/agent/apply.go:453`) substitutes three path
+`Applier.localize` (`internal/agent/generation/apply.go:477`) substitutes three path
 strings — `pki.ca`, `pki.cert`, `pki.key` — because the control plane renders
 canonical paths and cannot know where this host keeps its files, or whether its
 key is a file at all (a PKCS#11 host substitutes a URI).
