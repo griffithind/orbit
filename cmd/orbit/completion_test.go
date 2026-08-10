@@ -122,3 +122,44 @@ func TestCompletionRejectsAnUnknownShell(t *testing.T) {
 		t.Fatal("an unknown shell was accepted")
 	}
 }
+
+// TestCompletedFlagsAreAccepted.
+//
+// The bug this pins: completion listed the common flags in a literal of its
+// own rather than asking the code that registers them. options.bind registers
+// "y"; the literal said "--yes". So the shell offered a flag, the user pressed
+// tab, and the command answered "flag provided but not defined: -yes".
+//
+// The assertion is the property, not the spelling: every candidate completion
+// offers must be one the command will actually accept. A flag rejected here has
+// either been renamed without updating what advertises it, or advertised
+// without existing at all — and both look identical to whoever typed it.
+func TestCompletedFlagsAreAccepted(t *testing.T) {
+	for _, cmd := range [][]string{
+		{"membership", "ls"},
+		{"policy", "check"},
+		{"network", "ls"},
+		{"token", "create"},
+	} {
+		candidates := completeTo(t, append(slices.Clone(cmd), "--")...)
+		if len(candidates) == 0 {
+			t.Fatalf("%v offered no flags at all", cmd)
+		}
+		for _, c := range candidates {
+			name := strings.TrimPrefix(c, "--")
+			var stderr bytes.Buffer
+			savedErr := errOut
+			errOut = &stderr
+			// Parsing happens before anything is dialled, so an unknown flag
+			// reports itself without the command needing a control plane.
+			_ = rootCommand().dispatch(context.Background(), "",
+				append(slices.Clone(cmd), "-"+name))
+			errOut = savedErr
+
+			if strings.Contains(stderr.String(), "not defined") {
+				t.Errorf("completion offers %q for %v, but the command rejects it:\n%s",
+					c, cmd, strings.TrimSpace(stderr.String()))
+			}
+		}
+	}
+}

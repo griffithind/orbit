@@ -59,12 +59,13 @@ func completeCmd(_ context.Context, args []string) error {
 		if node.Flags != nil {
 			node.Flags(fs)
 		}
+		// The common set every admin command carries, registered by the same
+		// method the commands themselves call. Listing them here instead drifted:
+		// bind registers "y" and this list said "--yes", so completion offered a
+		// flag that did not exist and typing it failed.
+		(&options{}).bind(fs)
 		var names []string
 		fs.VisitAll(func(f *flag.Flag) { names = append(names, "--"+f.Name) })
-		// The common set every admin command carries. Named here because
-		// options.bind is what registers them and it is not reachable without
-		// running the command.
-		names = append(names, "--url", "--token-file", "--network", "--profile", "--json", "--yes")
 		emitMatching(names, partial)
 		return nil
 	}
