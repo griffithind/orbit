@@ -21,10 +21,10 @@ import (
 	// honest source for that is the schedule the agent will actually follow.
 	// Restating the formula here instead would let the two drift silently, and
 	// the number would then be wrong in the direction that matters.
-	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/nebulacfg"
+	"github.com/griffithind/orbit/internal/renewal"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -1071,7 +1071,7 @@ type certificateLag struct {
 // control plane pulls it forward or the maintenance sweep gets there first, but
 // nothing schedules it later.
 func certificateLagFor(hosts []store.RoleHost, now time.Time) certificateLag {
-	policy := agent.DefaultRenewalPolicy()
+	policy := renewal.DefaultPolicy()
 
 	var lag certificateLag
 	for _, h := range hosts {
