@@ -390,7 +390,7 @@ func diagnose(h membershipView, certs []certView, now time.Time, activeCAID stri
 			Summary: "this membership holds no active certificate",
 			Detail: "It enrolled at some point but has nothing valid now. It cannot " +
 				"reach the overlay, so it cannot renew through the agent API. The way " +
-				"back is to re-run `orbit agent join` on the machine: the join is " +
+				"back is to re-run `orbit join` on the machine: the join is " +
 				"idempotent and returns this same membership, and the device key that " +
 				"authenticates it never expires.",
 		})
@@ -400,7 +400,7 @@ func diagnose(h membershipView, certs []certView, now time.Time, activeCAID stri
 			Summary: "its certificate expired " + ago(active.NotAfter),
 			Detail: "Nebula rejects an expired certificate before it consults anything " +
 				"else, so this machine is off the mesh and cannot renew over it. " +
-				"Re-running `orbit agent join` on it reissues one over the public " +
+				"Re-running `orbit join` on it reissues one over the public " +
 				"listener, authenticated by a device key that cannot expire.",
 		})
 	case active.Overdue:

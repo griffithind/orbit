@@ -21,18 +21,7 @@ import (
 func membershipLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("membership ls", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		state  = fs.String("state", "", "created, enrolled, active, or suspended")
-		tag    = fs.String("tag", "", "only hosts carrying this tag")
-		role   = fs.String("role", "", "only hosts carrying this role (name or uuid)")
-		name   = fs.String("name", "", "only hosts whose name contains this substring")
-		behind = fs.Bool("behind", false, "only hosts that have not applied the current epochs")
-		limit  = fs.Int("limit", 0, "page size; the server's default when unset")
-		cursor = fs.String("cursor", "", "next_cursor from a previous page")
-		count  = fs.Bool("count", false, "also ask for the total matching the filter")
-		all    = fs.Bool("all", false, "follow cursors and print every page")
-	)
+	fl := bindMembershipLs(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -46,7 +35,7 @@ func membershipLs(ctx context.Context, args []string) error {
 	// stream no curl invocation can produce and no jq filter expects. The
 	// envelope's next_cursor is the supported way to page in a script, which is
 	// why it is in the response rather than in a header.
-	if *all && o.json {
+	if *fl.all && o.json {
 		return usageErrorf("-all cannot be combined with -json: -json emits one API " +
 			"response verbatim, and several concatenated envelopes are not a response.\n\n" +
 			"Page with -cursor, feeding back .next_cursor from each page.")
@@ -63,20 +52,20 @@ func membershipLs(ctx context.Context, args []string) error {
 
 	f := adminclient.MembershipFilter{
 		NetworkID:    networkID,
-		State:        *state,
-		Tag:          *tag,
-		NameContains: *name,
-		Behind:       *behind,
-		Limit:        *limit,
-		Cursor:       *cursor,
-		Count:        *count,
+		State:        *fl.state,
+		Tag:          *fl.tag,
+		NameContains: *fl.name,
+		Behind:       *fl.behind,
+		Limit:        *fl.limit,
+		Cursor:       *fl.cursor,
+		Count:        *fl.count,
 	}
 	// The server refuses a role name — "role_id must be a uuid, not a role name"
 	// — because anything else would match no host and read as a role nobody
 	// carries. Resolving it here is the whole reason an operator would rather
 	// type this than curl.
-	if *role != "" {
-		id, err := o.client.ResolveRole(ctx, networkID, *role)
+	if *fl.role != "" {
+		id, err := o.client.ResolveRole(ctx, networkID, *fl.role)
 		if err != nil {
 			return err
 		}
@@ -97,7 +86,7 @@ func membershipLs(ctx context.Context, args []string) error {
 	// The cursor is opaque and is passed back unmodified, which is the only
 	// contract the endpoint offers and the only one that survives a concurrent
 	// insert.
-	for *all && page.NextCursor != "" {
+	for *fl.all && page.NextCursor != "" {
 		f.Cursor = page.NextCursor
 		next, err := o.client.ListHosts(ctx, f)
 		if err != nil {
@@ -172,8 +161,7 @@ func renderHostTable(r renderer, network *wire.NetworkResponse, hosts []wire.Mem
 func membershipShow(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("membership show", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	history := fs.Int("history", 0, "also list the N most recent certificates")
+	fl := bindMembershipShow(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -253,8 +241,8 @@ func membershipShow(ctx context.Context, args []string) error {
 	renderCertificates(o.r, h)
 	renderHostConvergence(o.r, network, h)
 
-	if *history > 0 {
-		hist, err := o.client.MembershipCertificates(ctx, membershipID, adminclient.CertFilter{Limit: *history})
+	if *fl.history > 0 {
+		hist, err := o.client.MembershipCertificates(ctx, membershipID, adminclient.CertFilter{Limit: *fl.history})
 		if err != nil {
 			return err
 		}
@@ -290,7 +278,7 @@ func renderCertificates(r renderer, h wire.MembershipResponse) {
 		case "suspended":
 			fmt.Fprintln(out, "  none — this host is blocked and its certificates were revoked")
 		default:
-			fmt.Fprintln(out, "  none — no active certificate; re-run `orbit agent join` on the machine")
+			fmt.Fprintln(out, "  none — no active certificate; re-run `orbit join` on the machine")
 		}
 		return
 	}
@@ -368,22 +356,11 @@ func shortFingerprint(s string) string {
 func membershipReserve(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("membership reserve", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		name = fs.String("name", "", "membership name, unique within the network (required)")
-		addr = fs.String("addr", "", "pin a specific overlay address; omit to allocate one")
-		role = fs.String("role", "", "role name or uuid")
-		ttl  = fs.Duration("ttl", 0, "how long the code stays valid; the server's default when unset")
-
-		lighthouse    = fs.Bool("lighthouse", false, "the machine will be a lighthouse; needs -public-addr")
-		relay         = fs.Bool("relay", false, "the machine will relay other machines' traffic")
-		publicAddr    = fs.String("public-addr", "", "comma-separated public addresses, hosts WITHOUT ports")
-		advertisePort = fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound one (NAT forwarding)")
-	)
+	fl := bindMembershipReserve(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
-	if *name == "" {
+	if *fl.name == "" {
 		return usageErrorf("-name is required")
 	}
 	if err := o.load(); err != nil {
@@ -400,18 +377,18 @@ func membershipReserve(ctx context.Context, args []string) error {
 	}
 
 	req := wire.ReserveRequest{
-		Name:         *name,
-		OverlayAddr:  *addr,
-		TTLSeconds:   int(ttl.Seconds()),
-		IsLighthouse: *lighthouse,
-		IsRelay:      *relay,
-		PublicAddrs:  csvList(*publicAddr),
+		Name:         *fl.name,
+		OverlayAddr:  *fl.addr,
+		TTLSeconds:   int(fl.ttl.Seconds()),
+		IsLighthouse: *fl.lighthouse,
+		IsRelay:      *fl.relay,
+		PublicAddrs:  csvList(*fl.publicAddr),
 	}
-	if *advertisePort != 0 {
-		req.AdvertisePort = advertisePort
+	if *fl.advertisePort != 0 {
+		req.AdvertisePort = fl.advertisePort
 	}
-	if *role != "" {
-		id, err := o.client.ResolveRole(ctx, networkID, *role)
+	if *fl.role != "" {
+		id, err := o.client.ResolveRole(ctx, networkID, *fl.role)
 		if err != nil {
 			return err
 		}
@@ -427,7 +404,7 @@ func membershipReserve(ctx context.Context, args []string) error {
 				"the name %q is already taken in network %s (%s)\n\n"+
 					"Names are unique per network, and an unspent reservation holds one. "+
 					"Inspect an existing host with `orbit membership show %s`, or pick another name.",
-				*name, network.Name, api.Message, *name)
+				*fl.name, network.Name, api.Message, *fl.name)
 		}
 		return err
 	}
@@ -438,24 +415,24 @@ func membershipReserve(ctx context.Context, args []string) error {
 	fmt.Fprintf(out, "%s\n", res.Value.Code)
 	fmt.Fprintf(errOut, "\nReserved %q in %s. The code is single-use, expires %s, and is shown\n"+
 		"here and nowhere else — it is not recoverable.\n\nOn the machine:\n\n"+
-		"  orbit agent join -url %s -network %s -code %s\n",
-		*name, network.Name, res.Value.ExpiresAt.Format(time.RFC3339),
+		"  orbit join -url %s -network %s -code %s\n",
+		*fl.name, network.Name, res.Value.ExpiresAt.Format(time.RFC3339),
 		joinURL(res.Value.EnrollURL, o.url), network.Slug, res.Value.Code)
 
 	// Say what the machine will BE, not just that a code exists. The whole point
 	// of putting the topology on the reservation is that nobody has to come back
 	// afterwards, and an operator has no other way to confirm the flags took
 	// before a machine redeems the code.
-	if *lighthouse || *relay {
+	if *fl.lighthouse || *fl.relay {
 		roles := "a relay"
-		if *lighthouse {
+		if *fl.lighthouse {
 			roles = "a lighthouse"
-			if *relay {
+			if *fl.relay {
 				roles = "a lighthouse and a relay"
 			}
 		}
 		fmt.Fprintf(errOut, "\nOn redemption it becomes %s at %s. No follow-up call.\n",
-			roles, strings.Join(csvList(*publicAddr), ", "))
+			roles, strings.Join(csvList(*fl.publicAddr), ", "))
 	}
 	return nil
 }
@@ -463,14 +440,7 @@ func membershipReserve(ctx context.Context, args []string) error {
 func membershipSet(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("membership set", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		role          = fs.String("role", "", "role name or uuid")
-		tags          = fs.String("tags", "", "comma separated tags, replacing the current set")
-		lighthouse    = fs.Bool("lighthouse", false, "act as a lighthouse; the machine needs public addresses (`orbit device set-addrs`)")
-		relay         = fs.Bool("relay", false, "act as a relay")
-		advertisePort = fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound port (NAT forwarding). The ADDRESSES are a machine fact: `orbit device set-addrs`")
-	)
+	fl := bindMembershipSet(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -507,7 +477,7 @@ func membershipSet(ctx context.Context, args []string) error {
 
 	var req wire.UpdateHostRequest
 	if supplied["role"] {
-		id, err := o.client.ResolveRole(ctx, networkID, *role)
+		id, err := o.client.ResolveRole(ctx, networkID, *fl.role)
 		if err != nil {
 			return err
 		}
@@ -515,17 +485,17 @@ func membershipSet(ctx context.Context, args []string) error {
 		req.RoleID = &s
 	}
 	if supplied["tags"] {
-		t := csvList(*tags)
+		t := csvList(*fl.tags)
 		req.Tags = &t
 	}
 	if supplied["lighthouse"] {
-		req.IsLighthouse = lighthouse
+		req.IsLighthouse = fl.lighthouse
 	}
 	if supplied["relay"] {
-		req.IsRelay = relay
+		req.IsRelay = fl.relay
 	}
 	if supplied["advertise-port"] {
-		req.AdvertisePort = advertisePort
+		req.AdvertisePort = fl.advertisePort
 	}
 
 	o.announce(fmt.Sprintf("Updating membership %q in network %s", fs.Arg(0), network.Name))
@@ -675,8 +645,7 @@ func membershipBlock(ctx context.Context, args []string, unblock bool) error {
 func membershipRm(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("membership rm", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	reason := fs.String("reason", "", "recorded in the audit log")
+	fl := bindMembershipRm(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -707,7 +676,7 @@ func membershipRm(ctx context.Context, args []string) error {
 		return err
 	}
 
-	res, err := o.client.DeleteHost(ctx, membershipID, *reason)
+	res, err := o.client.DeleteHost(ctx, membershipID, *fl.reason)
 	if err != nil {
 		return err
 	}
@@ -738,7 +707,7 @@ const enrollPath = "/enroll/v1/enroll"
 func joinURL(enrollURL, clientURL string) string {
 	if enrollURL != "" {
 		// The BASE, not the enroll endpoint. -enroll-url is the full path an
-		// agent POSTs to, because that is what the agent needs; `agent join`
+		// agent POSTs to, because that is what the agent needs; `join`
 		// takes the origin and appends the path itself. Printing the endpoint
 		// gave an operator a command that 404s — verified on a real control
 		// plane, where the pasted line failed and the same line minus the suffix
@@ -782,7 +751,7 @@ func csvList(s string) []string {
 
 // membershipPending lists the join queue.
 //
-// The queue exists because `orbit agent join` moved the gate from "holds a
+// The queue exists because `orbit join` moved the gate from "holds a
 // credential" to "an operator says yes". That trade only works if the queue is
 // easy to look at, so this is deliberately the shortest command in the CLI: a
 // network, and what is waiting in it.
@@ -833,8 +802,7 @@ func membershipPending(ctx context.Context, args []string) error {
 func membershipAuthorize(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("membership authorize", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	role := fs.String("role", "", "assign this role while authorizing (name or uuid)")
+	fl := bindMembershipAuthorize(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -860,12 +828,12 @@ func membershipAuthorize(ctx context.Context, args []string) error {
 	}
 
 	var roleID string
-	if *role != "" {
+	if *fl.role != "" {
 		networkID, err := o.networkID(ctx)
 		if err != nil {
 			return err
 		}
-		id, err := o.client.ResolveRole(ctx, networkID, *role)
+		id, err := o.client.ResolveRole(ctx, networkID, *fl.role)
 		if err != nil {
 			return err
 		}
@@ -890,6 +858,128 @@ func membershipAuthorize(ctx context.Context, args []string) error {
 		res.Value.Name, res.Value.ID, strings.Join(res.Value.OverlayAddrs, ", "))
 	fmt.Fprintf(errOut,
 		"\nNo certificate has been issued. The machine collects one by proving it holds\n"+
-			"the device key it joined with, which `orbit agent join` does automatically.\n")
+			"the device key it joined with, which `orbit join` does automatically.\n")
 	return nil
+}
+
+// membershipLsFlags are the flags of `orbit membershipLs`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type membershipLsFlags struct {
+	state  *string
+	tag    *string
+	role   *string
+	name   *string
+	behind *bool
+	limit  *int
+	cursor *string
+	count  *bool
+	all    *bool
+}
+
+func bindMembershipLs(fs *flag.FlagSet, o *options) membershipLsFlags {
+	o.bind(fs)
+	return membershipLsFlags{
+		state:  fs.String("state", "", "created, enrolled, active, or suspended"),
+		tag:    fs.String("tag", "", "only hosts carrying this tag"),
+		role:   fs.String("role", "", "only hosts carrying this role (name or uuid)"),
+		name:   fs.String("name", "", "only hosts whose name contains this substring"),
+		behind: fs.Bool("behind", false, "only hosts that have not applied the current epochs"),
+		limit:  fs.Int("limit", 0, "page size; the server's default when unset"),
+		cursor: fs.String("cursor", "", "next_cursor from a previous page"),
+		count:  fs.Bool("count", false, "also ask for the total matching the filter"),
+		all:    fs.Bool("all", false, "follow cursors and print every page"),
+	}
+}
+
+// membershipShowFlags are the flags of `orbit membershipShow`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type membershipShowFlags struct {
+	history *int
+}
+
+func bindMembershipShow(fs *flag.FlagSet, o *options) membershipShowFlags {
+	o.bind(fs)
+	return membershipShowFlags{
+		history: fs.Int("history", 0, "also list the N most recent certificates"),
+	}
+}
+
+// membershipReserveFlags are the flags of `orbit membershipReserve`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type membershipReserveFlags struct {
+	name          *string
+	addr          *string
+	role          *string
+	ttl           *time.Duration
+	lighthouse    *bool
+	relay         *bool
+	publicAddr    *string
+	advertisePort *int
+}
+
+func bindMembershipReserve(fs *flag.FlagSet, o *options) membershipReserveFlags {
+	o.bind(fs)
+	return membershipReserveFlags{
+		name:          fs.String("name", "", "membership name, unique within the network (required)"),
+		addr:          fs.String("addr", "", "pin a specific overlay address; omit to allocate one"),
+		role:          fs.String("role", "", "role name or uuid"),
+		ttl:           fs.Duration("ttl", 0, "how long the code stays valid; the server's default when unset"),
+		lighthouse:    fs.Bool("lighthouse", false, "the machine will be a lighthouse; needs -public-addr"),
+		relay:         fs.Bool("relay", false, "the machine will relay other machines' traffic"),
+		publicAddr:    fs.String("public-addr", "", "comma-separated public addresses, hosts WITHOUT ports"),
+		advertisePort: fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound one (NAT forwarding)"),
+	}
+}
+
+// membershipSetFlags are the flags of `orbit membershipSet`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type membershipSetFlags struct {
+	role          *string
+	tags          *string
+	lighthouse    *bool
+	relay         *bool
+	advertisePort *int
+}
+
+func bindMembershipSet(fs *flag.FlagSet, o *options) membershipSetFlags {
+	o.bind(fs)
+	return membershipSetFlags{
+		role:          fs.String("role", "", "role name or uuid"),
+		tags:          fs.String("tags", "", "comma separated tags, replacing the current set"),
+		lighthouse:    fs.Bool("lighthouse", false, "act as a lighthouse; the machine needs public addresses (`orbit device set-addrs`)"),
+		relay:         fs.Bool("relay", false, "act as a relay"),
+		advertisePort: fs.Int("advertise-port", 0, "port other machines dial, when it differs from the bound port (NAT forwarding). The ADDRESSES are a machine fact: `orbit device set-addrs`"),
+	}
+}
+
+// membershipRmFlags are the flags of `orbit membershipRm`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type membershipRmFlags struct {
+	reason *string
+}
+
+func bindMembershipRm(fs *flag.FlagSet, o *options) membershipRmFlags {
+	o.bind(fs)
+	return membershipRmFlags{
+		reason: fs.String("reason", "", "recorded in the audit log"),
+	}
+}
+
+// membershipAuthorizeFlags are the flags of `orbit membershipAuthorize`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type membershipAuthorizeFlags struct {
+	role *string
+}
+
+func bindMembershipAuthorize(fs *flag.FlagSet, o *options) membershipAuthorizeFlags {
+	o.bind(fs)
+	return membershipAuthorizeFlags{
+		role: fs.String("role", "", "assign this role while authorizing (name or uuid)"),
+	}
 }

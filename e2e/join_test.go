@@ -531,7 +531,7 @@ func TestCLIReserveThenJoin(t *testing.T) {
 	// -wait 0 would stop before claiming; a reservation is auto-authorized, so
 	// the machine goes straight through to a certificate with nobody watching.
 	// That is the property unattended provisioning needs.
-	join := h.cliEnv(t, nil, "agent", "join",
+	join := h.cliEnv(t, nil, "join",
 		"-url", ts.URL, "-network", h.netID.String(), "-code", code.Code,
 		"-dir", dir, "-root", root, "-wait", "30s")
 	if join.code != 0 {
@@ -608,7 +608,7 @@ func TestInstallThenJoinPicksUpTheNetwork(t *testing.T) {
 	}
 
 	dir := filepath.Join(root, "prod")
-	join := h.cliEnv(t, nil, "agent", "join",
+	join := h.cliEnv(t, nil, "join",
 		"-url", ts.URL, "-network", h.netID.String(), "-code", code.Code,
 		"-dir", dir, "-root", root, "-wait", "30s")
 	if join.code != 0 {

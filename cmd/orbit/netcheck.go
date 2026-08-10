@@ -62,12 +62,7 @@ type netcheckReport struct {
 
 func netcheckCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("netcheck", flag.ContinueOnError)
-	var (
-		root    = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
-		rawURL  = fs.String("url", "", "control plane URL to test; defaults to what this host enrolled against")
-		asJSON  = fs.Bool("json", false, "emit the report as JSON")
-		timeout = fs.Duration("timeout", 5*time.Second, "per-check timeout")
-	)
+	fl := bindNetcheckCmd(fs)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -83,8 +78,8 @@ func netcheckCmd(ctx context.Context, args []string) error {
 	// The agent socket first, because it is also where the control plane URL
 	// comes from when one was not given. Its absence is not a failure: netcheck
 	// is meant to work before an agent exists.
-	sockPath := status.SocketPath(*root)
-	statusCtx, cancel := context.WithTimeout(ctx, *timeout)
+	sockPath := status.SocketPath(*fl.root)
+	statusCtx, cancel := context.WithTimeout(ctx, *fl.timeout)
 	status, statusErr := status.Fetch(statusCtx, sockPath)
 	cancel()
 	switch {
@@ -103,7 +98,7 @@ func netcheckCmd(ctx context.Context, args []string) error {
 			Advice: advice})
 	}
 
-	target := *rawURL
+	target := *fl.rawURL
 	if target == "" && statusErr == nil {
 		for _, n := range status.Networks {
 			if n.ControlURL != "" {
@@ -116,7 +111,7 @@ func netcheckCmd(ctx context.Context, args []string) error {
 		add(checkResult{Name: "control plane", OK: false,
 			Detail: "no URL to test",
 			Advice: "pass --url, or run this on a host that has joined a network"})
-		return emitNetcheck(rep, *asJSON)
+		return emitNetcheck(rep, *fl.asJSON)
 	}
 	rep.URL = target
 
@@ -124,7 +119,7 @@ func netcheckCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		add(checkResult{Name: "control plane", OK: false,
 			Detail: fmt.Sprintf("%s is not a URL: %v", target, err)})
-		return emitNetcheck(rep, *asJSON)
+		return emitNetcheck(rep, *fl.asJSON)
 	}
 
 	// DNS, TCP and TLS reported separately, because they fail for different
@@ -141,7 +136,7 @@ func netcheckCmd(ctx context.Context, args []string) error {
 		}
 	}
 
-	resolveCtx, cancel := context.WithTimeout(ctx, *timeout)
+	resolveCtx, cancel := context.WithTimeout(ctx, *fl.timeout)
 	addrs, err := net.DefaultResolver.LookupHost(resolveCtx, host)
 	cancel()
 	if err != nil {
@@ -153,7 +148,7 @@ func netcheckCmd(ctx context.Context, args []string) error {
 			Detail: fmt.Sprintf("%s -> %s", host, strings.Join(addrs, ", "))})
 	}
 
-	dialCtx, cancel := context.WithTimeout(ctx, *timeout)
+	dialCtx, cancel := context.WithTimeout(ctx, *fl.timeout)
 	start := time.Now()
 	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", net.JoinHostPort(host, port))
 	rtt := time.Since(start)
@@ -162,14 +157,14 @@ func netcheckCmd(ctx context.Context, args []string) error {
 		add(checkResult{Name: "tcp", OK: false, Detail: err.Error(),
 			Advice: "nothing is listening, or a firewall is dropping it. This is not " +
 				"an authentication failure"})
-		return emitNetcheck(rep, *asJSON)
+		return emitNetcheck(rep, *fl.asJSON)
 	}
 	_ = conn.Close()
 	add(checkResult{Name: "tcp", OK: true,
 		Detail: fmt.Sprintf("connected to %s in %s", net.JoinHostPort(host, port), rtt.Round(time.Millisecond))})
 
 	if u.Scheme == "https" {
-		tlsCtx, cancel := context.WithTimeout(ctx, *timeout)
+		tlsCtx, cancel := context.WithTimeout(ctx, *fl.timeout)
 		tconn, err := (&tls.Dialer{}).DialContext(tlsCtx, "tcp", net.JoinHostPort(host, port))
 		cancel()
 		if err != nil {
@@ -194,11 +189,11 @@ func netcheckCmd(ctx context.Context, args []string) error {
 	// Measured against the control plane rather than against NTP, because the
 	// control plane is the thing that will refuse this host's certificate, and
 	// its opinion of the time is the one that matters.
-	skewCtx, cancel := context.WithTimeout(ctx, *timeout)
+	skewCtx, cancel := context.WithTimeout(ctx, *fl.timeout)
 	add(clockCheck(skewCtx, target))
 	cancel()
 
-	return emitNetcheck(rep, *asJSON)
+	return emitNetcheck(rep, *fl.asJSON)
 }
 
 // maxSkew is the point at which a wrong clock starts breaking things.
@@ -279,4 +274,23 @@ func emitNetcheck(rep netcheckReport, asJSON bool) error {
 		return &exitError{code: exitFailure}
 	}
 	return nil
+}
+
+// netcheckCmdFlags are the flags of `orbit netcheckCmd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type netcheckCmdFlags struct {
+	root    *string
+	rawURL  *string
+	asJSON  *bool
+	timeout *time.Duration
+}
+
+func bindNetcheckCmd(fs *flag.FlagSet) netcheckCmdFlags {
+	return netcheckCmdFlags{
+		root:    fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network"),
+		rawURL:  fs.String("url", "", "control plane URL to test; defaults to what this host enrolled against"),
+		asJSON:  fs.Bool("json", false, "emit the report as JSON"),
+		timeout: fs.Duration("timeout", 5*time.Second, "per-check timeout"),
+	}
 }

@@ -21,7 +21,7 @@ import (
 	"github.com/griffithind/orbit/internal/version"
 )
 
-// orbit agent join — the machine asks to be admitted, and waits.
+// orbit join — the machine asks to be admitted, and waits.
 //
 // The difference from `enroll`, and the reason both exist: enroll carries a
 // SECRET to the machine, and a secret that has to travel is one that can be
@@ -35,41 +35,24 @@ import (
 
 func joinCmd(args []string) error {
 	fs := flag.NewFlagSet("join", flag.ContinueOnError)
-	var (
-		url     = fs.String("url", "", "control plane base URL")
-		network = fs.String("network", "", "network to join, as a uuid or a slug")
-		name    = fs.String("name", "", "membership name, unique within the network (default: this machine's hostname)")
-		root    = fs.String("root", paths.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
-
-		// Waiting is the default because it is what the operator running this
-		// almost always wants: they are about to go and approve it. -wait=0
-		// returns as soon as the join is lodged, which is what a provisioning
-		// script wants.
-		wait = fs.Duration("wait", 30*time.Minute, "how long to wait for an operator to authorize; 0 returns immediately after joining")
-		poll = fs.Duration("poll", 5*time.Second, "how often to check whether the join has been authorized")
-
-		code = fs.String("code", "", "reservation code (or ORBIT_ENROLL_CODE). A valid one is pre-authorization: the membership is created with the name, address and role the operator reserved, instead of landing in the queue")
-
-		// A token URI rather than a boolean, for the reason `enroll` takes one:
-		// which object on which token is not something the agent can guess, and
-		// getting it wrong must fail here rather than at the first handshake.
-	)
-	dirFlag := fs.String("dir", "", "per-network directory (default "+paths.DefaultRoot+"/<network slug>)")
-	_ = fs.Parse(args)
-
-	if *code == "" {
-		*code = os.Getenv("ORBIT_ENROLL_CODE")
+	fl := bindJoinCmd(fs)
+	if err := parseLeaf(fs, args); err != nil {
+		return err
 	}
 
-	if *url == "" || *network == "" {
+	if *fl.code == "" {
+		*fl.code = os.Getenv("ORBIT_ENROLL_CODE")
+	}
+
+	if *fl.url == "" || *fl.network == "" {
 		return errors.New("-url and -network are required")
 	}
-	if *name == "" {
+	if *fl.name == "" {
 		h, err := os.Hostname()
 		if err != nil || h == "" {
 			return errors.New("-name is required: this machine's hostname could not be read")
 		}
-		*name = h
+		*fl.name = h
 	}
 
 	// P-256, always. See cmd/orbitd bootstrap: a network's curve is permanent,
@@ -84,7 +67,7 @@ func joinCmd(args []string) error {
 	// The device key, generated on first use and never again. Everything after
 	// this point is the same key no matter which network is being joined or
 	// which control plane is being talked to.
-	id, err := device.LoadOrCreate(paths.DeviceKeyPath(*root))
+	id, err := device.LoadOrCreate(paths.DeviceKeyPath(*fl.root))
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
 	}
@@ -94,8 +77,8 @@ func joinCmd(args []string) error {
 	// device key lives. It is always a file today: -key names the MESH key, and
 	// the two are different keys with different jobs — nebula needs CKA_DERIVE,
 	// an identity needs CKA_SIGN, and one object cannot be both.
-	client := agent.NewClient(*url)
-	joined, err := client.JoinWithCode(ctx, id, *network, *name, hostname, *code, time.Now())
+	client := agent.NewClient(*fl.url)
+	joined, err := client.JoinWithCode(ctx, id, *fl.network, *fl.name, hostname, *fl.code, time.Now())
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {
@@ -109,7 +92,7 @@ func joinCmd(args []string) error {
 		"fingerprint", id.Fingerprint(), "state", joined.State)
 
 	fmt.Printf("joined %s as %q\n  membership %s\n  device     %s\n  fingerprint %s\n",
-		*network, *name, joined.MembershipID, joined.DeviceID, id.Fingerprint())
+		*fl.network, *fl.name, joined.MembershipID, joined.DeviceID, id.Fingerprint())
 
 	// A reservation IS the authorization, so the two paths say different things.
 	//
@@ -124,7 +107,7 @@ func joinCmd(args []string) error {
 	// boundary the CLI must not cross.
 	authorized := joined.State != "pending"
 
-	if *wait == 0 {
+	if *fl.wait == 0 {
 		if authorized {
 			fmt.Printf("\nalready authorized by the reservation. Re-run without -wait 0 " +
 				"to collect the certificate.\n")
@@ -138,16 +121,16 @@ func joinCmd(args []string) error {
 	// Resolve the per-network directory only now. Doing it before the join
 	// would create a directory for a network that might not exist and a
 	// membership that might be refused.
-	dir := *dirFlag
+	dir := *fl.dirFlag
 	if dir == "" {
-		dir = paths.DirFor(*network)
+		dir = paths.DirFor(*fl.network)
 	}
 
 	if authorized {
 		fmt.Printf("\nauthorized by the reservation; collecting the certificate.\n\n")
 	} else {
 		fmt.Printf("\nwaiting for an operator to authorize (up to %s). Meanwhile, they run:\n"+
-			"  orbit membership authorize %s\n\n", *wait, joined.MembershipID)
+			"  orbit membership authorize %s\n\n", *fl.wait, joined.MembershipID)
 	}
 
 	// joined.NetworkKey is the key verifyNetwork just proved the control plane
@@ -155,7 +138,7 @@ func joinCmd(args []string) error {
 	// makes it a trust anchor is that it was established here, at the one moment
 	// this machine checked it against a network ID given out of band.
 	return awaitAuthorization(ctx, client, id, joined.MembershipID, joined.NetworkKey,
-		dir, c, *wait, *poll, log)
+		dir, c, *fl.wait, *fl.poll, log)
 }
 
 // awaitAuthorization polls the claim endpoint until the membership is approved,
@@ -253,5 +236,37 @@ func awaitAuthorization(ctx context.Context, client *agent.Client, id *device.Id
 			return ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+// joinCmdFlags are the flags of `orbit joinCmd`, declared where the command
+// tree can register them so completion offers what the command parses.
+type joinCmdFlags struct {
+	url     *string
+	network *string
+	name    *string
+	root    *string
+	wait    *time.Duration
+	poll    *time.Duration
+	code    *string
+	dirFlag *string
+}
+
+func bindJoinCmd(fs *flag.FlagSet) joinCmdFlags {
+	return joinCmdFlags{
+		url:     fs.String("url", "", "control plane base URL"),
+		network: fs.String("network", "", "network to join, as a uuid or a slug"),
+		name:    fs.String("name", "", "membership name, unique within the network (default: this machine's hostname)"),
+		root:    fs.String("root", paths.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network"),
+
+		// Waiting is the default because it is what the operator running this
+		// almost always wants: they are about to go and approve it. -wait=0
+		// returns as soon as the join is lodged, which is what a provisioning
+		// script wants.
+		wait: fs.Duration("wait", 30*time.Minute, "how long to wait for an operator to authorize; 0 returns immediately after joining"),
+		poll: fs.Duration("poll", 5*time.Second, "how often to check whether the join has been authorized"),
+
+		code:    fs.String("code", "", "reservation code (or ORBIT_ENROLL_CODE). A valid one is pre-authorization: the membership is created with the name, address and role the operator reserved, instead of landing in the queue"),
+		dirFlag: fs.String("dir", "", "per-network directory (default "+paths.DefaultRoot+"/<network slug>)"),
 	}
 }

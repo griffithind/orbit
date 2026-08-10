@@ -890,7 +890,7 @@ hostile URL fails instead of quietly enrolling into somebody else's mesh:
 
   orbit membership reserve -name web-01 -role default    # prints a code
   sudo orbit agent install                               # on the machine
-  sudo orbit agent join -url <this control plane> -network %s -code <code>
+  sudo orbit join -url <this control plane> -network %s -code <code>
 
 The network identity key names this network. It cannot mint a certificate, so
 it is not the CA key; but anyone holding it can convince a JOINING machine that

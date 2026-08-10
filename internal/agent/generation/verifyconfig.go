@@ -45,7 +45,7 @@ var ErrNoSignature = errors.New("this generation was installed without a signatu
 func (a *Applier) VerifyInstalled(networkKey []byte, membershipID string) error {
 	if len(networkKey) == 0 {
 		return errors.New("no network key is pinned, so the installed configuration " +
-			"cannot be verified; re-run `orbit agent join`")
+			"cannot be verified; re-run `orbit join`")
 	}
 
 	signed, err := os.ReadFile(a.Layout.SignedConfigPath())

@@ -132,12 +132,7 @@ func roleShow(ctx context.Context, args []string) error {
 func roleEdit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("role edit", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		name     = fs.String("name", "", "new name")
-		groups   = fs.String("groups", "", "comma separated groups, replacing the current set")
-		firewall = fs.String("firewall", "", "path to a JSON firewall document, or - for stdin")
-	)
+	fl := bindRoleEdit(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -172,14 +167,14 @@ func roleEdit(ctx context.Context, args []string) error {
 	// the rules on every host carrying it.
 	var req wire.UpdateRoleRequest
 	if supplied["name"] {
-		req.Name = name
+		req.Name = fl.name
 	}
 	if supplied["groups"] {
-		g := csvList(*groups)
+		g := csvList(*fl.groups)
 		req.Groups = &g
 	}
 	if supplied["firewall"] {
-		raw, err := readFirewall(*firewall)
+		raw, err := readFirewall(*fl.firewall)
 		if err != nil {
 			return err
 		}
@@ -316,4 +311,22 @@ func roleRm(ctx context.Context, args []string) error {
 
 	fmt.Fprintf(out, "deleted role %s\n", fs.Arg(0))
 	return nil
+}
+
+// roleEditFlags are the flags of `orbit roleEdit`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type roleEditFlags struct {
+	name     *string
+	groups   *string
+	firewall *string
+}
+
+func bindRoleEdit(fs *flag.FlagSet, o *options) roleEditFlags {
+	o.bind(fs)
+	return roleEditFlags{
+		name:     fs.String("name", "", "new name"),
+		groups:   fs.String("groups", "", "comma separated groups, replacing the current set"),
+		firewall: fs.String("firewall", "", "path to a JSON firewall document, or - for stdin"),
+	}
 }

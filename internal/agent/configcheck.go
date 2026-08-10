@@ -54,7 +54,7 @@ func (l *Loop) networkKey() []byte {
 		// "unpinned" — that would turn a corrupt state file into a host that
 		// accepts anything.
 		l.Log.Error("the pinned network key is unreadable; configuration signatures "+
-			"cannot be checked until `orbit agent join` is re-run", "error", err)
+			"cannot be checked until `orbit join` is re-run", "error", err)
 		return nil
 	}
 	return key

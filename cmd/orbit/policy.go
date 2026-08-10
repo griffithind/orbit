@@ -90,8 +90,7 @@ func inForce(source string) string {
 func policyCheck(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("policy check", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	membership := fs.String("membership", "", "report what this membership would compile to (name or uuid)")
+	fl := bindPolicyCheck(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -111,7 +110,7 @@ func policyCheck(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := o.client.CheckPolicy(ctx, network.Slug, doc, *membership)
+	res, err := o.client.CheckPolicy(ctx, network.Slug, doc, *fl.membership)
 	if err != nil {
 		return err
 	}
@@ -382,4 +381,18 @@ func sourceName(path string) string {
 		return "stdin"
 	}
 	return path
+}
+
+// policyCheckFlags are the flags of `orbit policyCheck`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type policyCheckFlags struct {
+	membership *string
+}
+
+func bindPolicyCheck(fs *flag.FlagSet, o *options) policyCheckFlags {
+	o.bind(fs)
+	return policyCheckFlags{
+		membership: fs.String("membership", "", "report what this membership would compile to (name or uuid)"),
+	}
 }

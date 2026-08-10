@@ -22,17 +22,13 @@ import (
 
 func peersCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("peers", flag.ContinueOnError)
-	var (
-		root    = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
-		network = fs.String("network", "", "which joined network; required only when this host has joined more than one")
-		asJSON  = fs.Bool("json", false, "emit the raw report")
-	)
-	if err := fs.Parse(args); err != nil {
+	fl := bindPeersCmd(fs)
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 
-	path := status.SocketPath(*root)
-	slug, err := resolveNetwork(ctx, path, *network)
+	path := status.SocketPath(*fl.root)
+	slug, err := resolveNetwork(ctx, path, *fl.network)
 	if err != nil {
 		return err
 	}
@@ -42,7 +38,7 @@ func peersCmd(ctx context.Context, args []string) error {
 		return agentError(err, path)
 	}
 
-	if *asJSON {
+	if *fl.asJSON {
 		b, err := json.MarshalIndent(rep, "", "  ")
 		if err != nil {
 			return err
@@ -209,4 +205,21 @@ func dash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// peersCmdFlags are the flags of `orbit peersCmd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type peersCmdFlags struct {
+	root    *string
+	network *string
+	asJSON  *bool
+}
+
+func bindPeersCmd(fs *flag.FlagSet) peersCmdFlags {
+	return peersCmdFlags{
+		root:    fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network"),
+		network: fs.String("network", "", "which joined network; required only when this host has joined more than one"),
+		asJSON:  fs.Bool("json", false, "emit the raw report"),
+	}
 }

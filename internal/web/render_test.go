@@ -242,7 +242,7 @@ func fixtures(s *Server) map[string]*pageData {
 			Membership: nil, Name: "web-04", Network: net,
 			Code: "orbit-code-ijkl-mnop", ExpiresAt: expires,
 			EnrollURL: "https://orbit.example.com",
-			Command:   "orbit agent join -url https://orbit.example.com -network prod -code …",
+			Command:   "orbit join -url https://orbit.example.com -network prod -code …",
 		}),
 		"rotation.html": s.testPage("CA rotation", rv),
 		"audit.html": s.testPage("Audit", auditView{

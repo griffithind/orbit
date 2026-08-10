@@ -26,21 +26,7 @@ import (
 func caCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("ca create", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		days = fs.Int("days", 0,
-			"certificate lifetime; 0 uses the network's default")
-		networks = fs.String("networks", "",
-			"comma-separated overlay prefixes subordinates may claim; "+
-				"empty uses the network's own CIDRs")
-		groups = fs.String("groups", "",
-			"comma-separated groups subordinates may claim; empty means unconstrained")
-		unsafe = fs.String("unsafe-networks", "",
-			"comma-separated EXTERNAL prefixes gateways signed by this CA may route, "+
-				"e.g. 192.168.88.0/24,0.0.0.0/0. Empty permits none. This CANNOT be "+
-				"widened later — it is signed into the certificate, so adding a prefix "+
-				"means another CA and another rotation")
-	)
+	fl := bindCaCreate(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -62,7 +48,7 @@ func caCreate(ctx context.Context, args []string) error {
 	// backdoor — and "the network's own prefixes" is the answer an operator
 	// means every time except when they say otherwise. Making them retype the
 	// CIDRs would only invite a typo that silently narrows what the CA can sign.
-	claim := splitCSV(*networks)
+	claim := splitCSV(*fl.networks)
 	if len(claim) == 0 {
 		net, err := o.client.GetNetwork(ctx, networkID.String())
 		if err != nil {
@@ -78,10 +64,10 @@ func caCreate(ctx context.Context, args []string) error {
 
 	res, err := o.client.CreateCA(ctx, networkID, wire.CreateCARequest{
 		Name:           fs.Arg(0),
-		Days:           *days,
+		Days:           *fl.days,
 		Networks:       claim,
-		Groups:         splitCSV(*groups),
-		UnsafeNetworks: splitCSV(*unsafe),
+		Groups:         splitCSV(*fl.groups),
+		UnsafeNetworks: splitCSV(*fl.unsafe),
 	})
 	if err != nil {
 		return err
@@ -175,9 +161,7 @@ func caLs(ctx context.Context, args []string) error {
 func caActivate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("ca activate", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	ack := fs.Bool("acknowledge-cutoff", false,
-		"promote even though hosts have not converged, cutting them off (emergency use; audited separately)")
+	fl := bindCaActivate(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -213,7 +197,7 @@ func caActivate(ctx context.Context, args []string) error {
 	// removes that gate and its outcome — hosts cut off the mesh — cannot be
 	// undone by deactivating, because their certificates will already have been
 	// signed by the new authority.
-	if *ack {
+	if *fl.ack {
 		if err := o.confirm(fmt.Sprintf(
 			"-acknowledge-cutoff skips the convergence check. Every host that has not applied "+
 				"CA %s will be cut off the mesh at its next renewal. Continue?",
@@ -222,7 +206,7 @@ func caActivate(ctx context.Context, args []string) error {
 		}
 	}
 
-	res, err := o.client.ActivateCA(ctx, caID, *ack)
+	res, err := o.client.ActivateCA(ctx, caID, *fl.ack)
 	if err != nil {
 		if api, ok := isConflict(err); ok {
 			lagging := api.Lagging()
@@ -324,4 +308,45 @@ func caRetire(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(out, "retired %s (%s)\n", res.Value.Name, shortFingerprint(res.Value.Fingerprint))
 	return nil
+}
+
+// caCreateFlags are the flags of `orbit ca create`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type caCreateFlags struct {
+	days     *int
+	networks *string
+	groups   *string
+	unsafe   *string
+}
+
+func bindCaCreate(fs *flag.FlagSet, o *options) caCreateFlags {
+	o.bind(fs)
+	return caCreateFlags{
+		days: fs.Int("days", 0,
+			"certificate lifetime; 0 uses the network's default"),
+		networks: fs.String("networks", "",
+			"comma-separated overlay prefixes subordinates may claim; "+
+				"empty uses the network's own CIDRs"),
+		groups: fs.String("groups", "",
+			"comma-separated groups subordinates may claim; empty means unconstrained"),
+		unsafe: fs.String("unsafe-networks", "",
+			"comma-separated EXTERNAL prefixes gateways signed by this CA may route, "+
+				"e.g. 192.168.88.0/24,0.0.0.0/0. Empty permits none. This CANNOT be "+
+				"widened later — it is signed into the certificate, so adding a prefix "+
+				"means another CA and another rotation"),
+	}
+}
+
+// caActivateFlags are the flags of `orbit ca activate`.
+type caActivateFlags struct {
+	ack *bool
+}
+
+func bindCaActivate(fs *flag.FlagSet, o *options) caActivateFlags {
+	o.bind(fs)
+	return caActivateFlags{
+		ack: fs.Bool("acknowledge-cutoff", false,
+			"promote even though hosts have not converged, cutting them off (emergency use; audited separately)"),
+	}
 }

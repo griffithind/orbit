@@ -28,15 +28,12 @@ import (
 
 func statusCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	var (
-		root   = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
-		asJSON = fs.Bool("json", false, "emit the raw report")
-	)
-	if err := fs.Parse(args); err != nil {
+	fl := bindStatusCmd(fs)
+	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 
-	path := status.SocketPath(*root)
+	path := status.SocketPath(*fl.root)
 	rep, err := status.Fetch(ctx, path)
 	if err != nil {
 		// The command exists to diagnose a broken host, so its own failure has
@@ -53,7 +50,7 @@ func statusCmd(ctx context.Context, args []string) error {
 		return agentError(err, path)
 	}
 
-	if *asJSON {
+	if *fl.asJSON {
 		b, err := json.MarshalIndent(rep, "", "  ")
 		if err != nil {
 			return err
@@ -213,4 +210,19 @@ func plural(n int, noun string) string {
 		return fmt.Sprintf("%d %s", n, noun)
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// statusCmdFlags are the flags of `orbit statusCmd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type statusCmdFlags struct {
+	root   *string
+	asJSON *bool
+}
+
+func bindStatusCmd(fs *flag.FlagSet) statusCmdFlags {
+	return statusCmdFlags{
+		root:   fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network"),
+		asJSON: fs.Bool("json", false, "emit the raw report"),
+	}
 }

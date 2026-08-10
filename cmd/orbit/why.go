@@ -49,12 +49,7 @@ func whyCmd(ctx context.Context, args []string) error {
 	// without a mode flag. -network and -json mean the same thing either way,
 	// which is why they can be shared rather than duplicated.
 	var o options
-	o.bind(fs)
-	var (
-		root  = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network (local form)")
-		proto = fs.String("proto", "any", "any, tcp, udp or icmp")
-		port  = fs.String("port", "any", "destination port, or any")
-	)
+	fl := bindWhyCmd(fs, &o)
 	// parseFlags, not fs.Parse: this is the only diagnostic command that takes
 	// operands, and Go's flag package stops at the first non-flag — so
 	// `orbit why 10.42.0.9 -port 443` would silently ignore -port and answer a
@@ -64,9 +59,9 @@ func whyCmd(ctx context.Context, args []string) error {
 	}
 	switch fs.NArg() {
 	case 1:
-		return whyLocal(ctx, fs.Arg(0), *root, o.network, *proto, *port, o.json)
+		return whyLocal(ctx, fs.Arg(0), *fl.root, o.network, *fl.proto, *fl.port, o.json)
 	case 2:
-		return whyBetween(ctx, &o, fs.Arg(0), fs.Arg(1), *proto, *port)
+		return whyBetween(ctx, &o, fs.Arg(0), fs.Arg(1), *fl.proto, *fl.port)
 	}
 	return usageErrorf("usage: orbit why <peer>            [-proto tcp] [-port 443]\n" +
 		"       orbit why <src> <dst>      [-proto tcp] [-port 443]\n\n" +
@@ -302,4 +297,22 @@ func peerLabel(ex status.Explanation) string {
 		return ex.PeerName
 	}
 	return "<peer>"
+}
+
+// whyCmdFlags are the flags of `orbit whyCmd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type whyCmdFlags struct {
+	root  *string
+	proto *string
+	port  *string
+}
+
+func bindWhyCmd(fs *flag.FlagSet, o *options) whyCmdFlags {
+	o.bind(fs)
+	return whyCmdFlags{
+		root:  fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network (local form)"),
+		proto: fs.String("proto", "any", "any, tcp, udp or icmp"),
+		port:  fs.String("port", "any", "destination port, or any"),
+	}
 }

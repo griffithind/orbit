@@ -23,8 +23,7 @@ import (
 func deviceLs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("device ls", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	gaps := fs.Bool("gaps", false, "only machines whose posture is not fully satisfied, unknowns included")
+	fl := bindDeviceLs(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -54,7 +53,7 @@ func deviceLs(ctx context.Context, args []string) error {
 	)
 	shown := 0
 	for _, d := range res.Value.Devices {
-		if *gaps && postureSatisfied(d.Posture) {
+		if *fl.gaps && postureSatisfied(d.Posture) {
 			continue
 		}
 		shown++
@@ -68,7 +67,7 @@ func deviceLs(ctx context.Context, args []string) error {
 			postureSummary(d.Posture, d.PostureObservedAt), ago(&seen))
 	}
 	if shown == 0 {
-		if *gaps {
+		if *fl.gaps {
 			fmt.Fprintln(out, "every machine's posture is satisfied")
 		} else {
 			fmt.Fprintln(out, "no devices")
@@ -157,8 +156,7 @@ func deviceBlock(ctx context.Context, args []string, unblock bool) error {
 	}
 	fs := flag.NewFlagSet("device "+verb, flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	reason := fs.String("reason", "", "recorded on the device and in the audit log")
+	fl := bindDeviceBlock(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -185,7 +183,7 @@ func deviceBlock(ctx context.Context, args []string, unblock bool) error {
 	if unblock {
 		res, err = o.client.UnblockDevice(ctx, id)
 	} else {
-		res, err = o.client.BlockDevice(ctx, id, *reason)
+		res, err = o.client.BlockDevice(ctx, id, *fl.reason)
 	}
 	if err != nil {
 		return err
@@ -312,15 +310,14 @@ func (o *options) resolveDevice(ctx context.Context, ref string) (uuid.UUID, err
 func deviceSetAddrs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("device set-addrs", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	clear := fs.Bool("clear", false, "remove every public address, so this machine is only found by hole punching")
+	fl := bindDeviceSetAddrs(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
 	if err := o.load(); err != nil {
 		return err
 	}
-	if (fs.NArg() < 2) == !*clear {
+	if (fs.NArg() < 2) == !*fl.clear {
 		return usageErrorf("usage: orbit device set-addrs <machine> <addr>...\n" +
 			"       orbit device set-addrs <machine> -clear\n\n" +
 			"<machine> is a device uuid from `orbit device ls`, or a membership name in\n" +
@@ -334,7 +331,7 @@ func deviceSetAddrs(ctx context.Context, args []string) error {
 	}
 
 	addrs := fs.Args()[1:]
-	if *clear {
+	if *fl.clear {
 		addrs = nil
 	}
 
@@ -357,4 +354,44 @@ func deviceSetAddrs(ctx context.Context, args []string) error {
 		fmt.Fprintf(errOut, "\nEvery network this machine is on re-renders; watch it land:\n\n  orbit converge -wait 2m\n")
 	}
 	return nil
+}
+
+// deviceLsFlags are the flags of `orbit deviceLs`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type deviceLsFlags struct {
+	gaps *bool
+}
+
+func bindDeviceLs(fs *flag.FlagSet, o *options) deviceLsFlags {
+	o.bind(fs)
+	return deviceLsFlags{
+		gaps: fs.Bool("gaps", false, "only machines whose posture is not fully satisfied, unknowns included"),
+	}
+}
+
+// deviceSetAddrsFlags are the flags of `orbit deviceSetAddrs`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type deviceSetAddrsFlags struct {
+	clear *bool
+}
+
+func bindDeviceSetAddrs(fs *flag.FlagSet, o *options) deviceSetAddrsFlags {
+	o.bind(fs)
+	return deviceSetAddrsFlags{
+		clear: fs.Bool("clear", false, "remove every public address, so this machine is only found by hole punching"),
+	}
+}
+
+// deviceBlockFlags are the flags of `orbit device block` and `device unblock`.
+type deviceBlockFlags struct {
+	reason *string
+}
+
+func bindDeviceBlock(fs *flag.FlagSet, o *options) deviceBlockFlags {
+	o.bind(fs)
+	return deviceBlockFlags{
+		reason: fs.String("reason", "", "recorded on the device and in the audit log"),
+	}
 }

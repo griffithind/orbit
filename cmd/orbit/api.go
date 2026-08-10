@@ -28,11 +28,7 @@ import (
 func apiCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("api", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		method = fs.String("method", "", "HTTP method; GET unless a body is supplied, then POST")
-		data   = fs.String("data", "", "request body, or @file to read one, or @- for stdin")
-	)
+	fl := bindApiCmd(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -53,7 +49,7 @@ func apiCmd(ctx context.Context, args []string) error {
 			path, o.url)
 	}
 
-	body, err := readBody(*data)
+	body, err := readBody(*fl.data)
 	if err != nil {
 		return err
 	}
@@ -61,7 +57,7 @@ func apiCmd(ctx context.Context, args []string) error {
 	// Default GET, and POST only when a body was given. Anything destructive
 	// has to be named: a typo that turns a listing into a DELETE is exactly the
 	// failure this command's convenience would otherwise introduce.
-	m := strings.ToUpper(*method)
+	m := strings.ToUpper(*fl.method)
 	if m == "" {
 		m = http.MethodGet
 		if len(body) > 0 {
@@ -111,4 +107,20 @@ func readBody(spec string) ([]byte, error) {
 		return b, nil
 	}
 	return []byte(spec), nil
+}
+
+// apiCmdFlags are the flags of `orbit apiCmd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type apiCmdFlags struct {
+	method *string
+	data   *string
+}
+
+func bindApiCmd(fs *flag.FlagSet, o *options) apiCmdFlags {
+	o.bind(fs)
+	return apiCmdFlags{
+		method: fs.String("method", "", "HTTP method; GET unless a body is supplied, then POST"),
+		data:   fs.String("data", "", "request body, or @file to read one, or @- for stdin"),
+	}
 }

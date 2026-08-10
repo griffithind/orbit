@@ -78,22 +78,14 @@ func orNever(s string) string {
 func tokenCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("token create", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		// No default name, matching `orbitd token create`. A CI credential and a
-		// break-glass credential want very different names in an audit log, and
-		// "token" tells a reader nothing.
-		name   = fs.String("name", "", "token name, recorded in the audit log (required)")
-		scopes = fs.String("scopes", "", "comma separated scopes; \"*\" grants everything (required)")
-		days   = fs.Int("expires-days", 0, "expire after N days; 0 means never")
-	)
+	fl := bindTokenCreate(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
-	if *name == "" {
+	if *fl.name == "" {
 		return usageErrorf("-name is required; it is what the audit log will say about every action this token takes")
 	}
-	scopeList := splitCSV(*scopes)
+	scopeList := splitCSV(*fl.scopes)
 	if len(scopeList) == 0 {
 		return usageErrorf("-scopes must name at least one scope, e.g. -scopes hosts:read,networks:read")
 	}
@@ -101,10 +93,10 @@ func tokenCreate(ctx context.Context, args []string) error {
 		return err
 	}
 
-	o.announce(fmt.Sprintf("Creating token %q with scopes %s", *name, strings.Join(scopeList, ", ")))
+	o.announce(fmt.Sprintf("Creating token %q with scopes %s", *fl.name, strings.Join(scopeList, ", ")))
 
 	res, err := o.client.CreateToken(ctx, wire.CreateTokenRequest{
-		Name: *name, Scopes: scopeList, ExpiresInDays: *days,
+		Name: *fl.name, Scopes: scopeList, ExpiresInDays: *fl.days,
 	})
 	if err != nil {
 		return err
@@ -188,4 +180,25 @@ func tokenRevoke(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(out, "revoked %s\n", tokenID)
 	return nil
+}
+
+// tokenCreateFlags are the flags of `orbit tokenCreate`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type tokenCreateFlags struct {
+	name   *string
+	scopes *string
+	days   *int
+}
+
+func bindTokenCreate(fs *flag.FlagSet, o *options) tokenCreateFlags {
+	o.bind(fs)
+	return tokenCreateFlags{
+		// No default name, matching `orbitd token create`. A CI credential and a
+		// break-glass credential want very different names in an audit log, and
+		// "token" tells a reader nothing.
+		name:   fs.String("name", "", "token name, recorded in the audit log (required)"),
+		scopes: fs.String("scopes", "", "comma separated scopes; \"*\" grants everything (required)"),
+		days:   fs.Int("expires-days", 0, "expire after N days; 0 means never"),
+	}
 }

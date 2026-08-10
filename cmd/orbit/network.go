@@ -69,11 +69,7 @@ func networkLs(ctx context.Context, args []string) error {
 func convergeCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("converge", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		wait  = fs.Duration("wait", 0, "poll until every host has converged, or give up after this long")
-		every = fs.Duration("interval", 5*time.Second, "poll interval while waiting")
-	)
+	fl := bindConvergeCmd(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -100,7 +96,7 @@ func convergeCmd(ctx context.Context, args []string) error {
 	// change — and a non-zero status here would make `orbit converge` unusable
 	// under `set -e` for the reporting it exists to do. -wait is where waiting is
 	// asked for, and only that can time out.
-	if *wait <= 0 {
+	if *fl.wait <= 0 {
 		if o.json {
 			return emitJSON(res.Raw)
 		}
@@ -108,8 +104,8 @@ func convergeCmd(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	deadline := time.Now().Add(*wait)
-	ticker := time.NewTicker(*every)
+	deadline := time.Now().Add(*fl.wait)
+	ticker := time.NewTicker(*fl.every)
 	defer ticker.Stop()
 
 	// progress rewrites one line on a terminal and prints one line per poll
@@ -142,7 +138,7 @@ func convergeCmd(ctx context.Context, args []string) error {
 			// above, which is a local judgement rather than another API call.
 			return fail(exitFailure,
 				"gave up after %s: %d of %d hosts have applied config epoch %d",
-				*wait, res.Value.ConfigApplied, res.Value.MembershipsTotal, res.Value.ConfigEpoch)
+				*fl.wait, res.Value.ConfigApplied, res.Value.MembershipsTotal, res.Value.ConfigEpoch)
 		}
 
 		if !o.json {
@@ -220,4 +216,20 @@ func renderConvergence(r renderer, network *wire.NetworkResponse, c wire.Converg
 	// This is the check that gates CA rotation and the cost of skipping it is
 	// partitioning hosts off the mesh.
 	fmt.Fprintln(out, "\nrotating a CA past these hosts will cut them off")
+}
+
+// convergeCmdFlags are the flags of `orbit convergeCmd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type convergeCmdFlags struct {
+	wait  *time.Duration
+	every *time.Duration
+}
+
+func bindConvergeCmd(fs *flag.FlagSet, o *options) convergeCmdFlags {
+	o.bind(fs)
+	return convergeCmdFlags{
+		wait:  fs.Duration("wait", 0, "poll until every host has converged, or give up after this long"),
+		every: fs.Duration("interval", 5*time.Second, "poll interval while waiting"),
+	}
 }

@@ -150,19 +150,7 @@ func routeList(ctx context.Context, args []string) error {
 func routeAdd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("route add", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		weight = fs.Int("weight", 0,
-			"share of traffic among gateways offering the SAME prefix; 0 means 1. "+
-				"It does not order different prefixes against each other — "+
-				"longest-prefix match does that")
-		masquerade = fs.Bool("masquerade", false,
-			"NAT forwarded traffic. Usually wanted for 0.0.0.0/0 and usually not "+
-				"for a LAN prefix, where the far side can be told a static route")
-		noInstall = fs.Bool("no-install", false,
-			"do not put this route in consumers' system routing tables")
-		mtu = fs.Int("mtu", 0, "per-route MTU; 0 uses the tun's")
-	)
+	fl := bindRouteAdd(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -179,9 +167,9 @@ func routeAdd(ctx context.Context, args []string) error {
 		return err
 	}
 	req := wire.CreateRouteRequest{
-		Prefix: fs.Arg(1), Weight: *weight, Masquerade: *masquerade, MTU: *mtu,
+		Prefix: fs.Arg(1), Weight: *fl.weight, Masquerade: *fl.masquerade, MTU: *fl.mtu,
 	}
-	if *noInstall {
+	if *fl.noInstall {
 		no := false
 		req.Install = &no
 	}
@@ -240,4 +228,30 @@ func routeRemove(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(out, "withdrawn\n")
 	return nil
+}
+
+// routeAddFlags are the flags of `orbit routeAdd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type routeAddFlags struct {
+	weight     *int
+	masquerade *bool
+	noInstall  *bool
+	mtu        *int
+}
+
+func bindRouteAdd(fs *flag.FlagSet, o *options) routeAddFlags {
+	o.bind(fs)
+	return routeAddFlags{
+		weight: fs.Int("weight", 0,
+			"share of traffic among gateways offering the SAME prefix; 0 means 1. "+
+				"It does not order different prefixes against each other — "+
+				"longest-prefix match does that"),
+		masquerade: fs.Bool("masquerade", false,
+			"NAT forwarded traffic. Usually wanted for 0.0.0.0/0 and usually not "+
+				"for a LAN prefix, where the far side can be told a static route"),
+		noInstall: fs.Bool("no-install", false,
+			"do not put this route in consumers' system routing tables"),
+		mtu: fs.Int("mtu", 0, "per-route MTU; 0 uses the tun's"),
+	}
 }

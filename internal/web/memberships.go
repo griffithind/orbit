@@ -364,7 +364,7 @@ func (s *Server) handleUnblock(w http.ResponseWriter, r *http.Request) error {
 
 	return s.redirectWithNotice(w, r, "/ui/memberships/"+membershipID.String(),
 		fmt.Sprintf("Unblocked. Blocklist epoch %d. The machine must still re-enroll, or "+
-			"re-run `orbit agent join`, before it holds a valid certificate again.", epoch))
+			"re-run `orbit join`, before it holds a valid certificate again.", epoch))
 }
 
 //------------------------------------------------------------------------------
@@ -625,7 +625,7 @@ func joinCommand(slug string, hostExists bool, resp *wire.EnrollmentCodeResponse
 	if hostExists {
 		return fmt.Sprintf("orbit agent enroll -url %s -code %s -network %s", url, resp.Code, slug)
 	}
-	return fmt.Sprintf("orbit agent join -url %s -network %s -code %s", url, slug, resp.Code)
+	return fmt.Sprintf("orbit join -url %s -network %s -code %s", url, slug, resp.Code)
 }
 
 //------------------------------------------------------------------------------

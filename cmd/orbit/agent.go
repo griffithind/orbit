@@ -113,12 +113,11 @@ func newLogger() *slog.Logger {
 
 func enrollCmd(args []string) error {
 	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
-	var (
-		url  = fs.String("url", "", "control plane base URL")
-		code = fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)")
-	)
 	df := addDirFlags(fs)
-	_ = fs.Parse(args)
+	fl := bindEnrollCmd(fs)
+	if err := parseLeaf(fs, args); err != nil {
+		return err
+	}
 
 	layout, err := df.layout()
 	if err != nil {
@@ -126,10 +125,10 @@ func enrollCmd(args []string) error {
 	}
 	dir := &layout.Dir
 
-	if *code == "" {
-		*code = os.Getenv("ORBIT_ENROLL_CODE")
+	if *fl.code == "" {
+		*fl.code = os.Getenv("ORBIT_ENROLL_CODE")
 	}
-	if *url == "" || *code == "" {
+	if *fl.url == "" || *fl.code == "" {
 		return errors.New("-url and -code are required")
 	}
 
@@ -149,8 +148,8 @@ func enrollCmd(args []string) error {
 		return fmt.Errorf("generate keypair: %w", err)
 	}
 
-	client := agent.NewClient(*url)
-	resp, err := client.Enroll(ctx, *code, kp, version.Version)
+	client := agent.NewClient(*fl.url)
+	resp, err := client.Enroll(ctx, *fl.code, kp, version.Version)
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {
@@ -194,7 +193,7 @@ func enrollCmd(args []string) error {
 	// still enough to make every LATER generation verifiable, which is what this
 	// is for. Hosts that join by network ID get the stronger form.
 	if err := agent.WriteState(*dir, agent.State{
-		BaseURL:        *url,
+		BaseURL:        *fl.url,
 		AgentURLs:      resp.AgentEndpoints,
 		ConfigEpoch:    resp.ConfigEpoch,
 		BlocklistEpoch: resp.BlocklistEpoch,
@@ -212,14 +211,11 @@ func enrollCmd(args []string) error {
 
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	var (
-		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
-		interval  = fs.Duration("interval", time.Minute, "poll interval")
-		once      = fs.Bool("once", false, "run one iteration and exit")
-		root      = fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network")
-	)
 	df := addDirFlags(fs)
-	_ = fs.Parse(args)
+	fl := bindRunCmd(fs)
+	if err := parseLeaf(fs, args); err != nil {
+		return err
+	}
 
 	log := newLogger()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -234,20 +230,20 @@ func runCmd(args []string) error {
 	// its own certificate, and its own nebula instance — two overlays cannot
 	// share a UDP port or a tun device, so the instances are irreducible — but
 	// they no longer need a process and a unit each.
-	dirs, err := networksToRun(df, *root)
+	dirs, err := networksToRun(df, *fl.root)
 	if err != nil {
 		return err
 	}
-	if len(dirs) == 0 && *once {
+	if len(dirs) == 0 && *fl.once {
 		// -once is a single pass for a test or a cron. Nothing to do and no
 		// later chance to do it, so say so rather than exiting 0 silently.
-		return fmt.Errorf("no joined networks under %s: join one with `orbit agent join`", *root)
+		return fmt.Errorf("no joined networks under %s: join one with `orbit join`", *fl.root)
 	}
 
 	// The set of networks is DISCOVERED and REDISCOVERED, not fixed at startup.
 	//
 	// This is what lets `orbit agent install` be a device-level action and
-	// `orbit agent join` a per-network one. The service is installed once, and
+	// `orbit join` a per-network one. The service is installed once, and
 	// starts before this machine belongs to anything; each join drops a
 	// directory under -root and this loop picks it up on the next pass, with no
 	// restart and nothing to remember to do.
@@ -256,9 +252,9 @@ func runCmd(args []string) error {
 	// installed machine idles here until somebody joins it, which is exactly
 	// what a newly provisioned laptop should do.
 	sup := &supervisor{
-		root: *root, df: df, curve: c,
-		verifyURL: *verifyURL,
-		interval:  *interval, once: *once, log: log,
+		root: *fl.root, df: df, curve: c,
+		verifyURL: *fl.verifyURL,
+		interval:  *fl.interval, once: *fl.once, log: log,
 		running: map[string]*netSlot{},
 	}
 
@@ -273,11 +269,11 @@ func runCmd(args []string) error {
 	//
 	// A failure to serve it is logged and nothing more. Diagnostics are worth
 	// having; they are not worth taking a host's overlays down for.
-	if !*once {
+	if !*fl.once {
 		srv := &status.Server{
-			Path:   status.SocketPath(socketRoot(df, *root)),
+			Path:   status.SocketPath(socketRoot(df, *fl.root)),
 			Log:    log,
-			Report: func(ctx context.Context) status.Report { return report(ctx, *root, sup.slots()) },
+			Report: func(ctx context.Context) status.Report { return report(ctx, *fl.root, sup.slots()) },
 			Peers: func(ctx context.Context, network string) (status.PeerReport, error) {
 				return peerReport(ctx, network, sup.slots())
 			},
@@ -293,12 +289,12 @@ func runCmd(args []string) error {
 		}()
 	}
 
-	log.Info("agent running", "networks", len(dirs), "root", *root)
+	log.Info("agent running", "networks", len(dirs), "root", *fl.root)
 
 	// Watch for networks joined after this process started. Not under -once,
 	// and not when the caller named a single network with -dir or -network:
 	// both mean "exactly this", and rescanning would contradict it.
-	if !*once && !df.explicit() {
+	if !*fl.once && !df.explicit() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -312,7 +308,7 @@ func runCmd(args []string) error {
 
 // supervisor owns the set of networks this process serves.
 //
-// It exists because that set is not fixed: `orbit agent join` writes a new
+// It exists because that set is not fixed: `orbit join` writes a new
 // directory under the agent root at any moment, and the service should pick it
 // up without an operator remembering to restart anything. A restart would also
 // drop every OTHER network's tunnels, which is a poor price for adding one.
@@ -784,18 +780,15 @@ func (n *networkLoop) run(ctx context.Context, interval time.Duration, once bool
 // machine on three networks ran it three times and rewrote the same unit three
 // times.
 //
-// So: install once, then `orbit agent join <network>` per network. The service
+// So: install once, then `orbit join <network>` per network. The service
 // rescans its root, so a join lands without a restart — and without dropping the
 // tunnels of every other network a restart would have taken with it.
 func installCmd(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	var (
-		root      = fs.String("root", paths.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network")
-		verifyURL = fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback")
-		dryRun    = fs.Bool("dry-run", false, "print what would be written and installed, and change nothing")
-		noStart   = fs.Bool("no-start", false, "write the service definition but do not enable or start it")
-	)
-	_ = fs.Parse(args)
+	fl := bindInstallCmd(fs)
+	if err := parseLeaf(fs, args); err != nil {
+		return err
+	}
 
 	// The binary's own path, resolved before anything is written. A unit that
 	// names a path the binary is not at starts once — from the shell that
@@ -808,14 +801,14 @@ func installCmd(args []string) error {
 		return fmt.Errorf("resolve this binary's path: %w", err)
 	}
 
-	plan, err := agent.PlanService(*root, binary, *verifyURL)
+	plan, err := agent.PlanService(*fl.root, binary, *fl.verifyURL)
 	if err != nil {
 		return err
 	}
 
-	if *dryRun {
+	if *fl.dryRun {
 		fmt.Fprintf(errOut, "would write the device key under %s\nwould write %s (%s)\nwould run: %s\n\n",
-			*root, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
+			*fl.root, plan.Path, plan.Manager, strings.Join(plan.Start, " "))
 		fmt.Fprintln(out, plan.Contents)
 		return nil
 	}
@@ -825,7 +818,7 @@ func installCmd(args []string) error {
 	// never expiring, and the same key for every network it will ever join. An
 	// operator can read the fingerprint off this output and recognise the
 	// machine in the authorization queue before it has joined anything.
-	id, err := device.LoadOrCreate(paths.DeviceKeyPath(*root))
+	id, err := device.LoadOrCreate(paths.DeviceKeyPath(*fl.root))
 	if err != nil {
 		return fmt.Errorf("device key: %w", err)
 	}
@@ -837,7 +830,7 @@ func installCmd(args []string) error {
 
 	fmt.Printf("device %s\n", id.Fingerprint())
 
-	if *noStart {
+	if *fl.noStart {
 		fmt.Fprintf(errOut, "\nNot started. When you are ready:\n\n  %s\n",
 			strings.Join(plan.Start, " "))
 	} else if err := plan.Enable(); err != nil {
@@ -856,7 +849,7 @@ func installCmd(args []string) error {
 	// The service is running and serving nothing, which is correct and worth
 	// saying — otherwise the obvious reading of "installed" is "done".
 	fmt.Fprintf(errOut, "\nThis machine belongs to no network yet. Join one:\n\n"+
-		"  sudo orbit agent join -url https://<control-plane> -network <slug>\n\n"+
+		"  sudo orbit join -url https://<control-plane> -network <slug>\n\n"+
 		"Add -code <reservation> to skip the authorization queue. The service picks\n"+
 		"up each network as it is joined; there is nothing to restart.\n")
 	return nil
@@ -864,12 +857,11 @@ func installCmd(args []string) error {
 
 func uninstallCmd(args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	var (
-		keepDir = fs.Bool("keep-dir", false, "leave the per-network directory, including the certificate and key")
-		yes     = fs.Bool("y", false, "do not ask")
-	)
 	df := addDirFlags(fs)
-	_ = fs.Parse(args)
+	fl := bindUninstallCmd(fs)
+	if err := parseLeaf(fs, args); err != nil {
+		return err
+	}
 
 	layout, err := df.layout()
 	if err != nil {
@@ -895,7 +887,7 @@ func uninstallCmd(args []string) error {
 
 	fmt.Fprintf(errOut, "About to remove %s from this host:\n\n  service   %s\n  directory %s\n",
 		slug, plan.Name, layout.Dir)
-	if *keepDir {
+	if *fl.keepDir {
 		fmt.Fprintln(errOut, "  (keeping the directory: -keep-dir)")
 	}
 	if len(others) > 0 {
@@ -904,11 +896,11 @@ func uninstallCmd(args []string) error {
 	}
 	fmt.Fprintln(errOut)
 
-	if !*yes {
+	if !*fl.yes {
 		// Irreversible: the private key is generated on this host and exists
 		// nowhere else, so removing the directory means re-enrolling rather
 		// than restarting.
-		if err := confirmUninstall(slug, *keepDir); err != nil {
+		if err := confirmUninstall(slug, *fl.keepDir); err != nil {
 			return err
 		}
 	}
@@ -945,7 +937,7 @@ func uninstallCmd(args []string) error {
 		fmt.Fprintf(errOut, "left %s in place\n", plan.Path)
 	}
 
-	if !*keepDir {
+	if !*fl.keepDir {
 		if err := os.RemoveAll(layout.Dir); err != nil {
 			return fmt.Errorf("remove %s: %w", layout.Dir, err)
 		}
@@ -972,4 +964,68 @@ func confirmUninstall(slug string, keepDir bool) error {
 	return o.confirm(fmt.Sprintf(
 		"Remove %s for %q? The key was generated on this host and exists nowhere "+
 			"else, so this host re-enrols rather than restarts.", what, slug))
+}
+
+// installCmdFlags are the flags of `orbit installCmd`, declared where the command
+// tree can register them so completion offers what the command parses.
+type installCmdFlags struct {
+	root      *string
+	verifyURL *string
+	dryRun    *bool
+	noStart   *bool
+}
+
+func bindInstallCmd(fs *flag.FlagSet) installCmdFlags {
+	return installCmdFlags{
+		root:      fs.String("root", paths.DefaultRoot, "directory holding this machine's device key and one subdirectory per joined network"),
+		verifyURL: fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback"),
+		dryRun:    fs.Bool("dry-run", false, "print what would be written and installed, and change nothing"),
+		noStart:   fs.Bool("no-start", false, "write the service definition but do not enable or start it"),
+	}
+}
+
+// runCmdFlags are the flags of `orbit runCmd`, declared where the command
+// tree can register them so completion offers what the command parses.
+type runCmdFlags struct {
+	verifyURL *string
+	interval  *time.Duration
+	once      *bool
+	root      *string
+}
+
+func bindRunCmd(fs *flag.FlagSet) runCmdFlags {
+	return runCmdFlags{
+		verifyURL: fs.String("verify-url", "", "URL polled over the overlay after an apply; empty disables verification and rollback"),
+		interval:  fs.Duration("interval", time.Minute, "poll interval"),
+		once:      fs.Bool("once", false, "run one iteration and exit"),
+		root:      fs.String("root", paths.DefaultRoot, "directory holding one subdirectory per joined network"),
+	}
+}
+
+// enrollCmdFlags are the flags of `orbit enrollCmd`, declared where the command
+// tree can register them so completion offers what the command parses.
+type enrollCmdFlags struct {
+	url  *string
+	code *string
+}
+
+func bindEnrollCmd(fs *flag.FlagSet) enrollCmdFlags {
+	return enrollCmdFlags{
+		url:  fs.String("url", "", "control plane base URL"),
+		code: fs.String("code", "", "enrollment code (or ORBIT_ENROLL_CODE)"),
+	}
+}
+
+// uninstallCmdFlags are the flags of `orbit uninstallCmd`, declared where the command
+// tree can register them so completion offers what the command parses.
+type uninstallCmdFlags struct {
+	keepDir *bool
+	yes     *bool
+}
+
+func bindUninstallCmd(fs *flag.FlagSet) uninstallCmdFlags {
+	return uninstallCmdFlags{
+		keepDir: fs.Bool("keep-dir", false, "leave the per-network directory, including the certificate and key"),
+		yes:     fs.Bool("y", false, "do not ask"),
+	}
 }

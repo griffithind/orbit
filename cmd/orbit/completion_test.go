@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -161,5 +162,81 @@ func TestCompletedFlagsAreAccepted(t *testing.T) {
 					c, cmd, strings.TrimSpace(stderr.String()))
 			}
 		}
+	}
+}
+
+// TestCompletionOffersExactlyWhatEachCommandParses.
+//
+// The strong form of TestCompletedFlagsAreAccepted, and it checks both
+// directions: every flag a command accepts must be offered, and every flag
+// offered must be accepted. Either gap is a lie told by the shell.
+//
+// The command's own -h output is the reference, because that is generated from
+// the FlagSet the command actually parses with. Completion builds its set from
+// the tree instead, and the point of this test is that those two constructions
+// have to agree — the tree is a second description of the same thing, and a
+// second description is exactly what goes stale.
+//
+// Leaves that take no flags at all are skipped rather than required to declare
+// an empty set: there is nothing to get wrong.
+func TestCompletionOffersExactlyWhatEachCommandParses(t *testing.T) {
+	checked := 0
+	var walk func(c *command, path []string)
+	walk = func(c *command, path []string) {
+		if len(c.Subs) > 0 {
+			for _, s := range c.Subs {
+				walk(s, append(append([]string{}, path...), s.Name))
+			}
+			return
+		}
+		if c.Hidden || len(path) == 0 {
+			return
+		}
+
+		// -h renders the flags from the FlagSet the command parses with.
+		var help bytes.Buffer
+		savedErr, savedOut := errOut, out
+		errOut, out = &help, &help
+		_ = rootCommand().dispatch(context.Background(), "", append(append([]string{}, path...), "-h"))
+		errOut, out = savedErr, savedOut
+
+		parsed := map[string]bool{}
+		for _, line := range strings.Split(help.String(), "\n") {
+			if m := regexp.MustCompile(`^\s+-([a-zA-Z][\w-]*)`).FindStringSubmatch(line); m != nil {
+				parsed[m[1]] = true
+			}
+		}
+		if len(parsed) == 0 {
+			return
+		}
+		checked++
+
+		offered := map[string]bool{}
+		for _, c := range completeTo(t, append(append([]string{}, path...), "--")...) {
+			offered[strings.TrimPrefix(c, "--")] = true
+		}
+
+		for f := range parsed {
+			if !offered[f] {
+				t.Errorf("orbit %s accepts -%s but completion never offers it",
+					strings.Join(path, " "), f)
+			}
+		}
+		for f := range offered {
+			if !parsed[f] {
+				t.Errorf("orbit %s completes --%s but does not accept it",
+					strings.Join(path, " "), f)
+			}
+		}
+	}
+	walk(rootCommand(), nil)
+
+	// The skip for flagless leaves is load-bearing, so it must not quietly grow
+	// to cover everything. An earlier run of this test checked far fewer
+	// commands than it appeared to: status and peers parsed with fs.Parse
+	// rather than parseLeaf, so their usage went to the real stderr instead of
+	// the buffer, "parsed" came back empty, and both were skipped in silence.
+	if checked < 30 {
+		t.Fatalf("only %d commands had flags to check; this test has stopped looking at most of the tree", checked)
 	}
 }

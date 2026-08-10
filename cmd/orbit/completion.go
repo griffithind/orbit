@@ -59,11 +59,10 @@ func completeCmd(_ context.Context, args []string) error {
 		if node.Flags != nil {
 			node.Flags(fs)
 		}
-		// The common set every admin command carries, registered by the same
-		// method the commands themselves call. Listing them here instead drifted:
-		// bind registers "y" and this list said "--yes", so completion offered a
-		// flag that did not exist and typing it failed.
-		(&options{}).bind(fs)
+		// No default set is added here. Every leaf declares its own flags to the
+		// tree, including the shared admin ones, so this offers exactly what the
+		// command will accept. Filling a gap with an assumption is what produced
+		// --yes for everything and --token-file for `orbit status`.
 		var names []string
 		fs.VisitAll(func(f *flag.Flag) { names = append(names, "--"+f.Name) })
 		emitMatching(names, partial)

@@ -20,16 +20,7 @@ import (
 func auditCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	var o options
-	o.bind(fs)
-	var (
-		action     = fs.String("action", "", "exact action, e.g. ca.activated")
-		targetType = fs.String("target-type", "", "host, role, ca, token, network")
-		targetID   = fs.String("target-id", "", "uuid of the target")
-		since      = fs.String("since", "", "RFC3339 lower bound, or a duration like 24h")
-		until      = fs.String("until", "", "RFC3339 upper bound, or a duration like 1h")
-		limit      = fs.Int("limit", 0, "rows to return, up to 1000")
-		meta       = fs.Bool("meta", false, "print each entry's metadata")
-	)
+	fl := bindAuditCmd(fs, &o)
 	if err := parseLeaf(fs, args); err != nil {
 		return err
 	}
@@ -38,16 +29,16 @@ func auditCmd(ctx context.Context, args []string) error {
 	}
 
 	f := adminclient.AuditFilter{
-		Action:     *action,
-		TargetType: *targetType,
-		TargetID:   *targetID,
-		Limit:      *limit,
+		Action:     *fl.action,
+		TargetType: *fl.targetType,
+		TargetID:   *fl.targetID,
+		Limit:      *fl.limit,
 	}
 	var err error
-	if f.Since, err = parseWhen(*since, "-since"); err != nil {
+	if f.Since, err = parseWhen(*fl.since, "-since"); err != nil {
 		return err
 	}
-	if f.Until, err = parseWhen(*until, "-until"); err != nil {
+	if f.Until, err = parseWhen(*fl.until, "-until"); err != nil {
 		return err
 	}
 
@@ -83,7 +74,7 @@ func auditCmd(ctx context.Context, args []string) error {
 	}
 	t.render(out)
 
-	if *meta {
+	if *fl.meta {
 		fmt.Fprintln(out)
 		for _, a := range res.Value {
 			if len(a.Meta) == 0 || string(a.Meta) == "{}" {
@@ -118,4 +109,30 @@ func parseWhen(v, flagName string) (time.Time, error) {
 	return time.Time{}, usageErrorf(
 		"%s %q is neither an RFC3339 timestamp (2026-01-02T15:04:05Z) nor a duration (24h, 30m)",
 		flagName, strings.TrimSpace(v))
+}
+
+// auditCmdFlags are the flags of `orbit auditCmd`, declared here so the
+// command tree can register them: completion offers exactly the set the
+// command parses, because there is only one declaration of it.
+type auditCmdFlags struct {
+	action     *string
+	targetType *string
+	targetID   *string
+	since      *string
+	until      *string
+	limit      *int
+	meta       *bool
+}
+
+func bindAuditCmd(fs *flag.FlagSet, o *options) auditCmdFlags {
+	o.bind(fs)
+	return auditCmdFlags{
+		action:     fs.String("action", "", "exact action, e.g. ca.activated"),
+		targetType: fs.String("target-type", "", "host, role, ca, token, network"),
+		targetID:   fs.String("target-id", "", "uuid of the target"),
+		since:      fs.String("since", "", "RFC3339 lower bound, or a duration like 24h"),
+		until:      fs.String("until", "", "RFC3339 upper bound, or a duration like 1h"),
+		limit:      fs.Int("limit", 0, "rows to return, up to 1000"),
+		meta:       fs.Bool("meta", false, "print each entry's metadata"),
+	}
 }
