@@ -147,6 +147,12 @@ thing the control plane cannot tell you; `why` separates an expired
 certificate from a missing tunnel from a denying rule, which all look identical
 from `ping`.
 
+Tab completion, once:
+
+```bash
+orbit completion zsh > "${fpath[1]}/_orbit"      # or bash, or fish
+```
+
 [docs/deployment.md](docs/deployment.md) has the whole of it — bring-up order,
 sealing the KEK passphrase with `systemd-creds`, backups, alerts, and what
 survives an outage.

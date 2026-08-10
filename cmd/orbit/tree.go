@@ -178,7 +178,17 @@ already resolved. The body is emitted verbatim, so it is interchangeable with cu
 
 			{
 				Section: "META",
-				Name:    "version", Short: "print the build version",
+				Name:    "completion", Short: "shell completion for bash, zsh or fish",
+				Args: "<shell>", Raw: true,
+				Run: completionCmd,
+			},
+			{
+				Name: "__complete", Short: "internal: completion candidates", Hidden: true,
+				Raw: true,
+				Run: completeCmd,
+			},
+			{
+				Name: "version", Short: "print the build version",
 				MaxArgs: 0,
 				Run: func(context.Context, []string) error {
 					fmt.Fprintln(out, version.Version)

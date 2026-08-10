@@ -42,6 +42,6 @@ Do **not** write one for a refactor, a naming choice, or a decision with an obvi
 | [0001](0001-nebula-as-a-vendored-library.md) | Nebula as a vendored library, not a subprocess | Accepted |
 | [0002](0002-fail-static-control-plane.md) | The control plane fails static | Accepted |
 | [0003](0003-revocation-terminates-live-sessions.md) | Revocation terminates live sessions | Accepted |
-| [0004](0004-no-cli-framework.md) | The CLI stays on stdlib `flag` | Proposed |
+| [0004](0004-no-cli-framework.md) | The CLI stays on stdlib `flag` | Accepted |
 | [0005](0005-no-compatibility-before-v1.md) | No backward compatibility before v1.0 | Accepted |
 | [0006](0006-code-must-be-reachable.md) | Code must be reachable from `main` | Accepted |

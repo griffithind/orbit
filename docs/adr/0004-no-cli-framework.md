@@ -1,6 +1,6 @@
 # ADR-0004: The CLI stays on stdlib `flag`
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-10
 
 ## Context
@@ -67,9 +67,11 @@ Stay on stdlib `flag`. Harden the in-house layer instead:
    `parseFlags` error checks unreachable today** and sends flag errors to real stderr rather than
    the `errOut` seam the tests use. There is a working template in the tree at
    `third_party/nebula/cmd/nebula-cert/`.
-3. Vendor cobra's four completion scripts under `internal/cli/completion/` (Apache 2.0, attribution
-   required), add a hidden `__complete` handler over the command tree, ship
-   `orbit completion bash|zsh|fish|powershell`.
+3. Add a hidden `__complete` handler over the command tree and ship
+   `orbit completion bash|zsh|fish`. Vendoring cobra's Apache-2.0 scripts was the
+   plan while this was Proposed, and is what Tailscale did; writing three short
+   ones instead was chosen at acceptance, because cobra's carry a directive
+   protocol this tree does not implement and powershell has no user here yet.
 4. Adopt `--flag` as the canonical and documented spelling. Per ADR-0005 there is no compatibility
    obligation, so the single-dash spellings in `e2e/` and `docs/` are rewritten rather than
    aliased. Note that stdlib `flag` accepts both spellings regardless, so this is a documentation
@@ -106,13 +108,23 @@ maintenance, and the current code shows what happens when nobody owns it: 9 flag
 command that does not exist — surviving the documented `host → membership` rename. The `command`
 struct exists to make that class of drift impossible rather than merely unlikely.
 
-**Committed to.** Completion becomes our code, and it must be tested. `orbit help --json` (the
+**Settled since acceptance.** Completion shipped as `orbit completion` plus a
+hidden `__complete`: roughly ninety lines of Go and three short shell scripts,
+against the two-to-five modules a framework would have added to a binary that
+ships to every managed host. The scripts are written rather than vendored from
+cobra — that route is legitimate and Tailscale took it, but cobra's scripts
+carry a directive protocol this tree does not implement, and a copy of code
+whose features you do not use is a maintenance cost pretending to be a shortcut.
+Eleven tests cover it, including completion through the `member` alias and the
+refusal to guess after an unknown word.
+
+**Committed to.** Completion is our code, and it must be tested. `orbit help --json` (the
 analogue of Tailscale's `--json-docs`) is the mechanism: it walks the tree and emits every command,
 flag and alias, which drives both documentation generation and the completion tests from one
 source.
 
-**Revisit if** we ever need Windows-native shell integration beyond what the vendored scripts give,
-or if the command count roughly triples. At Tailscale's 134 commands the calculus would be
+**Revisit if** we ever need powershell or Windows-native shell integration, or
+if the command count roughly triples. At Tailscale's 134 commands the calculus would be
 different; at Orbit's ~50 it is not close.
 
 ## References
