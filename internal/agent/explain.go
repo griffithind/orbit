@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/griffithind/orbit/internal/fwmatch"
+	fwparse "github.com/griffithind/orbit/internal/fwmatch/parse"
 )
 
 // Explaining whether this host may reach a peer.
@@ -135,7 +136,7 @@ func Explain(eng *Embedded, layout Layout, req ExplainRequest) (Explanation, err
 	if err != nil {
 		return ex, err
 	}
-	inbound, outbound, err := fwmatch.LoadRulesFromString(yamlCfg)
+	inbound, outbound, err := fwparse.LoadRulesFromString(yamlCfg)
 	if err != nil {
 		return ex, err
 	}

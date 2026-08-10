@@ -28,7 +28,6 @@ func AuditMeta(v any) []byte {
 	return b
 }
 
-
 // Audit returns an append-only record of what happened in this deployment.
 //
 // The application role holds no UPDATE or DELETE grant on orbit.audit_log (see

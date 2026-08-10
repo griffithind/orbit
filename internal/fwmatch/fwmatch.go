@@ -39,16 +39,32 @@ package fwmatch
 
 import (
 	"fmt"
-	"io"
-	"log/slog"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
+)
 
-	"github.com/slackhq/nebula"
-	"github.com/slackhq/nebula/config"
-	"github.com/slackhq/nebula/firewall"
+// nebula's firewall constants, redeclared so this package imports nothing.
+//
+// internal/wire embeds a Decision, and every API client embeds wire — so two
+// struct fields were enough to link nebula, gvisor and wireguard into
+// internal/adminclient, a package that makes HTTP requests and nothing else.
+//
+// These are IANA protocol numbers plus two sentinels, and they are part of the
+// configuration grammar an operator writes rather than an internal detail. They
+// are still a duplicate, so internal/fwmatch/parse asserts at compile time that
+// the two sets agree: if nebula renumbers one, that package stops building
+// rather than this one silently disagreeing with the firewall it models.
+const (
+	ProtoAny    uint8 = 0
+	ProtoICMP   uint8 = 1
+	ProtoTCP    uint8 = 6
+	ProtoUDP    uint8 = 17
+	ProtoICMPv6 uint8 = 58
+
+	PortAny      int32 = 0
+	PortFragment int32 = -1
 )
 
 // Rule is one firewall rule, exactly as nebula parsed it.
@@ -92,13 +108,13 @@ func (r Rule) String() string {
 // ProtoName is nebula's protocol constant as an operator writes it.
 func ProtoName(p uint8) string {
 	switch p {
-	case firewall.ProtoAny:
+	case ProtoAny:
 		return "any"
-	case firewall.ProtoTCP:
+	case ProtoTCP:
 		return "tcp"
-	case firewall.ProtoUDP:
+	case ProtoUDP:
 		return "udp"
-	case firewall.ProtoICMP, firewall.ProtoICMPv6:
+	case ProtoICMP, ProtoICMPv6:
 		return "icmp"
 	}
 	return fmt.Sprint(p)
@@ -107,69 +123,15 @@ func ProtoName(p uint8) string {
 // PortRange renders a rule's port span.
 func PortRange(start, end int32) string {
 	switch {
-	case start == firewall.PortAny:
+	case start == PortAny:
 		return "any"
-	case start == firewall.PortFragment:
+	case start == PortFragment:
 		return "fragment"
 	case start == end:
 		return fmt.Sprint(start)
 	}
 	return fmt.Sprintf("%d-%d", start, end)
 }
-
-// ruleCollector is a nebula.FirewallInterface that records instead of enforcing.
-type ruleCollector struct{ rules []Rule }
-
-var _ nebula.FirewallInterface = (*ruleCollector)(nil)
-
-func (rc *ruleCollector) AddRule(incoming bool, proto uint8, startPort, endPort int32,
-	groups []string, host, cidr, localCidr, caName, caSha string) error {
-	rc.rules = append(rc.rules, Rule{
-		Incoming: incoming, Proto: proto, StartPort: startPort, EndPort: endPort,
-		Groups: slices.Clone(groups), Host: host, CIDR: cidr,
-		LocalCIDR: localCidr, CAName: caName, CASha: caSha,
-	})
-	return nil
-}
-
-// LoadRules reads the firewall out of a configuration on disk.
-//
-// path is Layout.NebulaConfigArg — a file in authoritative mode and a directory
-// in fragment mode — so in fragment mode this returns the operator's rules
-// alongside Orbit's. That is deliberate: the question is what is in force, not
-// what Orbit believes it sent.
-func LoadRules(path string) (inbound, outbound []Rule, err error) {
-	c := config.NewC(quiet())
-	if err := c.Load(path); err != nil {
-		return nil, nil, fmt.Errorf("load %s: %w", path, err)
-	}
-	return collect(c)
-}
-
-// LoadRulesFromString is the same over a configuration held in memory, which is
-// how the control plane asks about a ruleset it just compiled.
-func LoadRulesFromString(raw string) (inbound, outbound []Rule, err error) {
-	c := config.NewC(quiet())
-	if err := c.LoadString(raw); err != nil {
-		return nil, nil, fmt.Errorf("parse configuration: %w", err)
-	}
-	return collect(c)
-}
-
-func collect(c *config.C) (inbound, outbound []Rule, err error) {
-	var in, out ruleCollector
-	if err := nebula.AddFirewallRulesFromConfig(quiet(), true, c, &in); err != nil {
-		return nil, nil, fmt.Errorf("firewall.inbound: %w", err)
-	}
-	if err := nebula.AddFirewallRulesFromConfig(quiet(), false, c, &out); err != nil {
-		return nil, nil, fmt.Errorf("firewall.outbound: %w", err)
-	}
-	return in.rules, out.rules, nil
-}
-
-// quiet discards nebula's config logging, which is at info and would otherwise
-// land in the middle of a diagnosis.
-func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // Query is one question: may this traffic pass?
 type Query struct {
@@ -181,8 +143,8 @@ type Query struct {
 	// LocalAddr is this end's own overlay address, which local_cidr matches.
 	LocalAddr netip.Addr
 
-	// Proto is a firewall.Proto* constant, and Port the DESTINATION port in
-	// both directions (nebula firewall/packet.go). firewall.PortAny asks the
+	// Proto is a Proto* constant, and Port the DESTINATION port in
+	// both directions (nebula firewall/packet.go). PortAny asks the
 	// weaker question "is any traffic at all permitted".
 	Proto uint8
 	Port  int32
@@ -321,7 +283,7 @@ func judge(r Rule, q Query) (Outcome, string) {
 }
 
 func protoMatches(rule, want uint8) bool {
-	if rule == firewall.ProtoAny {
+	if rule == ProtoAny {
 		return true
 	}
 	// "Any protocol" as a QUESTION is weaker than a rule's "any", exactly as it
@@ -329,10 +291,10 @@ func protoMatches(rule, want uint8) bool {
 	// rule answers it.
 	//
 	// Its absence here was not cosmetic. `orbit why` defaults -proto to "any",
-	// which is firewall.ProtoAny, so the DEFAULT invocation of the diagnostic
+	// which is ProtoAny, so the DEFAULT invocation of the diagnostic
 	// reported "no rule permits this traffic" against every tcp-only policy and
 	// listed the rules that did permit it as near-misses on "protocol".
-	if want == firewall.ProtoAny {
+	if want == ProtoAny {
 		return true
 	}
 	// ICMP and ICMPv6 share a table in nebula and a name in the config.
@@ -342,15 +304,15 @@ func protoMatches(rule, want uint8) bool {
 	return rule == want
 }
 
-func isICMP(p uint8) bool { return p == firewall.ProtoICMP || p == firewall.ProtoICMPv6 }
+func isICMP(p uint8) bool { return p == ProtoICMP || p == ProtoICMPv6 }
 
 func portMatches(r Rule, want int32) bool {
-	if r.StartPort == firewall.PortAny {
+	if r.StartPort == PortAny {
 		return true
 	}
 	// "Any port" as a QUESTION is weaker than a rule's "any": it asks whether
 	// anything at all is permitted, so every rule answers it.
-	if want == firewall.PortAny {
+	if want == PortAny {
 		return true
 	}
 	return want >= r.StartPort && want <= r.EndPort
@@ -427,13 +389,13 @@ func reachesPeer(r Rule, q Query) bool {
 func ParseProto(s string) (uint8, error) {
 	switch strings.ToLower(s) {
 	case "", "any":
-		return firewall.ProtoAny, nil
+		return ProtoAny, nil
 	case "tcp":
-		return firewall.ProtoTCP, nil
+		return ProtoTCP, nil
 	case "udp":
-		return firewall.ProtoUDP, nil
+		return ProtoUDP, nil
 	case "icmp":
-		return firewall.ProtoICMP, nil
+		return ProtoICMP, nil
 	}
 	return 0, fmt.Errorf("unknown protocol %q: nebula supports any, tcp, udp and icmp", s)
 }
@@ -443,9 +405,9 @@ func ParseProto(s string) (uint8, error) {
 func ParsePort(s string) (int32, error) {
 	switch strings.ToLower(s) {
 	case "", "any":
-		return firewall.PortAny, nil
+		return PortAny, nil
 	case "fragment":
-		return firewall.PortFragment, nil
+		return PortFragment, nil
 	}
 	n, err := strconv.ParseUint(s, 10, 16)
 	if err != nil {

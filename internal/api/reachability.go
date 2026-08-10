@@ -8,6 +8,7 @@ import (
 	"net/netip"
 
 	"github.com/griffithind/orbit/internal/fwmatch"
+	fwparse "github.com/griffithind/orbit/internal/fwmatch/parse"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/policy"
 	"github.com/griffithind/orbit/internal/store"
@@ -28,7 +29,7 @@ import (
 // whenever a host has not converged, and neither command could be trusted.
 //
 // The rulesets go back through nebula's own parser (nebulacfg.FirewallYAML into
-// fwmatch.LoadRulesFromString) rather than being converted field by field, so
+// fwparse.LoadRulesFromString) rather than being converted field by field, so
 // this and the agent share one matcher and cannot contradict each other.
 
 func (s *Server) handleReachability(w http.ResponseWriter, r *http.Request) {
@@ -169,7 +170,7 @@ func compiledRules(c policy.Compiler, doc policy.Document, membershipID string) 
 	if err != nil {
 		return tables{}, err
 	}
-	in, out, err := fwmatch.LoadRulesFromString(yamlDoc)
+	in, out, err := fwparse.LoadRulesFromString(yamlDoc)
 	if err != nil {
 		// The compiler produced something nebula will not read. That is a bug
 		// worth surfacing loudly here rather than at four hundred hosts.

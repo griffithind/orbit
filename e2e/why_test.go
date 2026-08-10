@@ -20,6 +20,7 @@ import (
 
 	orbitca "github.com/griffithind/orbit/internal/ca"
 	"github.com/griffithind/orbit/internal/fwmatch"
+	fwparse "github.com/griffithind/orbit/internal/fwmatch/parse"
 )
 
 // The cross-check that keeps `orbit why` honest.
@@ -301,7 +302,7 @@ func TestExplainerAgreesWithNebulaOnOutbound(t *testing.T) {
 	}
 	waitForTunnel(t, cliSvc, 443)
 
-	_, out, err := fwmatch.LoadRules(cliCfg)
+	_, out, err := fwparse.LoadRules(cliCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +368,7 @@ func TestExplainerAgreesWithNebulaOnInbound(t *testing.T) {
 	}
 	waitForTunnel(t, cliSvc, 443)
 
-	in, _, err := fwmatch.LoadRules(lhCfg)
+	in, _, err := fwparse.LoadRules(lhCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +438,7 @@ firewall:
 		t.Fatal(err)
 	}
 
-	_, out, err := fwmatch.LoadRules(path)
+	_, out, err := fwparse.LoadRules(path)
 	if err != nil {
 		t.Fatal(err)
 	}
