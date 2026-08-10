@@ -47,9 +47,6 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
-// New wraps an existing pool.
-func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
-
 // Open connects using dsn. The DSN should authenticate as the unprivileged
 // application role (orbit_app), not the migration role, so the application
 // cannot alter the schema or rewrite the audit log.
@@ -58,6 +55,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
+	applyPoolDefaults(cfg)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
@@ -67,6 +65,48 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("ping: %w", err)
 	}
 	return &Store{pool: pool}, nil
+}
+
+// Pool and statement limits, set explicitly because every default here is wrong
+// for a control plane.
+//
+// MaxConns: pgxpool defaults to max(4, NumCPU). On a small control plane that is
+// four, and four is not a pool, it is a queue with a deadline. It also made the
+// nested-acquisition bug below fatal rather than merely wasteful.
+//
+// lock_timeout: PutPolicy and UpdateRole take FOR UPDATE. Without a timeout, one
+// wedged transaction blocks every writer for that network until their HTTP
+// contexts expire — while each of them holds a pool connection.
+//
+// idle_in_transaction_session_timeout: a client that vanishes mid-transaction
+// otherwise holds its row locks until the TCP connection is reaped, which can be
+// hours.
+const (
+	poolMaxConns        = 16
+	poolMaxConnLifetime = time.Hour
+	stmtTimeout         = "30s"
+	lockTimeout         = "5s"
+	idleInTxTimeout     = "60s"
+)
+
+func applyPoolDefaults(cfg *pgxpool.Config) {
+	cfg.MaxConns = poolMaxConns
+	cfg.MaxConnLifetime = poolMaxConnLifetime
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	// Set rather than defaulted: a DSN that names one of these means the
+	// operator has thought about it, and overriding that silently is worse than
+	// either value.
+	for k, v := range map[string]string{
+		"statement_timeout":                   stmtTimeout,
+		"lock_timeout":                        lockTimeout,
+		"idle_in_transaction_session_timeout": idleInTxTimeout,
+	} {
+		if _, ok := cfg.ConnConfig.RuntimeParams[k]; !ok {
+			cfg.ConnConfig.RuntimeParams[k] = v
+		}
+	}
 }
 
 // CloseGrace bounds how long Close waits for the pool to drain.
@@ -112,10 +152,46 @@ type Tx struct {
 	tx pgx.Tx
 }
 
+// inTxKey carries the open transaction so a nested Read can join it rather than
+// acquire a second connection.
+type inTxKey struct{}
+
+// ErrNestedTx is returned when a transaction is opened while one is already held
+// on the same context.
+//
+// This is a deadlock, not a style violation. Both Tx and Read acquire from the
+// pool unconditionally, so a nested call takes a SECOND connection while holding
+// the first and blocks in Acquire until its context expires. With MaxConns
+// connections doing it at once, none can ever be released.
+//
+// It was reachable: Enroll opens a transaction, and the certificate path reaches
+// Vault.get, which called Store.Read. The registry cache hid it, so it surfaced
+// only when the cache was cold — a restart, or immediately after a CA rotation
+// changed the fingerprint that keys it. Which is to say: exactly when enrollment
+// load is highest.
+//
+// Failing loudly in development is the point. A hang gives no stack, no log line
+// and no clue.
+var ErrNestedTx = errors.New("store: transaction opened while one is already held on this context; " +
+	"pass the existing *Tx down instead of calling Store.Tx or Store.Read again")
+
+func markInTx(ctx context.Context, tx *Tx) context.Context {
+	return context.WithValue(ctx, inTxKey{}, tx)
+}
+
+// currentTx returns the transaction already open on this context, if any.
+func currentTx(ctx context.Context) *Tx {
+	tx, _ := ctx.Value(inTxKey{}).(*Tx)
+	return tx
+}
+
 // Tx runs fn inside a read-write transaction, committing if it returns nil.
 //
 // fn must not retain the *Tx beyond its own return.
 func (s *Store) Tx(ctx context.Context, fn func(context.Context, *Tx) error) error {
+	if currentTx(ctx) != nil {
+		return ErrNestedTx
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -126,7 +202,9 @@ func (s *Store) Tx(ctx context.Context, fn func(context.Context, *Tx) error) err
 		_ = tx.Rollback(ctx)
 	}()
 
-	if err := fn(ctx, &Tx{tx: tx}); err != nil {
+	wrapped := &Tx{tx: tx}
+	ctx = markInTx(ctx, wrapped)
+	if err := fn(ctx, wrapped); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -139,14 +217,45 @@ func (s *Store) Tx(ctx context.Context, fn func(context.Context, *Tx) error) err
 //
 // A separate method so read paths are visibly read paths at the call site, and
 // so an accidental write fails loudly rather than committing.
+// RepeatableRead rather than the default READ COMMITTED, because a read path
+// that issues several statements and calls the result consistent has to be. The
+// trust-bundle handler reads the bundle, then the CA list, then per-CA counts;
+// at READ COMMITTED those are three snapshots. It costs nothing under Postgres
+// MVCC and makes the guarantee the callers already assume a real one.
+//
+// Note this is safe to add here and NOT on Tx: there is no 40001 retry anywhere
+// in this package, which is correct at READ COMMITTED for writes. Raising the
+// write path's isolation without adding one would turn ordinary contention into
+// 500s.
+// A Read nested inside an open transaction JOINS it rather than acquiring a
+// second connection. That is what makes the deadlock structurally impossible
+// instead of merely detected: Vault.get reads a secret through Store.Read, and
+// the certificate path reaches it from inside Enroll's transaction. Erroring
+// there would be honest but would simply move the outage.
+//
+// Joining is also the more correct read. The nested query sees the outer
+// transaction's own uncommitted writes, which is what a caller reading back
+// something it just wrote expects.
+//
+// It does cost one property: a nested Read runs inside a read-WRITE transaction,
+// so it no longer fails loudly on an accidental write. Store.Tx remaining an
+// error when nested is what keeps that from being a general escape hatch.
 func (s *Store) Read(ctx context.Context, fn func(context.Context, *Tx) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if tx := currentTx(ctx); tx != nil {
+		return fn(ctx, tx)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		AccessMode: pgx.ReadOnly,
+		IsoLevel:   pgx.RepeatableRead,
+	})
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := fn(ctx, &Tx{tx: tx}); err != nil {
+	wrapped := &Tx{tx: tx}
+	ctx = markInTx(ctx, wrapped)
+	if err := fn(ctx, wrapped); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
