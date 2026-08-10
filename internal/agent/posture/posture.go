@@ -1,4 +1,4 @@
-package agent
+package posture
 
 import (
 	"os"
@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -38,7 +39,7 @@ func Facts(nebulaVersion string) *wire.DeviceFacts {
 	f := &wire.DeviceFacts{
 		OS:            runtime.GOOS,
 		Arch:          runtime.GOARCH,
-		AgentVersion:  Version,
+		AgentVersion:  version.Version,
 		NebulaVersion: nebulaVersion,
 	}
 	f.OSVersion = osRelease()

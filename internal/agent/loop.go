@@ -14,6 +14,7 @@ import (
 
 	"github.com/slackhq/nebula/cert"
 
+	"github.com/griffithind/orbit/internal/agent/posture"
 	"github.com/griffithind/orbit/internal/version"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -971,8 +972,8 @@ func (l *Loop) reportRequest() wire.ReportRequest {
 	//
 	// A host on three networks sends this three times; the control plane records
 	// it once, against the device. See docs/model.md §3.
-	req.Facts = Facts("")
-	req.Posture = Posture()
+	req.Facts = posture.Facts("")
+	req.Posture = posture.Posture()
 	return req
 }
 
@@ -994,7 +995,7 @@ func (l *Loop) baseReportRequest() wire.ReportRequest {
 	return wire.ReportRequest{
 		ConfigEpoch:                l.State.ConfigEpoch,
 		BlocklistEpoch:             l.State.BlocklistEpoch,
-		AgentVersion:               Version,
+		AgentVersion:               version.Version,
 		RevertedFromConfigEpoch:    l.State.PendingRevertFromConfigEpoch,
 		RevertedFromBlocklistEpoch: l.State.PendingRevertFromBlocklistEpoch,
 		// Sent on every report, not only after a revert. A quarantine is
@@ -1017,11 +1018,6 @@ func (l *Loop) retryPendingRevert(ctx context.Context) {
 	}
 	l.report(ctx)
 }
-
-// Version identifies the agent to the control plane. Aliased from
-// internal/version so a build stamps every binary with one value; two version
-// strings in one repo is the number that guarantees they disagree.
-var Version = version.Version
 
 // RunOptions configures the long-running agent.
 type RunOptions struct {
