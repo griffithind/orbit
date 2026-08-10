@@ -220,7 +220,7 @@ func checkHint(err error) string {
 			"nebula's firewall is default-deny, so every host would render an empty rule set " +
 			"and drop all traffic while reporting a successful apply. " +
 			"PUT a policy document first"
-	case strings.Contains(msg, "host_tun_dev"):
+	case strings.Contains(msg, "membership_tun_dev"):
 		return "a tun device name must be 15 characters or fewer: Linux copies it into a " +
 			"fixed 16-byte field with no error, so a longer one is silently truncated and " +
 			"two long names collide into a single interface"
@@ -689,7 +689,7 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 		// wants, and one extra query on a single-host read is a different cost
 		// from one per row in a listing, which is why this is not in ListHosts.
 		//
-		// The limit is a bound, not a page: certificate_one_active_per_host_version
+		// The limit is a bound, not a page: certificate_one_active_per_membership_version
 		// permits one active certificate per cert_version, so this is one row,
 		// or two during a v1-to-v2 migration.
 		certs, err = tx.MembershipCertificates(ctx, membershipID,

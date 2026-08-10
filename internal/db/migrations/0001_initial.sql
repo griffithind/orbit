@@ -102,6 +102,12 @@ CREATE INDEX secret_network_idx ON orbit.secret USING btree (network_id, kind);
 -- IPv6 CIDR would issue certificates that no host would accept. The CHECK uses
 -- cidrs_have_ipv6 to refuse the combination at write time rather than at issuance.
 --
+-- curve carries one permitted value and one constraint saying so. It had two —
+-- an enum-style check listing CURVE25519 and P256, and a narrower one requiring
+-- P256 — where the narrower subsumes the wider, so the wider could never fail.
+-- The column stays because nebula's config names the curve; the dead constraint
+-- does not.
+--
 -- routes_changed_at exists because a route is only an intent until the gateway's
 -- CERTIFICATE carries the prefix. It tells the issuer that outstanding
 -- certificates no longer describe the topology.
@@ -126,7 +132,6 @@ CREATE TABLE orbit.network (
     CONSTRAINT network_cert_ttl_check CHECK ((cert_ttl > '00:00:00'::interval)),
     CONSTRAINT network_cert_version_check CHECK ((cert_version = ANY (ARRAY[1, 2]))),
     CONSTRAINT network_config_overrides_check CHECK ((jsonb_typeof(config_overrides) = 'object'::text)),
-    CONSTRAINT network_curve_check CHECK ((curve = ANY (ARRAY['CURVE25519'::text, 'P256'::text]))),
     CONSTRAINT network_curve_p256 CHECK ((curve = 'P256'::text)),
     CONSTRAINT network_firewall_source_check CHECK ((firewall_source = ANY (ARRAY['role'::text, 'policy'::text]))),
     CONSTRAINT network_identity_public_key_check CHECK ((length(identity_public_key) = 32)),
@@ -364,21 +369,21 @@ CREATE TABLE orbit.membership (
     advertise_port integer,
     exit_route_id uuid,
     routes_changed_at timestamp with time zone,
-    CONSTRAINT host_config_overrides_check CHECK ((jsonb_typeof(config_overrides) = 'object'::text)),
-    CONSTRAINT host_listen_port_check CHECK (((listen_port > 0) AND (listen_port < 65536))),
-    CONSTRAINT host_tun_dev_check CHECK ((tun_dev ~ '^[a-z0-9][a-z0-9-]{0,14}$'::text)),
+    CONSTRAINT membership_config_overrides_check CHECK ((jsonb_typeof(config_overrides) = 'object'::text)),
+    CONSTRAINT membership_listen_port_check CHECK (((listen_port > 0) AND (listen_port < 65536))),
+    CONSTRAINT membership_tun_dev_check CHECK ((tun_dev ~ '^[a-z0-9][a-z0-9-]{0,14}$'::text)),
     CONSTRAINT membership_advertise_port_check CHECK (((advertise_port IS NULL) OR ((advertise_port >= 1) AND (advertise_port <= 65535)))),
     CONSTRAINT membership_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'created'::text, 'enrolled'::text, 'active'::text, 'suspended'::text, 'deleted'::text])))
 );
 
 ALTER TABLE ONLY orbit.membership
-    ADD CONSTRAINT host_network_id_id_key UNIQUE (network_id, id);
+    ADD CONSTRAINT membership_network_id_id_key UNIQUE (network_id, id);
 
 ALTER TABLE ONLY orbit.membership
-    ADD CONSTRAINT host_network_id_name_key UNIQUE (network_id, name);
+    ADD CONSTRAINT membership_network_id_name_key UNIQUE (network_id, name);
 
 ALTER TABLE ONLY orbit.membership
-    ADD CONSTRAINT host_pkey PRIMARY KEY (id);
+    ADD CONSTRAINT membership_pkey PRIMARY KEY (id);
 
 CREATE INDEX membership_convergence_idx ON orbit.membership USING btree (network_id, applied_blocklist_epoch, applied_config_epoch);
 
@@ -399,7 +404,7 @@ CREATE TABLE orbit.membership_address (
 );
 
 ALTER TABLE ONLY orbit.membership_address
-    ADD CONSTRAINT host_address_pkey PRIMARY KEY (network_id, addr);
+    ADD CONSTRAINT membership_address_pkey PRIMARY KEY (network_id, addr);
 
 CREATE INDEX membership_address_membership_idx ON orbit.membership_address USING btree (membership_id);
 
@@ -470,9 +475,9 @@ ALTER TABLE ONLY orbit.certificate
 
 CREATE INDEX certificate_ca_idx ON orbit.certificate USING btree (ca_id) WHERE (state = 'active'::text);
 
-CREATE INDEX certificate_host_issued_idx ON orbit.certificate USING btree (membership_id, issued_at DESC, id DESC);
+CREATE INDEX certificate_membership_issued_idx ON orbit.certificate USING btree (membership_id, issued_at DESC, id DESC);
 
-CREATE UNIQUE INDEX certificate_one_active_per_host_version ON orbit.certificate USING btree (membership_id, cert_version) WHERE (state = 'active'::text);
+CREATE UNIQUE INDEX certificate_one_active_per_membership_version ON orbit.certificate USING btree (membership_id, cert_version) WHERE (state = 'active'::text);
 
 CREATE INDEX certificate_renewal_idx ON orbit.certificate USING btree (not_after) WHERE (state = 'active'::text);
 
@@ -674,28 +679,28 @@ ALTER TABLE ONLY orbit.certificate
     ADD CONSTRAINT certificate_network_id_ca_id_fkey FOREIGN KEY (network_id, ca_id) REFERENCES orbit.ca(network_id, id);
 
 ALTER TABLE ONLY orbit.certificate
-    ADD CONSTRAINT certificate_network_id_host_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
+    ADD CONSTRAINT certificate_network_id_membership_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY orbit.control_plane
-    ADD CONSTRAINT control_plane_network_id_host_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
+    ADD CONSTRAINT control_plane_network_id_membership_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY orbit.enrollment_credential
-    ADD CONSTRAINT enrollment_credential_network_id_host_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
+    ADD CONSTRAINT enrollment_credential_network_id_membership_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY orbit.enrollment_credential
     ADD CONSTRAINT enrollment_credential_role_fk FOREIGN KEY (network_id, reserved_role_id) REFERENCES orbit.role(network_id, id) ON DELETE SET NULL (reserved_role_id);
 
 ALTER TABLE ONLY orbit.membership_address
-    ADD CONSTRAINT host_address_network_id_host_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
+    ADD CONSTRAINT membership_address_network_id_membership_id_fkey FOREIGN KEY (network_id, membership_id) REFERENCES orbit.membership(network_id, id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY orbit.membership
-    ADD CONSTRAINT host_device_id_fkey FOREIGN KEY (device_id) REFERENCES orbit.device(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT membership_device_id_fkey FOREIGN KEY (device_id) REFERENCES orbit.device(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY orbit.membership
-    ADD CONSTRAINT host_network_id_fkey FOREIGN KEY (network_id) REFERENCES orbit.network(id) ON DELETE CASCADE;
+    ADD CONSTRAINT membership_network_id_fkey FOREIGN KEY (network_id) REFERENCES orbit.network(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY orbit.membership
-    ADD CONSTRAINT host_network_id_role_id_fkey FOREIGN KEY (network_id, role_id) REFERENCES orbit.role(network_id, id) ON DELETE RESTRICT;
+    ADD CONSTRAINT membership_network_id_role_id_fkey FOREIGN KEY (network_id, role_id) REFERENCES orbit.role(network_id, id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY orbit.membership
     ADD CONSTRAINT membership_exit_route_id_fkey FOREIGN KEY (exit_route_id) REFERENCES orbit.route(id) ON DELETE SET NULL;
