@@ -71,7 +71,7 @@ import (
 )
 
 // Render modes. These mirror store.ConfigMode* and the CHECK constraint in
-// migrations/0008_instance_resources.sql.
+// migrations/0001_initial.sql.
 const ()
 
 // Paths locates the files the agent manages alongside the configuration. They

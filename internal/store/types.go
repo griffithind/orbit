@@ -8,7 +8,7 @@ import (
 )
 
 // Lifecycle states. These mirror the CHECK constraints in
-// migrations/0001_schema.sql; adding a value requires changing both.
+// migrations/0001_initial.sql; adding a value requires changing both.
 const (
 	CAPending  = "pending"
 	CAActive   = "active"

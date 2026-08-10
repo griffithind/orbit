@@ -75,6 +75,17 @@ for a year does not become careful on the day it tags v1.0. The mitigation is th
 its own expiry, and that the v1.0 checklist includes superseding it with a written policy for each
 of the three surfaces.
 
+> **Acted on, 2026-08-11.** "The schema can be one file" is now true. The twenty-six migrations
+> were collapsed into `migrations/0001_initial.sql`, which is the change this ADR licenses and
+> which is safe exactly once. Equivalence was proved rather than assumed: both forms were applied
+> to empty databases and compared through the catalogs — 173 columns, 100 constraints, 58 indexes,
+> 184 grants and 3 triggers identical. The only textual difference was a redundant paren pair in
+> `network_name_shape` that Postgres itself drops when re-parsing an `AND` chain.
+>
+> The collapse also fixed a class of rot rather than an instance: three Go comments already cited
+> migration files that did not exist (`0002_rls.sql`, `0006_role_network_fk.sql`,
+> `0005_default_privileges.sql`). With one file there is nothing left to drift.
+
 **Committed to.** Saying so publicly. A pre-1.0 version number is not sufficient notice; the README
 must state that upgrades may require re-enrolment, because the alternative is somebody discovering
 it during an upgrade.
@@ -82,7 +93,8 @@ it during an upgrade.
 ## References
 
 - `cmd/orbit/membership.go` — nine `"host …"` flag sets, sixteen stale usage strings
-- `migrations/0016_rename_host_to_membership.sql` and the drop-column migrations
+- `migrations/0016_rename_host_to_membership.sql` and the drop-column migrations — collapsed
+  away on 2026-08-11; readable in git history before that commit
 - `internal/wire/wire.go:1227` — the `fwmatch.Decision` fields that link nebula
 - `internal/api/resources.go:1080` — the single-symbol import of `internal/agent`
 - `internal/api/convergence.go` — the frozen `?format=text` routes

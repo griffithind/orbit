@@ -33,7 +33,7 @@ func AuditMeta(v any) []byte {
 // Audit returns an append-only record of what happened in this deployment.
 //
 // The application role holds no UPDATE or DELETE grant on orbit.audit_log (see
-// migrations/0002_rls.sql). That is deliberate: an audit trail the application
+// migrations/0001_initial.sql). That is deliberate: an audit trail the application
 // can rewrite is not an audit trail. Corrections are new entries.
 
 // AppendAudit writes an audit record inside the caller's transaction.

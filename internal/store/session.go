@@ -23,7 +23,7 @@ import (
 // this file follows from that: the row stores token_id, and ResolveSession
 // JOINs orbit.api_token so the token's revocation and expiry are re-applied on
 // every single request alongside the session's own. See
-// migrations/0010_ui_session.sql for the argument at length, and
+// migrations/0001_initial.sql for the argument at length, and
 // RevokeAPIToken's doc comment for the property being preserved.
 
 // UISessionPrefix marks a session cookie's value, for the reason

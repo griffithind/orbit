@@ -415,7 +415,7 @@ func TestAuditLogIsAppendOnly(t *testing.T) {
 // host.network_id. That is the right division of labour — an application-layer
 // check can be raced by a concurrent request, and a control plane that mints
 // identities cannot rest an isolation property on one — but it means the
-// constraint added in 0006_role_network_fk.sql is the only thing standing
+// role_network_id_fkey in 0001_initial.sql is the only thing standing
 // between an operator typo and network B's firewall rules being rendered
 // verbatim into a network A host's config by enroll.renderFor.
 //
@@ -497,9 +497,9 @@ func TestHostRoleIsScopedToNetwork(t *testing.T) {
 	}
 }
 
-// TestFutureTablesAreGrantedToAppRole covers 0005_default_privileges.sql.
+// TestFutureTablesAreGrantedToAppRole covers ALTER DEFAULT PRIVILEGES.
 //
-// 0002's GRANT ... ON ALL TABLES was evaluated once and covered only the tables
+// The GRANT ... ON ALL TABLES in 0001_initial.sql is evaluated once and covers only the tables
 // that existed at that moment, so a table created by a later migration reached
 // production with no grant to orbit_app — a failure that shows up as a runtime
 // permission error rather than a migration failure. This asserts the standing

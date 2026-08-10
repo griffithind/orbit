@@ -15,7 +15,7 @@ import (
 // The network policy document: one per network, versioned, and the switch that
 // decides whether it or the per-role rules are what hosts actually render.
 //
-// See migrations/0009_network_policy.sql for why this is a table with history
+// See migrations/0001_initial.sql for why this is a table with history
 // rather than a column, why the document is jsonb, and why the two firewall
 // sources are mutually exclusive. The short form of the last one: nebula's
 // firewall is allow-only and rules across config files concatenate, so two

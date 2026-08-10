@@ -545,7 +545,7 @@ func (t *Tx) InsertCertificate(ctx context.Context, c *Certificate) error {
 	// network_id is selected from the host rather than accepted as a parameter.
 	//
 	// The column exists to carry certificate's composite references to host and
-	// ca (see 0001_schema.sql), and a caller-supplied value would be one more
+	// ca (see 0001_initial.sql), and a caller-supplied value would be one more
 	// place the two could disagree — the exact failure the composite keys are
 	// there to prevent. Deriving it in the same statement means the row cannot
 	// be written with a network that is not the host's, no matter what any

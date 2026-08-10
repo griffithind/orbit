@@ -4,7 +4,7 @@
 // a consistent view use Store.Read, which opens a read-only one so an
 // accidental write fails loudly instead of committing.
 //
-// The application connects as an unprivileged role (migrations/0002_grants.sql):
+// The application connects as an unprivileged role (migrations/0001_initial.sql):
 // it holds no CREATE and cannot rewrite the audit log, so a bug cannot alter the
 // schema and a compromise cannot erase its own tracks.
 package store
