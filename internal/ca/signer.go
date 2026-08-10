@@ -134,6 +134,14 @@ func SignBytes(curve cert.Curve, key []byte, certBytes []byte) ([]byte, error) {
 	}
 }
 
+// ErrDigestSigningUnsupported means a signer cannot sign a pre-computed digest.
+//
+// Distinct from a signing failure: the fix is a different key or backend, not a
+// retry. Ed25519 signs the message itself, so given only a digest there is no
+// way to produce a signature a verifier would accept — the preimage is exactly
+// what is missing.
+var ErrDigestSigningUnsupported = errors.New("this signer cannot sign a digest")
+
 // SignDigestBytes signs an already-computed digest with a raw private key.
 //
 // P-256 and SHA-256 only, and the refusal is the point rather than a gap.

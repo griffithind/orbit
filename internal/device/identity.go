@@ -76,11 +76,11 @@ func fromKey(k *ecdsa.PrivateKey) (*Identity, error) {
 
 // PublicKey returns the DER SubjectPublicKeyInfo.
 //
-// SPKI rather than a raw point because this key's second job is to be the
-// subject of an X.509 device certificate (internal/ca.DeviceCertParams takes
-// exactly this), and because SPKI is self-describing: it carries the algorithm
-// and the curve, so a future key type does not need a parallel field on the
-// wire saying which one it is.
+// SPKI rather than a raw point because it is self-describing: it carries the
+// algorithm and the curve, so a future key type needs no parallel field on the
+// wire saying which one it is. It is also the shape an X.509 certificate takes
+// as its subject, should device certificates ever be issued — but that is a
+// property of the encoding, not a promise that anything issues them.
 func (i *Identity) PublicKey() []byte { return i.spki }
 
 // Fingerprint is the device's stable name: hex SHA-256 of the SPKI.

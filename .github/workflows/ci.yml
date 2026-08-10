@@ -63,6 +63,32 @@ jobs:
       - name: build
         run: go build ./...
 
+      # Reachability, not coverage. See docs/adr/0006-code-must-be-reachable.md.
+      #
+      # Scoped to ./cmd/... deliberately: ./... counts a test as a caller, and
+      # that blind spot is what let Loop.Run — the push channel, the config
+      # self-heal and host reconciliation, some 1,200 lines — ship fully tested
+      # and never executed by the daemon, while e2e measured a path production
+      # does not take.
+      - name: no unreachable code
+        run: |
+          go run golang.org/x/tools/cmd/deadcode@latest -test ./cmd/... > found.txt || true
+          # Match on package-qualified name, not the bare identifier: Status,
+          # Describe and Restart each name methods on several types, and
+          # allowing one would silently allow all of them.
+          sed -nE 's#^([^:]+):[0-9]+:[0-9]+: unreachable func: (.+)$#\1 \2#p' found.txt \
+            | sort -u > found-names.txt
+          grep -vE '^\s*(#|$)' .github/deadcode-allow.txt | sort -u > allowed.txt
+          if comm -23 found-names.txt allowed.txt | grep -q .; then
+            echo "Unreachable from the binaries, and not in .github/deadcode-allow.txt:"
+            comm -23 found-names.txt allowed.txt | sed 's/^/  /'
+            echo
+            echo "Wire it or delete it — see docs/adr/0006-code-must-be-reachable.md."
+            echo "The allow file is for code the analysis cannot see: other platforms,"
+            echo "reflection. Not for code whose caller is coming later."
+            exit 1
+          fi
+
       # Uninstrumented, and that is required rather than merely convenient:
       # e2e/revocation_test.go asserts a propagation deadline, and under -race
       # that assertion measures the race detector instead of the system.

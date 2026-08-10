@@ -1,0 +1,48 @@
+# Functions permitted to be unreachable from ./cmd/..., one "file symbol" per
+# line. See docs/adr/0006-code-must-be-reachable.md.
+#
+# The gate matches package-qualified names, not bare identifiers: Status,
+# Describe and Restart each name methods on several types, and allowing one
+# must not silently allow the rest.
+#
+# What belongs here permanently: code the static analysis genuinely cannot see —
+# platform-specific implementations that do not build on the CI host, and code
+# reached by reflection.
+#
+# Everything below is the BASELINE as of 2026-08-10, not a permanent exemption.
+# It is 31 entries, mostly *Func adapter types and test-only affordances, and it
+# exists so the gate can be switched on today rather than after a triage that
+# would block every other change. ADR-0006 says a growing allow file means the
+# rule is being evaded; this one is expected to SHRINK, and a PR that adds a
+# line to it needs the reason in its message.
+cmd/orbit/agent.go dirFlags.networkRef
+internal/agent/client.go Client.Join
+internal/agent/client.go KeypairFromPrivate
+internal/agent/layout.go Layout.StatePath
+internal/agent/loop.go Loop.RenewNow
+internal/agent/loop.go Loop.SetClock
+internal/agent/reload.go ReloaderFunc.Describe
+internal/agent/reload.go ReloaderFunc.Reload
+internal/agent/supervise.go SupervisorFuncs.Describe
+internal/agent/supervise.go SupervisorFuncs.Ensure
+internal/agent/supervise.go SupervisorFuncs.Restart
+internal/agent/supervise.go SupervisorFuncs.Status
+internal/agent/verify.go NoopVerifier.Describe
+internal/agent/verify.go NoopVerifier.Verify
+internal/agent/verify.go VerifierFunc.Describe
+internal/agent/verify.go VerifierFunc.Verify
+internal/api/routes.go ReadOnlyScopes
+internal/api/server.go Server.Handler
+internal/ca/ca.go Issuer.Certificate
+internal/ca/ca.go Issuer.Fingerprint
+internal/ca/keys.go PublicFromHostKey
+internal/db/migrate.go EnsureRoleLogin
+internal/db/migrate.go quoteIdentifier
+internal/db/migrate.go quoteLiteral
+internal/fwmatch/parse/parse.go LoadRules
+internal/mesh/node.go Node.MembershipID
+internal/nebulacfg/render.go ConfigPathFor
+internal/policy/compile.go Compiler.All
+internal/renewal/renewal.go Policy.Assess
+internal/renewal/renewal.go Urgency.String
+internal/store/session.go ReadOnlyScopes
