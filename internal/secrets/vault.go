@@ -37,10 +37,14 @@ package secrets
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
+
+	"golang.org/x/crypto/hkdf"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -182,6 +186,29 @@ func DeriveKEK(passphrase, salt []byte) (*KEK, error) {
 	}
 	key := argon2.IDKey(passphrase, salt, argonTime, argonMemory, argonThreads, kekLen)
 	return &KEK{key: key}, nil
+}
+
+// Derive returns a subkey for a purpose that is not secret storage.
+//
+// HKDF from the KEK, so it is the same on every replica without being stored
+// anywhere: each process derives the KEK from the same passphrase and the same
+// salt out of orbit.kek, so a value derived from it is shared by construction
+// and never written down. It also rotates when the KEK rotates, which is the
+// correct behaviour for anything keyed off the deployment's secret.
+//
+// The label is domain separation. Two purposes must never share a subkey, and
+// the label is what guarantees that without anyone having to remember it.
+//
+// This is deliberately NOT Seal/Open. Those bind ciphertext to an id and kind
+// because they protect stored key material; this produces a key for signing
+// something ephemeral, where there is no row to bind to.
+func (k *KEK) Derive(label string, n int) ([]byte, error) {
+	out := make([]byte, n)
+	r := hkdf.New(sha256.New, k.key, nil, []byte(label))
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, fmt.Errorf("derive %q: %w", label, err)
+	}
+	return out, nil
 }
 
 // NewSalt generates a per-deployment salt.

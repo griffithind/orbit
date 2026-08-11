@@ -125,6 +125,12 @@ type Config struct {
 	// connection held for weeks, and the pool behind it is the same one every
 	// agent's renewal goes through.
 	MaxStreams int
+
+	// CSRFKey salts the form token. Supply the same bytes to every replica —
+	// cmd/orbitd derives it from the KEK — or forms do not survive a load
+	// balancer. Empty means "generate one per process", which is correct for a
+	// single instance and logged as a warning.
+	CSRFKey []byte
 }
 
 // DefaultMaxStreams bounds concurrent SSE connections.
@@ -146,8 +152,8 @@ type Server struct {
 	tpl    *templates
 	assets *assets
 
-	// csrfKey salts the per-session CSRF token. Generated per process, and that
-	// is a deliberate tradeoff documented at csrfToken.
+	// csrfKey salts the per-session CSRF token. Config.CSRFKey when supplied,
+	// otherwise generated per process — see csrfToken.
 	csrfKey []byte
 
 	// loginLimit bounds sign-in attempts. See newLoginLimiter.
@@ -171,9 +177,29 @@ func New(st *store.Store, es *enroll.Service, sess Sessions, cfg Config, log *sl
 		return nil, err
 	}
 
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
+	// The CSRF key comes from the deployment when there is one.
+	//
+	// It used to be generated here, per process, always. That is fine for one
+	// replica and silently wrong for several: the form token is an HMAC under
+	// this key over the session cookie, so a form rendered by replica A is
+	// refused by replica B on submit — every time, not just after a restart,
+	// which is the only case the old comment reasoned about. docs/design.md
+	// said to run N replicas behind a load balancer, and the console could not.
+	//
+	// Config.CSRFKey is derived from the KEK (vault.DeriveKey), so every replica
+	// computes the same bytes from the same passphrase and the same stored salt,
+	// and nothing is written down. Falling back to a random key keeps tests and
+	// a vault-less bring-up working, at the cost of the property above — so it
+	// says so out loud rather than degrading in silence.
+	key := cfg.CSRFKey
+	if len(key) == 0 {
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+		log.Warn("no deployment CSRF key; generating a per-process one. " +
+			"Forms rendered by this process cannot be submitted to another, " +
+			"so the console must not sit behind a load balancer")
 	}
 
 	return &Server{

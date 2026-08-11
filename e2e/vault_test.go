@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"os"
 	"testing"
@@ -227,5 +229,154 @@ func TestNoVaultIsNotAnError(t *testing.T) {
 	_, err := vault.Open(ctx, h.store)
 	if !errors.Is(err, store.ErrNoKEK) {
 		t.Fatalf("error = %v, want store.ErrNoKEK so orbitd can carry on with file keys", err)
+	}
+}
+
+// TestRotationRekeysEverySecret.
+//
+// docs/key-custody.md said the KEK "rotates, by resealing every secret". The
+// primitives existed — Tx.ListSecrets and Tx.ResealSecret, each documented as
+// being for exactly this — and nothing called either, which the reachability
+// gate could not see because they are exported methods on a type that is
+// instantiated everywhere.
+//
+// The property is narrow and total: after rotating, every stored key opens under
+// the NEW passphrase and none opens under the old one. Half of that is not a
+// weaker version of the whole — a deployment whose secrets are split across two
+// keys has no working passphrase at all.
+func TestRotationRekeysEverySecret(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	resetVault(t)
+	withPassphrase(t, "the original passphrase")
+
+	v, err := vault.Init(ctx, h.store)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// More than one, and of the kind the deployment actually stores, so this
+	// exercises the loop rather than a single row.
+	refs := map[string]ed25519.PrivateKey{}
+	for range 3 {
+		_, priv, err := ca.GenerateNetworkIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ref string
+		if err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+			var err error
+			ref, err = v.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil,
+				ca.MarshalNetworkIdentityPEM(priv))
+			return err
+		}); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		refs[ref] = priv
+	}
+
+	n, err := v.Rotate(ctx, []byte("the new passphrase"))
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if n != len(refs) {
+		t.Errorf("re-sealed %d secrets, expected %d", n, len(refs))
+	}
+
+	// A fresh process, holding only the new passphrase, opens everything.
+	withPassphrase(t, "the new passphrase")
+	after, err := vault.Open(ctx, h.store)
+	if err != nil {
+		t.Fatalf("open with the new passphrase: %v", err)
+	}
+	for ref, want := range refs {
+		got, err := after.NetworkIdentity(ctx, ref)
+		if err != nil {
+			t.Fatalf("read %s after rotation: %v", ref, err)
+		}
+		if !got.Equal(want) {
+			t.Errorf("%s came back as a different key", ref)
+		}
+	}
+
+	// And the old passphrase is genuinely retired. If this still opened, the
+	// rotation would have added a key rather than replaced one.
+	withPassphrase(t, "the original passphrase")
+	if _, err := vault.Open(ctx, h.store); err == nil {
+		t.Error("the old passphrase still opens the vault after rotation")
+	}
+}
+
+// TestAFailedRotationChangesNothing.
+//
+// The reason Rotate is one transaction. A partial rotation is the worst outcome
+// available: secrets under two different keys, a stored salt that opens only
+// some of them, and a control plane that fails its verifier check and will not
+// start — with every CA signing key present and unreadable.
+//
+// Driven by corrupting one row so the old key cannot open it, which is what a
+// bit-flip or a restore of mismatched backups would look like. The rotation must
+// abort with the deployment exactly as it was.
+func TestAFailedRotationChangesNothing(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	resetVault(t)
+	withPassphrase(t, "before any rotation")
+
+	v, err := vault.Init(ctx, h.store)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	_, priv, err := ca.GenerateNetworkIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var good string
+	if err := h.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		var err error
+		good, err = v.PutTx(ctx, tx, secrets.KindNetworkIdentity, nil,
+			ca.MarshalNetworkIdentityPEM(priv))
+		return err
+	}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// A second row the old key cannot open.
+	conn, err := pgx.Connect(ctx, dsn("ORBIT_TEST_DSN", adminDSN))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO orbit.secret (kind, nonce, ciphertext)
+		VALUES ('network_identity_key', $1, $2)`,
+		make([]byte, 24), bytes.Repeat([]byte{0xff}, 48)); err != nil {
+		t.Fatalf("plant a corrupt secret: %v", err)
+	}
+
+	if _, err := v.Rotate(ctx, []byte("a passphrase that must not take effect")); err == nil {
+		t.Fatal("rotation reported success despite a secret it could not open")
+	}
+
+	// Nothing moved: the original passphrase still opens the vault, and the key
+	// that was readable before is readable now.
+	withPassphrase(t, "before any rotation")
+	again, err := vault.Open(ctx, h.store)
+	if err != nil {
+		t.Fatalf("the original passphrase no longer opens the vault: %v", err)
+	}
+	got, err := again.NetworkIdentity(ctx, good)
+	if err != nil {
+		t.Fatalf("read a key that was fine before the failed rotation: %v", err)
+	}
+	if !got.Equal(priv) {
+		t.Error("the key changed under a rotation that failed")
+	}
+
+	// And the passphrase the failed rotation was heading for must not work.
+	withPassphrase(t, "a passphrase that must not take effect")
+	if _, err := vault.Open(ctx, h.store); err == nil {
+		t.Error("the new passphrase opens the vault after a rotation that failed")
 	}
 }

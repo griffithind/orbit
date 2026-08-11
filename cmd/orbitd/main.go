@@ -62,6 +62,8 @@ func main() {
 		err = migrateCmd(os.Args[2:])
 	case "token":
 		err = tokenCmd(os.Args[2:])
+	case "kek":
+		err = kekCmd(os.Args[2:])
 	case "version", "-version", "--version":
 		fmt.Println(version.Version)
 		return
@@ -194,6 +196,7 @@ func usage() {
   doctor     preflight: listen addresses, mesh ports, database, migration state
   migrate    apply database migrations (needs the admin DSN, not the app one)
   token      manage API tokens offline (break-glass; see docs/deployment.md)
+  kek        rotate the key encryption key, re-sealing every stored secret
   version    print the build version
 
 Run "orbitd <command> -h" for flags.
@@ -380,10 +383,20 @@ func serve(args []string) error {
 	// someone needs this, and a console reachable only over the mesh is
 	// unreachable exactly then.
 	if *uiAddr != "" {
+		// Derived from the KEK, so every replica computes the same key and a
+		// form rendered by one can be submitted to another. Per-process keys
+		// made the console the one surface that could not sit behind the load
+		// balancer docs/design.md tells operators to use.
+		csrfKey, cerr := vlt.DeriveKey("orbit ui csrf form token v1", 32)
+		if cerr != nil {
+			return fmt.Errorf("derive the ui csrf key: %w", cerr)
+		}
+
 		ui, uerr := web.New(st, svc, web.StoreSessions(st), web.Config{
 			BaseURL:    *uiURL,
 			Notifier:   notifier,
 			MaxStreams: *uiMaxStreams,
+			CSRFKey:    csrfKey,
 		}, log.With("component", "ui"))
 		if uerr != nil {
 			return fmt.Errorf("build the web ui: %w", uerr)

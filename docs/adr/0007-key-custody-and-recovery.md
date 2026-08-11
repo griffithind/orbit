@@ -126,6 +126,11 @@ backup and its key in the same directory.
 12. **Restore is rehearsed quarterly**, on the cadence `make check-break-glass` already has. An
     untested restore is a belief.
 
+> **Implemented 2026-08-11, after this was drafted.** `orbitd kek rotate` re-seals every stored
+> secret under a new passphrase in one transaction and replaces the salt and verifier. The primitives
+> this ADR found unreferenced — `Tx.ListSecrets` and `Tx.ResealSecret` — are its caller. What remains
+> a commitment rather than code is the escrow and backup guidance below.
+
 ## Alternatives considered
 
 **Keep the keys as files on the control-plane host.** The original design. Rejected on operations,

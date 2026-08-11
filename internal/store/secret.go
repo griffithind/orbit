@@ -58,6 +58,29 @@ func (t *Tx) InitKEK(ctx context.Context, p KEKParams) error {
 	return nil
 }
 
+// ReplaceKEKParams swaps the deployment's salt and verifier, for rotation.
+//
+// An UPDATE of the single row rather than a delete-and-insert, and it must run
+// in the SAME transaction that reseals every secret. Splitting them leaves a
+// deployment whose stored salt derives a key that opens nothing: the control
+// plane would fail its verifier check at startup and refuse to boot, with every
+// CA signing key intact and unreachable.
+//
+// Refuses when no row exists. A deployment with no KEK has not been
+// bootstrapped, and rotating nothing into something is InitKEK's job.
+func (t *Tx) ReplaceKEKParams(ctx context.Context, p KEKParams) error {
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE orbit.kek SET salt = $1, verifier_nonce = $2, verifier_ciphertext = $3`,
+		p.Salt, p.VerifierNonce, p.VerifierCiphertext)
+	if err != nil {
+		return mapErr(err, "replace the key encryption key")
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("replace the key encryption key: %w", ErrNotFound)
+	}
+	return nil
+}
+
 // GetKEKParams reads the salt and verifier.
 func (t *Tx) GetKEKParams(ctx context.Context) (*KEKParams, error) {
 	var p KEKParams

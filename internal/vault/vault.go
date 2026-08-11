@@ -146,6 +146,80 @@ func (v *Vault) get(ctx context.Context, ref string, want secrets.Kind) ([]byte,
 // custody paths meant two sets of failure modes, two things to document, and a
 // second replica that worked or did not depending on which one a network
 // happened to use. See docs/key-custody.md.
+// Rotate re-seals every stored secret under a key derived from a new
+// passphrase, and replaces the deployment's salt and verifier.
+//
+// ONE TRANSACTION, and that is the whole design. A partial rotation is the worst
+// outcome available here: secrets sealed under two different keys, a stored salt
+// that opens some of them, and a control plane that fails its verifier check and
+// will not start — with every CA signing key present and unreadable. Postgres
+// either takes all of it or none.
+//
+// Each secret is opened with the old key and sealed with the new one under the
+// same id and kind, so the additional data that binds a ciphertext to its row is
+// unchanged and a rotated secret is still refused if it is later moved or
+// relabelled.
+//
+// Returns how many secrets were resealed. Zero is a legitimate answer for a
+// deployment that has bootstrapped and not yet created a network.
+func (v *Vault) Rotate(ctx context.Context, newPassphrase []byte) (int, error) {
+	salt, err := secrets.NewSalt()
+	if err != nil {
+		return 0, err
+	}
+	next, err := secrets.DeriveKEK(newPassphrase, salt)
+	if err != nil {
+		return 0, err
+	}
+	vn, vc, err := next.SealVerifier()
+	if err != nil {
+		return 0, err
+	}
+
+	var resealed int
+	err = v.store.Tx(ctx, func(ctx context.Context, tx *store.Tx) error {
+		sealed, err := tx.ListSecrets(ctx)
+		if err != nil {
+			return err
+		}
+		for _, s := range sealed {
+			plain, err := v.kek.Open(s.ID.String(), s.Kind, s.Nonce, s.Ciphertext)
+			if err != nil {
+				// The old key does not open a row it is supposed to own. Stop:
+				// continuing would commit a mixture, and a mixture cannot be
+				// unpicked without the key that is evidently missing.
+				return fmt.Errorf("open secret %s (%s) with the current key: %w", s.ID, s.Kind, err)
+			}
+			nonce, ct, err := next.Seal(s.ID.String(), s.Kind, plain)
+			if err != nil {
+				return err
+			}
+			if err := tx.ResealSecret(ctx, s.ID, nonce, ct); err != nil {
+				return err
+			}
+			resealed++
+		}
+		return tx.ReplaceKEKParams(ctx, store.KEKParams{
+			Salt: salt, VerifierNonce: vn, VerifierCiphertext: vc,
+		})
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	v.kek = next
+	return resealed, nil
+}
+
+// DeriveKey returns a deployment-wide subkey for a named purpose.
+//
+// The point is that every replica gets the same bytes without them being stored:
+// all replicas derive the KEK from the same passphrase and the same salt, so
+// anything derived from it agrees across processes by construction.
+func (v *Vault) DeriveKey(label string, n int) ([]byte, error) {
+	return v.kek.Derive(label, n)
+}
+
 func (v *Vault) SignerFactory() ca.SignerFactory {
 	return func(ctx context.Context, ref string) (ca.Signer, error) {
 		if !secrets.IsRef(ref) {
