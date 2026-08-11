@@ -3,7 +3,6 @@ package hostcfg
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -12,6 +11,11 @@ import (
 	"github.com/miekg/dns"
 	"go.yaml.in/yaml/v3"
 )
+
+// Every platform records the address it is serving on, because Apply is shared;
+// only the platforms with a resolver reader consult it. See isOwnResolver in
+// dns_unix.go.
+var ownResolvers sync.Map // string -> struct{}
 
 // The agent's resolver: mesh names answered locally, everything else forwarded.
 //
@@ -357,27 +361,4 @@ func (r *Resolver) forward(w dns.ResponseWriter, req *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(req, dns.RcodeServerFailure)
 	_ = w.WriteMsg(m)
-}
-
-// isOwnResolver reports whether an address is a resolver Orbit is running.
-//
-// The guard against the only way this design can fail catastrophically. Once the OS is
-// pointed at this resolver, the system's list of resolvers contains this resolver, and a
-// restart that re-read it would forward every query to itself.
-//
-// Package-level rather than a method because the platform readers call it while the
-// resolver's lock is held by Apply.
-var ownResolvers sync.Map // string -> struct{}
-
-func isOwnResolver(host string) bool {
-	_, ok := ownResolvers.Load(strings.TrimSpace(host))
-	return ok
-}
-
-// hostPort53 normalises a bare address into something dns.Client can dial.
-func hostPort53(s string) string {
-	if _, _, err := net.SplitHostPort(s); err == nil {
-		return s
-	}
-	return net.JoinHostPort(s, "53")
 }

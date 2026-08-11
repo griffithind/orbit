@@ -117,6 +117,16 @@ jobs:
       # unreachable from ./cmd/... and sits behind an allow-file entry that was
       # added for a different reason.
       #
+      # Across every GOOS we tag for, and that matters as much as the query does.
+      # Three of this repo's eighteen platform-tagged files carry
+      # `!linux && !darwin`, so a single-GOOS run is structurally blind to them:
+      # isOwnResolver and hostPort53 sat in a file every platform compiles, called
+      # only from dns_linux.go and dns_darwin.go, and reported clean for months.
+      # That is the third variant of one mistake — an orphan that fails to
+      # type-check, an unbuilt platform breaking, and an orphan that compiles
+      # perfectly and is called by nobody. vet catches the first two and has no
+      # unused-function analysis, so only this catches the third.
+      #
       # This one is the complement: unreachable even when every test counts as a
       # root. There is no allow file, because there is no honest reason for a
       # function that nothing in the repository calls to exist. It found six the
@@ -136,7 +146,15 @@ jobs:
       # exported surface is used.
       - name: no code that nothing calls
         run: |
-          go run golang.org/x/tools/cmd/deadcode@latest -test ./... > all.txt || true
+          # Built once and then pointed at each GOOS. `go run ...@latest` under a
+          # foreign GOOS cross-compiles the TOOL, not the analysis, and silently
+          # produces empty output — a green gate that analysed nothing.
+          GOBIN="$PWD/.gobin" go install golang.org/x/tools/cmd/deadcode@latest
+          : > all.txt
+          for os in linux darwin freebsd windows; do
+            echo "── GOOS=$os"
+            GOOS=$os "$PWD/.gobin/deadcode" -test ./... >> all.txt || true
+          done
           if grep -q 'unreachable func:' all.txt; then
             echo "These functions are called by nothing at all, tests included:"
             sed -nE 's#^(.+): unreachable func: (.+)$#  \2  (\1)#p' all.txt

@@ -51,3 +51,9 @@ Do **not** write one for a refactor, a naming choice, or a decision with an obvi
 | [0010](0010-replica-discovery.md) | Every agent response carries the replica list | Proposed |
 | [0011](0011-full-generations-not-deltas.md) | Full generations, not deltas | Proposed |
 | [0012](0012-policy-compiles-to-addresses.md) | Policy compiles to addresses | Proposed |
+| [0013](0013-the-resolver-is-restored-not-just-set.md) | The machine's resolver configuration is ours to restore, not only to set | Proposed |
+| [0014](0014-diagnostics-report-what-nebula-decided.md) | Diagnostics report what nebula decided, not what we inferred | Proposed |
+| [0015](0015-host-state-is-removed-by-whoever-finds-it.md) | Host state is removed by whoever finds it | Proposed |
+| [0016](0016-the-exit-route-fails-closed.md) | The exit route fails closed | Proposed |
+| [0017](0017-every-platform-we-tag-for-is-a-platform-we-check.md) | Every platform we tag for is a platform the gates analyse | Proposed |
+| [0018](0018-windows-is-a-client.md) | Windows is a client, and nothing else | Proposed |
