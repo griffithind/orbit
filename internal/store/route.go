@@ -214,20 +214,47 @@ func ParsePrefixes(raw []string) ([]netip.Prefix, error) {
 // offer one. Postgres catches the second through the foreign key; the first is
 // this function's job.
 func (t *Tx) SetExitRoute(ctx context.Context, membershipID uuid.UUID, routeID *uuid.UUID) error {
+	// The membership's network first, because it is what the route is checked
+	// against — and because reading it here means the epoch bump at the end does
+	// not need its own query.
+	var networkID uuid.UUID
+	if err := t.tx.QueryRow(ctx,
+		`SELECT network_id FROM orbit.membership WHERE id = $1`, membershipID).
+		Scan(&networkID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return mapErr(err, "read membership network")
+	}
+
 	if routeID != nil {
 		var (
-			prefix    netip.Prefix
-			networkID uuid.UUID
+			prefix       netip.Prefix
+			routeNetwork uuid.UUID
 		)
 		err := t.tx.QueryRow(ctx,
 			`SELECT prefix, network_id FROM orbit.route WHERE id = $1`, routeID).
-			Scan(&prefix, &networkID)
+			Scan(&prefix, &routeNetwork)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
 			return mapErr(err, "read exit route")
 		}
+
+		// Same network, and this was read and discarded until now.
+		//
+		// Two networks are separate meshes that never exchange traffic, and are
+		// allowed to use the same prefix. A membership pointed at another
+		// network's exit node renders a default route through a gateway it has
+		// no certificate relationship with, so everything it sends to 0.0.0.0/0
+		// goes nowhere — with a successful API response and a config that looks
+		// correct.
+		if routeNetwork != networkID {
+			return fmt.Errorf("%w: route %s belongs to a different network; "+
+				"an exit node can only serve members of its own mesh", ErrInvalid, routeID)
+		}
+
 		// A default route is one that covers everything. Checked by prefix
 		// length rather than by string, so ::/0 counts too.
 		if prefix.Bits() != 0 {
@@ -242,6 +269,7 @@ func (t *Tx) SetExitRoute(ctx context.Context, membershipID uuid.UUID, routeID *
 		return mapErr(err, "set exit route")
 	}
 	if tag.RowsAffected() == 0 {
+		// Read COMMITTED, so the row read above can be gone by now.
 		return ErrNotFound
 	}
 
@@ -249,12 +277,6 @@ func (t *Tx) SetExitRoute(ctx context.Context, membershipID uuid.UUID, routeID *
 	// network and there is no per-membership generation to bump. The cost is
 	// every other machine re-rendering an identical configuration, which the
 	// signature makes free to detect: same bytes, same digest, nothing applied.
-	var networkID uuid.UUID
-	if err := t.tx.QueryRow(ctx,
-		`SELECT network_id FROM orbit.membership WHERE id = $1`, membershipID).
-		Scan(&networkID); err != nil {
-		return mapErr(err, "read membership network")
-	}
 	_, err = t.BumpEpoch(ctx, networkID, EpochConfig)
 	return err
 }
