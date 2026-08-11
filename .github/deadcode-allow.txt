@@ -28,7 +28,11 @@
 # renew)", a command that has never been built. It stays, because nine e2e tests
 # genuinely need it, but its reason below is now the true one.
 #
-# The remaining 25 are one thing: reachable only from tests. That is NOT what
+# ConfigPathFor went the same way afterwards: a one-line join duplicating what
+# paths.Layout already gives the agent, whose only caller was a test asserting
+# it against a literal.
+#
+# The remaining 24 are one thing: reachable only from tests. That is NOT what
 # ADR-0006 says this file is for — it names platform-specific code and
 # reflection — so this is still a baseline to shrink, not a category to grow. A
 # line added here needs its reason in the commit message too.
@@ -56,7 +60,6 @@ internal/agent/generation/verify.go VerifierFunc.Verify        # fake verifier
 internal/ca/ca.go Issuer.Certificate           # tests read the CA cert back; the issuer signs with it internally
 internal/ca/ca.go Issuer.Fingerprint           # same, for the issuer field tests assert on
 internal/mesh/node.go Node.MembershipID        # tests identify the control plane's own membership
-internal/nebulacfg/render.go ConfigPathFor     # the agent uses paths.Layout for this; render's own copy is exercised by its tests
 internal/renewal/renewal.go Policy.Assess      # the loop asks through maybeRenew; Assess is the pure form tests use
 internal/renewal/renewal.go Urgency.String     # a Stringer nothing formats yet
 internal/policy/compile.go Compiler.All        # the bulk form; the API compiles one membership at a time

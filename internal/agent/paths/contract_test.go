@@ -34,6 +34,8 @@ func TestTheAgentWritesWhereTheRendererPoints(t *testing.T) {
 	// be deliberate: these strings are also in deploy/ and in the docs.
 	got := nebulacfg.PathsFor("prod")
 	for _, w := range []struct{ got, want string }{
+		{nebulacfg.DirFor("prod"), "/var/lib/orbit/prod"},
+		{paths.DirFor("prod"), "/var/lib/orbit/prod"},
 		{got.CA, "/var/lib/orbit/prod/ca.crt"},
 		{got.Cert, "/var/lib/orbit/prod/host.crt"},
 		{got.Key, "/var/lib/orbit/prod/host.key"},

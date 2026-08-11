@@ -140,9 +140,6 @@ const (
 // DirFor is a network's directory on a managed host.
 func DirFor(slug string) string { return path.Join(AuthoritativeRoot, slug) }
 
-// ConfigPathFor is the file nebula's -config flag names.
-func ConfigPathFor(slug string) string { return path.Join(DirFor(slug), ConfigFileName) }
-
 // The material filenames inside a per-network directory.
 //
 // They live here rather than beside the agent's layout because this package is

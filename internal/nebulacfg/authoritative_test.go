@@ -204,21 +204,3 @@ func TestTunDevSuggestionAvoidsTheSilentLinuxCollision(t *testing.T) {
 		t.Error("the suggestion is not deterministic, so every render would look like a change")
 	}
 }
-
-// TestLayoutMatchesTheAgentContract pins the filenames both halves compile
-// against. They are a contract between the control plane and the agent, and a
-// change on one side alone is a host with two layouts on disk.
-func TestLayoutMatchesTheAgentContract(t *testing.T) {
-	if got := nebulacfg.DirFor("prod"); got != "/var/lib/orbit/prod" {
-		t.Errorf("DirFor = %q", got)
-	}
-	if got := nebulacfg.ConfigPathFor("prod"); got != "/var/lib/orbit/prod/nebula.yml" {
-		t.Errorf("ConfigPathFor = %q", got)
-	}
-	p := nebulacfg.PathsFor("prod")
-	if p.CA != "/var/lib/orbit/prod/ca.crt" ||
-		p.Cert != "/var/lib/orbit/prod/host.crt" ||
-		p.Key != "/var/lib/orbit/prod/host.key" {
-		t.Errorf("PathsFor = %+v", p)
-	}
-}
