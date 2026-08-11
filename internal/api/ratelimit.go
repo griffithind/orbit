@@ -104,36 +104,70 @@ func NewLimiter(cfg LimiterConfig) *Limiter {
 	}
 }
 
+// maxKeys bounds the per-source table.
+//
+// The old ordering — global first, then per-key — bounded this implicitly:
+// a request refused by the global ceiling never reached the map, so the table
+// could not grow faster than the global rate. Checking per-key first gives that
+// up, so the bound is now explicit.
+const maxKeys = 4096
+
 // Allow reports whether a request from key may proceed.
+//
+// PER-KEY FIRST, and that ordering is the point. rate.Limiter.Allow spends a
+// token whether or not the request is ultimately served, so checking the global
+// ceiling first charged it for requests that were about to be refused by their
+// own key anyway. One address over its own limit drained the whole endpoint's
+// budget with its rejections — 600 refusals a minute is the default ceiling —
+// and every other client got 429 without having sent anything. The attacker did
+// not even need to get past their own limit to deny everyone else.
+//
+// Reserve/Cancel looks like the fix and is not: Reservation.CancelAt returns
+// without restoring when timeToAct is already in the past, which it always is
+// for a token that was available immediately. Cancel only reverses reservations
+// made for the future.
+//
+// The cost of the swap is that a request refused by the global ceiling has
+// already spent a per-key token. That over-charges a source during a global
+// overload, which is the harmless direction: it slows a client while the
+// endpoint is saturated, rather than letting one client saturate it for
+// everybody.
 func (l *Limiter) Allow(key string) bool {
-	// Global first: a distributed attempt spread across many addresses passes
-	// every per-key check and would otherwise be unbounded.
-	if !l.global.Allow() {
+	if !l.allowKey(key) {
 		return false
 	}
+	return l.global.Allow()
+}
 
+func (l *Limiter) allowKey(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := time.Now()
 	k, ok := l.keys[key]
 	if !ok {
+		// Evict opportunistically rather than on a timer. The work is
+		// proportional to map size and only happens when the map is large enough
+		// to matter, so there is no goroutine to leak and no ticker to
+		// coordinate.
+		if len(l.keys) >= maxKeys {
+			for key, v := range l.keys {
+				if now.Sub(v.seen) > l.ttl {
+					delete(l.keys, key)
+				}
+			}
+		}
+		if len(l.keys) >= maxKeys {
+			// Full of sources that are all still active. Refusing here would
+			// deny a client we have never seen because other clients are busy,
+			// so this one is bounded by the global ceiling alone — which is the
+			// same bound a distributed attempt has always had.
+			return true
+		}
 		k = &keyLimiter{lim: rate.NewLimiter(l.perKeyRate, l.perKeyBurst)}
 		l.keys[key] = k
 	}
 	k.seen = now
-
-	// Evict opportunistically rather than on a timer. The work is proportional
-	// to map size and only happens once the map is large enough to matter, so
-	// there is no goroutine to leak and no ticker to coordinate.
-	if len(l.keys) > 1024 {
-		for key, v := range l.keys {
-			if now.Sub(v.seen) > l.ttl {
-				delete(l.keys, key)
-			}
-		}
-	}
-
 	return k.lim.Allow()
 }
 
