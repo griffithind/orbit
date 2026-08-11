@@ -274,9 +274,16 @@ func (t *Tx) SetExitRoute(ctx context.Context, membershipID uuid.UUID, routeID *
 	}
 
 	// Only this membership's configuration changes, but the epoch is per
-	// network and there is no per-membership generation to bump. The cost is
-	// every other machine re-rendering an identical configuration, which the
-	// signature makes free to detect: same bytes, same digest, nothing applied.
+	// network and there is no per-membership generation to bump.
+	//
+	// The cost is every other machine applying a configuration identical to the
+	// one it is already running. This comment used to claim the signature made
+	// that free to detect — "same bytes, same digest, nothing applied" — and
+	// nothing implements it: Loop.poll short-circuits only on an EMPTY config,
+	// which the control plane decides from epoch comparison alone, and then
+	// calls Applier.Apply without comparing the material to what is installed.
+	// So an unrelated host's exit-node change costs every machine in the network
+	// a validate and a reload. See ADR-0011, which measures it.
 	_, err = t.BumpEpoch(ctx, networkID, EpochConfig)
 	return err
 }

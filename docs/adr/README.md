@@ -48,3 +48,6 @@ Do **not** write one for a refactor, a naming choice, or a decision with an obvi
 | [0007](0007-key-custody-and-recovery.md) | Key custody and recovery | Accepted |
 | [0008](0008-what-we-measure.md) | What we measure | Accepted |
 | [0009](0009-control-plane-replicas.md) | Control-plane replicas | Accepted |
+| [0010](0010-replica-discovery.md) | Every agent response carries the replica list | Proposed |
+| [0011](0011-full-generations-not-deltas.md) | Full generations, not deltas | Proposed |
+| [0012](0012-policy-compiles-to-addresses.md) | Policy compiles to addresses | Proposed |
