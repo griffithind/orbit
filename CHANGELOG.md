@@ -9,6 +9,123 @@ a tag message is not.
 The release workflow reads the section matching the tag and refuses to publish
 without one.
 
+## Unreleased
+
+**This release requires a fresh database, and changes the CLI and the admin API.**
+Nothing is deployed yet and there is no upgrade path from v0.4.5 — see
+ADR-0005. The headline is that the agent daemon has been running a code path
+that skipped most of what the agent does.
+
+### Fixed
+
+- **The daemon ran a loop that skipped revocation, self-heal and host
+  configuration.** Two loops existed. The daemon drove `Loop.Tick` on a ticker;
+  `Loop.Run` was the one with the push channel, the config-integrity self-heal
+  and host reconciliation. Both were built, both were tested, and the daemon
+  called the wrong one — so roughly 1,200 lines of nftables programming, policy
+  routing, the DNS resolver and the exit-node escape hatch never executed in
+  production.
+
+  Revocation was bounded by a one-minute poll instead of the notifier. The e2e
+  test measuring propagation called `Loop.Run` directly, so the suite was
+  timing a path the daemon does not take: it reported the README's ~5 seconds
+  while operators got roughly 65.
+
+- **`orbit why` could say traffic was permitted when it was not.** The CA term
+  in the firewall matcher was written as a negative guard and failed OPEN. For a
+  `ca_sha`-only rule against a query carrying no CA name, the final comparison
+  was `"" != ""` — false — so the guard never fired and a rule pinned to a CA
+  the peer was not issued by reported the traffic as allowed. It is now the
+  positive disjunction nebula's grammar specifies, `(ca_sha OR ca_name)`, and
+  answers "needs the peer's issuing CA" rather than guessing.
+
+- **Enrolment could deadlock the connection pool.** `Store.Open` parsed the DSN
+  and configured nothing, leaving `MaxConns` at pgxpool's `max(4, NumCPU)` with
+  no statement, lock, or idle-in-transaction timeout. Enrol opens a transaction
+  whose certificate path reads through `Store.Read`, which acquired a SECOND
+  connection while holding the first — so with `MaxConns` enrolments in flight,
+  none could finish. A cache hid it until the cache was cold, which is a restart
+  or a CA rotation. Nested reads now join the open transaction, and the pool has
+  sizes and timeouts.
+
+- **Unblocking a host could block CA rotation for that network permanently.**
+  `UnblockHost` set every host to `active`, including hosts that had never
+  enrolled and hosts that hold no address. Convergence counts
+  `state IN ('enrolled','active')`, so such a host sat in the denominator and
+  could never report an epoch — and convergence is the gate on CA rotation. The
+  state is now derived from what the host actually has: a live certificate, an
+  allocated address, or neither.
+
+- **`orbit agent run -h` started the agent instead of printing help.** Five
+  commands parsed with `_ = fs.Parse(args)`, discarding the error, so `-h`
+  returned `flag.ErrHelp` into a blank identifier and execution carried on into
+  the command body. An unknown flag was ignored the same way.
+
+- **Shell completion offered flags that do not exist, and hid ones that do.**
+  It listed the common flags in a literal of its own: that literal said
+  `--yes` where the code registers `-y`, so pressing tab produced a flag the
+  command rejects. It also offered `--token-file` for `orbit status`, which
+  talks to the local agent socket and has never taken one, while offering none
+  of `orbit membership ls`'s own seven filters. Every command now declares its
+  flags to the command tree, and completion asks the tree.
+
+- **Fourteen messages told operators to run a command that does not exist.**
+  `join` was promoted from `orbit agent join` to `orbit join` and the strings
+  handing out the old spelling were not updated — the error from `agent run`
+  with no networks, the install hint, the reserve handout in both the CLI and
+  the web UI, and orbitd's bootstrap output.
+
+- **Adding or removing a network CIDR could lose a concurrent change**, and
+  three other places where the store could quietly answer with stale or wrong
+  state.
+
+### Changed
+
+- **The schema is one migration.** Twenty-six sequential migrations were
+  collapsed into `0001_initial.sql`. Equivalence was proved through the
+  catalogs rather than by reading a dump — 173 columns, 100 constraints, 58
+  indexes, 184 grants and 3 triggers identical — but an existing database has
+  the old migration names recorded and will not accept this. Start a new one.
+
+  Sixteen constraints still named `host_*` after the host-to-membership rename
+  are now named for the table they are on. Those names reach operators:
+  the store puts the constraint name into the error it returns.
+
+- **The CLI is noun-verb, in a table.** `orbit join` and `orbit leave` are
+  promoted to the top level; `host` is `membership` everywhere, including
+  `orbit policy check -membership` (was `-host`) and the admin API's
+  `?membership=` (was `?host=`). `--flag` is the documented spelling. Usage,
+  aliases and hidden commands come from one table rather than from each
+  command's own printing.
+
+- **`internal/agent` is seven packages.** It was 9,941 lines in one; the core
+  is now 2,561, beside `generation`, `hostcfg`, `dataplane`, `status`,
+  `posture` and `paths`. None of the six imports the agent.
+
+- **One package names the files nebula reads.** The control plane rendered
+  `pki.ca`, `pki.cert` and `pki.key` into the config it signs, and the agent
+  decided independently where to write them — two sets of string literals that
+  agreed with nothing enforcing it. A rename on either side would have signed
+  every host a config naming a file the agent does not write.
+
+### Added
+
+- **`orbit netcheck`** — DNS, TCP, TLS and clock skew against the control
+  plane, for when nothing works yet and `status` has nothing to report.
+- **`orbit why`** — whether traffic to a peer would pass, and which rule
+  decides.
+- **`orbit api`** — any route the CLI has not wrapped, with the profile, URL
+  and token already resolved, so the token stays out of shell history.
+- **`orbitd doctor`** — runs what `serve` runs, before `serve` starts, instead
+  of validating `-addr` at the last statement after the store is open.
+- **Shell completion** for bash, zsh and fish.
+- **Six ADRs** recording what this work rests on, in `docs/adr/`.
+- **CI fails on unreachable code**, on two gates: unreachable from the binaries
+  (with a documented allow file), and unreachable even counting tests (no
+  exemptions). CI also compiles every platform the tree has build tags for,
+  after a package split left a file behind that neither the CI runner nor a
+  developer Mac compiled.
+
 ## v0.4.5
 
 Reporting fixes. A healthy fleet no longer describes itself as a broken one, and
