@@ -145,7 +145,8 @@ func (s *Server) newPage(r *http.Request, title string) *pageData {
 	if cookie := cookieFrom(r.Context()); cookie != "" {
 		p.CSRF = s.csrfToken(cookie)
 	}
-	if n := r.URL.Query().Get("notice"); n != "" {
+	// Only a banner this deployment signed. See signNotice.
+	if n := s.verifiedNotice(r); n != "" {
 		p.Notice = n
 	}
 	return p

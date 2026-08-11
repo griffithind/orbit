@@ -278,6 +278,49 @@ func (s *Server) refuseCrossOrigin(w http.ResponseWriter, r *http.Request, detai
 			"open the UI first and navigate to the host from there.")
 }
 
+// signNotice returns the query parameters carrying a server-authored banner.
+//
+// The banner text used to ride in ?notice= and be rendered on trust. It is
+// server-authored at every call site, and newPage did not enforce that — so
+// anyone could send an operator a link to the real origin, with real TLS, and
+// choose what the page said. On /ui/login, which is where a 256-bit admin token
+// is typed and where the read-only default can be talked out of, that is a
+// convincing thing to be able to do. Not XSS: the value goes through
+// html/template into a text node and the CSP has no unsafe-inline. Content
+// spoofing is enough.
+//
+// An allowlist of known messages does not fit, because the real ones carry
+// runtime data — which host, which epoch. So the message is signed instead, with
+// the same deployment-wide key as the form token. Every replica derives that key
+// from the KEK, so a notice written by one verifies on another; before that key
+// was shared this would have broken behind a load balancer.
+func (s *Server) signNotice(msg string) url.Values {
+	return url.Values{"notice": {msg}, "notice_sig": {s.noticeMAC(msg)}}
+}
+
+// verifiedNotice returns the banner only when this deployment wrote it.
+func (s *Server) verifiedNotice(r *http.Request) string {
+	msg := r.URL.Query().Get("notice")
+	if msg == "" {
+		return ""
+	}
+	want := s.noticeMAC(msg)
+	got := r.URL.Query().Get("notice_sig")
+	if subtle.ConstantTimeCompare([]byte(want), []byte(got)) != 1 {
+		return ""
+	}
+	return msg
+}
+
+// noticeMAC is domain-separated from the form token so a value that works as
+// one is not usable as the other.
+func (s *Server) noticeMAC(msg string) string {
+	m := hmac.New(sha256.New, s.csrfKey)
+	m.Write([]byte("orbit ui notice v1\x00"))
+	m.Write([]byte(msg))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+}
+
 // csrfToken derives a form token from the session cookie value.
 //
 // Derived rather than stored, which removes an entire table and, more usefully,

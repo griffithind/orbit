@@ -83,7 +83,10 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) error {
 	p := s.newPage(r, "Sign in")
 	p.Data = loginView{
 		Next: safeNext(r.URL.Query().Get("next")),
-		Note: r.URL.Query().Get("note"),
+		// Signed, like every other banner. This is the page where an admin
+		// token is typed and where the read-only default can be argued out of,
+		// so it is the worst one to let a stranger write.
+		Note: s.verifiedNotice(r),
 	}
 	return s.render(w, r, "login.html", http.StatusOK, p)
 }
@@ -192,7 +195,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 	clearSessionCookie(w)
-	http.Redirect(w, r, "/ui/login?note=You+are+signed+out.", http.StatusSeeOther)
+	http.Redirect(w, r, "/ui/login?"+s.signNotice("You are signed out.").Encode(), http.StatusSeeOther)
 	return nil
 }
 

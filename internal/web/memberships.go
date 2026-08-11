@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -652,12 +651,14 @@ func (s *Server) audit(r *http.Request, id store.Identity, action, targetType, t
 // redirectWithNotice completes a POST with a 303 and a message.
 //
 // Post/Redirect/Get, so that a refresh after blocking a host does not block it
-// again. The message rides in the query string, which is safe because it is
-// server-authored text rendered through html/template — never anything the
-// caller supplied.
+// again.
+//
+// The message is SIGNED, not merely server-authored. This comment used to say
+// the query string was safe because the text always came from here — true of
+// this function and not enforced anywhere, so newPage rendered whatever arrived.
+// See signNotice.
 func (s *Server) redirectWithNotice(w http.ResponseWriter, r *http.Request, path, notice string) error {
-	q := url.Values{"notice": {notice}}
-	http.Redirect(w, r, path+"?"+q.Encode(), http.StatusSeeOther)
+	http.Redirect(w, r, path+"?"+s.signNotice(notice).Encode(), http.StatusSeeOther)
 	return nil
 }
 
