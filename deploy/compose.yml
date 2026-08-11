@@ -5,7 +5,8 @@
 # break-glass token — it is the supported path, and this file is what it drives.
 # Read on only if you are adapting it.
 #
-#   1. Put ORBIT_KEK_PASSPHRASE and the database passwords in ./.env
+#   1. Put the database passwords in ./.env and the KEK passphrase in
+#      ./kek.pass — separately, and see the note on the server service
 #   2. docker compose run --rm orbitd migrate -app-password "$POSTGRES_APP_PASSWORD"
 #   3. docker compose run --rm orbitd bootstrap -network prod -cidr 10.42.0.0/16
 #      (the CA key is sealed into Postgres under ORBIT_KEK_PASSPHRASE; no file
@@ -77,7 +78,15 @@ services:
       # Encrypts the CA and identity keys at rest in Postgres. The database
       # never sees it, which is the entire point: a leaked dump is useless
       # without it, and losing it makes every stored key unreadable.
-      ORBIT_KEK_PASSPHRASE: ${ORBIT_KEK_PASSPHRASE:?set ORBIT_KEK_PASSPHRASE in .env}
+      #
+      # From a FILE, not from .env. Two reasons, and the second is the one that
+      # bites. An environment variable is visible to anyone who can run
+      # `docker inspect`, so it leaks to a wider audience than the file does.
+      # And .env sits in the same directory that carries the database volume —
+      # which made the default state on disk a backup and the key that opens it,
+      # together, which is the one arrangement envelope encryption is supposed
+      # to rule out. See ADR-0007.
+      ORBIT_KEK_PASSPHRASE_FILE: /run/secrets/orbit-kek
 
     volumes:
       # The control plane's own device key. The image declares VOLUME
@@ -86,6 +95,11 @@ services:
       # `compose up -d` recreates on any config change. The control plane would
       # come back as a different device on its own network each time.
       - orbitstate:/var/lib/orbit
+      # Read-only, and deliberately a bind mount of a single file rather than
+      # anything under this directory: it is meant to be replaced by whatever
+      # the deployment actually uses for secrets — a Docker secret, a systemd
+      # credential sealed to the TPM, a mounted vault path.
+      - ./kek.pass:/run/secrets/orbit-kek:ro
 
     command:
       - serve
@@ -124,10 +138,12 @@ services:
       # than the database password already there.
       ORBIT_TOKEN: ${ORBIT_TOKEN:-}
       ORBIT_NETWORK: ${ORBIT_NETWORK:-}
-      # Encrypts the CA and identity keys at rest in Postgres. The database
-      # never sees it, which is the entire point: a leaked dump is useless
-      # without it, and losing it makes every stored key unreadable.
-      ORBIT_KEK_PASSPHRASE: ${ORBIT_KEK_PASSPHRASE:?set ORBIT_KEK_PASSPHRASE in .env}
+      # Same file the server reads. See the note on the server's copy for why
+      # this is not an environment variable.
+      ORBIT_KEK_PASSPHRASE_FILE: /run/secrets/orbit-kek
+
+    volumes:
+      - ./kek.pass:/run/secrets/orbit-kek:ro
 
 volumes:
   # The control plane's device identity, which must survive a container being
@@ -141,7 +157,8 @@ volumes:
   # That means a backup is TWO things, kept apart:
   #
   #   1. this volume (or a pg_dump of it)
-  #   2. ORBIT_KEK_PASSPHRASE, from .env
+  #   2. the KEK passphrase, from ./kek.pass — which must NOT be stored with
+  #      the backup of 1, or the pair is one thing again
   #
   # Either alone is worthless, which is the design: a leaked dump cannot mint a
   # certificate. Losing the passphrase destroys the network as surely as losing

@@ -431,6 +431,7 @@ func serve(args []string) error {
 	// safe to run on every replica; no leader election needed.
 	if !*noMaint {
 		runner := sched.New(st, sched.Config{Interval: *maintEvery}, log.With("component", "maintenance"))
+		runner.OnSuccess(mx.MaintenanceSucceeded)
 		go func() {
 			if err := runner.Run(ctx); err != nil && ctx.Err() == nil {
 				log.Error("maintenance runner stopped", "error", err)

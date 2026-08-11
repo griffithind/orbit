@@ -370,6 +370,11 @@ type AgentReport struct {
 	RevertedFromConfigEpoch    int64
 	RevertedFromBlocklistEpoch int64
 
+	// DataPlaneDown is the agent saying nebula is not running here. Recorded
+	// rather than only logged: a host in this state polls, reports an applied
+	// epoch, and is counted as converged by everything else.
+	DataPlaneDown bool
+
 	// QuarantinedConfigEpoch is a generation the agent is refusing to apply.
 	// Recorded in the revert's audit entry so an operator can see which push the
 	// host rejected, rather than inferring it from a host that is merely behind.
@@ -457,13 +462,14 @@ func (t *Tx) RecordAgentReport(ctx context.Context, membershipID uuid.UUID, r Ag
 		       -- live and the blocklist has not reached its peers, so a
 		       -- transition out of suspended here would let the host that was
 		       -- just cut off quietly mark itself well again.
-		       state = CASE WHEN h.state = 'enrolled' THEN 'active' ELSE h.state END
+		       state = CASE WHEN h.state = 'enrolled' THEN 'active' ELSE h.state END,
+		       data_plane_down = $6
 		  FROM locked
 		 WHERE h.id = locked.id
 		RETURNING locked.name, locked.was_config, locked.was_block,
 		          h.applied_config_epoch, h.applied_blocklist_epoch`,
 		membershipID, r.ConfigEpoch, r.BlocklistEpoch,
-		r.RevertedFromConfigEpoch, r.RevertedFromBlocklistEpoch,
+		r.RevertedFromConfigEpoch, r.RevertedFromBlocklistEpoch, r.DataPlaneDown,
 	).Scan(&name, &wasConfig, &wasBlock, &nowConfig, &nowBlock)
 	if err == nil {
 		// Versions and liveness belong to the MACHINE, so they are written

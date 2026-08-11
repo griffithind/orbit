@@ -45,6 +45,16 @@ type NetworkStats struct {
 	// BlocklistSize is the number of distributed fingerprints. It bounds the
 	// size of every host's config, so unbounded growth is worth seeing.
 	BlocklistSize int
+
+	// DataPlaneDown counts hosts whose agent is healthy and whose nebula is
+	// not. They poll, they report an applied epoch, and every other number here
+	// counts them as converged — which is exactly why this one exists.
+	DataPlaneDown int
+
+	// MinCARemainingSeconds is the active signer closest to expiry. When it
+	// reaches zero, enrolment and renewal stop for the whole network at once.
+	// Negative if one has already expired.
+	MinCARemainingSeconds float64
 }
 
 // FleetStats returns one row per network in a single round trip.
@@ -88,7 +98,17 @@ func (t *Tx) FleetStats(ctx context.Context) ([]NetworkStats, error) {
 		                   JOIN orbit.membership h ON h.id = c.membership_id
 		                  WHERE h.network_id = n.id AND c.state = 'active'), 0),
 		       (SELECT count(*) FROM orbit.blocklist_entry b
-		         WHERE b.network_id = n.id AND b.not_after > now())
+		         WHERE b.network_id = n.id AND b.not_after > now()),
+		       -- Converged on paper and carrying nothing. Counted rather than
+		       -- only logged: every other gauge here calls such a host healthy.
+		       (SELECT count(*) FROM orbit.membership h
+		         WHERE h.network_id = n.id AND h.data_plane_down
+		           AND h.state IN ('enrolled', 'active')),
+		       -- The signer's own expiry. An expired active CA is a fleet-wide
+		       -- enrolment and renewal outage, and had only a log line.
+		       COALESCE((SELECT min(extract(epoch FROM ca.not_after - now()))
+		                   FROM orbit.ca ca
+		                  WHERE ca.network_id = n.id AND ca.state = 'active'), 0)
 		  FROM orbit.network n
 		 ORDER BY n.name`)
 	if err != nil {
@@ -102,7 +122,7 @@ func (t *Tx) FleetStats(ctx context.Context) ([]NetworkStats, error) {
 		if err := rows.Scan(&s.NetworkID, &s.Name, &s.ConfigEpoch, &s.BlocklistEpoch,
 			&s.MembershipsTotal, &s.ConfigApplied, &s.BlockApplied,
 			&s.LagSeconds, &s.CertsExpiringSoon, &s.MinCertRemainingSeconds,
-			&s.BlocklistSize); err != nil {
+			&s.BlocklistSize, &s.DataPlaneDown, &s.MinCARemainingSeconds); err != nil {
 			return nil, mapErr(err, "scan fleet stats")
 		}
 		out = append(out, s)

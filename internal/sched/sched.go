@@ -83,6 +83,12 @@ type Runner struct {
 	cfg   Config
 	log   *slog.Logger
 
+	// onSuccess is stamped after a sweep that completed. A hook rather than an
+	// import of internal/metrics: this package has never depended on it, and a
+	// scheduler that cannot run without a metrics registry is harder to test
+	// than one that reports through a function.
+	onSuccess func(time.Time)
+
 	now func() time.Time
 }
 
@@ -117,6 +123,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	// should not wait another interval before catching up.
 	if _, err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 		r.log.Error("maintenance sweep failed", "error", err)
+	} else if err == nil {
+		r.succeeded()
 	}
 
 	ticker := time.NewTicker(r.cfg.Interval)
@@ -128,8 +136,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		case <-ticker.C:
 			if _, err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 				r.log.Error("maintenance sweep failed", "error", err)
+			} else if err == nil {
+				r.succeeded()
 			}
 		}
+	}
+}
+
+// OnSuccess registers what to call after a sweep that completed.
+func (r *Runner) OnSuccess(fn func(time.Time)) { r.onSuccess = fn }
+
+func (r *Runner) succeeded() {
+	if r.onSuccess != nil {
+		r.onSuccess(r.now())
 	}
 }
 

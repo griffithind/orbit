@@ -34,13 +34,15 @@ import (
 type Metrics struct {
 	reg *prometheus.Registry
 
-	enrollments   *prometheus.CounterVec
-	certificates  *prometheus.CounterVec
-	pollFallback  prometheus.Counter
-	watchers      prometheus.Gauge
-	applyReverted prometheus.Counter
-	epochNotifies *prometheus.CounterVec
-	listenerUp    prometheus.Gauge
+	enrollments     *prometheus.CounterVec
+	certificates    *prometheus.CounterVec
+	pollFallback    prometheus.Counter
+	watchers        prometheus.Gauge
+	applyReverted   prometheus.Counter
+	renewalsFailed  prometheus.Counter
+	maintenanceLast prometheus.Gauge
+	epochNotifies   *prometheus.CounterVec
+	listenerUp      prometheus.Gauge
 }
 
 // New builds a registry and the event counters.
@@ -82,6 +84,24 @@ func New() *Metrics {
 			Help: "Reverts reported by agents after a pushed config failed to verify.",
 		}),
 
+		// Successes are counted by certificates_issued_total{reason="renew"}.
+		// Without the failures beside them, a fleet that has stopped renewing
+		// looks exactly like a fleet that has stopped needing to, and the first
+		// signal is certificates_expiring_soon — weeks later, by design.
+		renewalsFailed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "orbit_renewals_failed_total",
+			Help: "Renewal requests that failed, by any cause.",
+		}),
+
+		// A sweep that has stopped is invisible: blocklist pruning and
+		// expired-CA detection stop with it and neither announces itself. The
+		// unix time of the last success rather than a counter, so an alert is
+		// "time() - this > an interval" and needs no rate window.
+		maintenanceLast: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "orbit_maintenance_last_success_seconds",
+			Help: "Unix time of the last successful maintenance sweep. Zero until one completes.",
+		}),
+
 		epochNotifies: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "orbit_epoch_notifications_total",
 			Help: "Epoch change notifications delivered to this process.",
@@ -98,6 +118,7 @@ func New() *Metrics {
 	reg.MustRegister(
 		m.enrollments, m.certificates, m.pollFallback, m.watchers,
 		m.applyReverted, m.epochNotifies, m.listenerUp,
+		m.renewalsFailed, m.maintenanceLast,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -146,6 +167,20 @@ func (m *Metrics) WatcherClosed() {
 func (m *Metrics) ConfigReverted() {
 	if m != nil {
 		m.applyReverted.Inc()
+	}
+}
+
+// RenewalFailed counts a renewal that did not produce a certificate.
+func (m *Metrics) RenewalFailed() {
+	if m != nil {
+		m.renewalsFailed.Inc()
+	}
+}
+
+// MaintenanceSucceeded stamps the time of a completed sweep.
+func (m *Metrics) MaintenanceSucceeded(at time.Time) {
+	if m != nil {
+		m.maintenanceLast.Set(float64(at.Unix()))
 	}
 }
 

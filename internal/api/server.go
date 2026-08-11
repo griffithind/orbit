@@ -507,6 +507,7 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 		}
 
 		return tx.RecordAgentReport(ctx, id.MembershipID, store.AgentReport{
+			DataPlaneDown:  req.DataPlaneDown,
 			ConfigEpoch:    req.ConfigEpoch,
 			BlocklistEpoch: req.BlocklistEpoch,
 			NebulaVersion:  req.NebulaVersion,
@@ -571,6 +572,7 @@ func (s *Server) handleAgentRenew(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		s.cfg.Metrics.RenewalFailed()
 		s.log.Error("renewal failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "renewal failed")
 		return

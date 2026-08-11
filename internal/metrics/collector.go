@@ -35,6 +35,8 @@ type dbCollector struct {
 	certsExpiring    *prometheus.Desc
 	certMinRemain    *prometheus.Desc
 	blocklistSize    *prometheus.Desc
+	dataPlaneDown    *prometheus.Desc
+	caMinRemain      *prometheus.Desc
 }
 
 // RegisterDB attaches the database-backed collector to m's registry.
@@ -71,6 +73,10 @@ func (m *Metrics) RegisterDB(st *store.Store, log *slog.Logger) error {
 			"Time until the soonest active certificate expires.", labels, nil),
 		blocklistSize: prometheus.NewDesc("orbit_blocklist_entries",
 			"Fingerprints currently distributed in host configuration.", labels, nil),
+		dataPlaneDown: prometheus.NewDesc("orbit_hosts_data_plane_down",
+			"hosts reporting that nebula is not running, which every other gauge counts as converged", []string{"network"}, nil),
+		caMinRemain: prometheus.NewDesc("orbit_ca_min_remaining_seconds",
+			"seconds until the active signing CA expires; at zero the network stops enrolling and renewing", []string{"network"}, nil),
 	}
 	m.reg.MustRegister(c.scrapeFailures)
 	return m.reg.Register(c)
@@ -87,6 +93,8 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.certsExpiring
 	ch <- c.certMinRemain
 	ch <- c.blocklistSize
+	ch <- c.dataPlaneDown
+	ch <- c.caMinRemain
 }
 
 func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
@@ -123,5 +131,7 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		g(c.certsExpiring, float64(s.CertsExpiringSoon))
 		g(c.certMinRemain, s.MinCertRemainingSeconds)
 		g(c.blocklistSize, float64(s.BlocklistSize))
+		g(c.dataPlaneDown, float64(s.DataPlaneDown))
+		g(c.caMinRemain, s.MinCARemainingSeconds)
 	}
 }

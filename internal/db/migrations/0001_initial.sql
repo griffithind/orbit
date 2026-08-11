@@ -375,6 +375,10 @@ CREATE TABLE orbit.membership (
     device_id uuid NOT NULL,
     advertise_port integer,
     exit_route_id uuid,
+    -- The agent reports that nebula is not running on this host. It arrived on
+    -- the wire and was only logged, so a host converged on paper and carrying no
+    -- traffic counted as healthy in every gauge — see ADR-0008.
+    data_plane_down boolean DEFAULT false NOT NULL,
     routes_changed_at timestamp with time zone,
     CONSTRAINT membership_config_overrides_check CHECK ((jsonb_typeof(config_overrides) = 'object'::text)),
     CONSTRAINT membership_listen_port_check CHECK (((listen_port > 0) AND (listen_port < 65536))),

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/griffithind/orbit/internal/metrics"
 )
@@ -143,4 +144,58 @@ func gauge(t *testing.T, body, name, network string) float64 {
 	}
 	t.Fatalf("metric %s not found in exposition", prefix)
 	return 0
+}
+
+// TestTheFourMetricsADR0008CommittedToExist.
+//
+// Each closes a failure that previously had no metric at all, which is a
+// specific thing rather than a general wish for more telemetry:
+//
+//   - a host converged on paper with nebula not running was counted as healthy
+//     by every gauge, because the report said so and nothing recorded it
+//   - an expired active signer stops enrolment and renewal for the whole
+//     network and had only a log line
+//   - a maintenance sweep that has stopped is invisible, and blocklist pruning
+//     and expired-CA detection stop with it
+//   - renewal failures were logged, so a fleet that had stopped renewing looked
+//     like a fleet that had stopped needing to until certificates_expiring_soon
+//     tripped weeks later
+//
+// Presence, and that the DB-derived pair carries the network label a per-network
+// alert needs. Behaviour is asserted where it is produced.
+func TestTheFourMetricsADR0008CommittedToExist(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+	h.createAndEnroll(t, ts, "metric-host", "10.42.9.1", false, false, nil)
+
+	mx := metrics.New()
+	if err := mx.RegisterDB(h.store, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("register collector: %v", err)
+	}
+	// Move both process-level metrics off their zero value so presence is not
+	// confused with a metric that exists and has never been touched.
+	mx.RenewalFailed()
+	mx.MaintenanceSucceeded(time.Now())
+
+	body := scrape(t, mx)
+
+	for _, name := range []string{
+		"orbit_hosts_data_plane_down",
+		"orbit_ca_min_remaining_seconds",
+		"orbit_maintenance_last_success_seconds",
+		"orbit_renewals_failed_total",
+	} {
+		if !strings.Contains(body, name) {
+			t.Errorf("%s is not in the scrape; ADR-0008 commits to it", name)
+		}
+	}
+
+	// The per-network pair must carry the label, or an alert cannot say which
+	// network is broken — which is the whole point of alerting on them.
+	if got := gauge(t, body, "orbit_hosts_data_plane_down", h.netName); got != 0 {
+		t.Errorf("orbit_hosts_data_plane_down = %v, want 0 for a healthy fleet", got)
+	}
+	if got := gauge(t, body, "orbit_ca_min_remaining_seconds", h.netName); got <= 0 {
+		t.Errorf("orbit_ca_min_remaining_seconds = %v, want the active CA's remaining life", got)
+	}
 }
