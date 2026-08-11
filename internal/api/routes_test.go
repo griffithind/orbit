@@ -2,6 +2,8 @@ package api
 
 import (
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -151,5 +153,68 @@ func TestAdminRoutesAreNotReachableFromOtherSurfaces(t *testing.T) {
 		if admin[r.pattern] {
 			t.Errorf("%q appears on both the admin surface and %s", r.pattern, r.surface)
 		}
+	}
+}
+
+// TestEveryAdminRouteRefusesAnUncredentialedRequest.
+//
+// The table records a scope; s.admin is what enforces it. Those are two
+// different facts, and every test above checks only the first — so a route
+// whose handler was registered WITHOUT the wrapper still declares its scope
+// correctly and passes all of them, while answering anyone who asks.
+//
+// That is not hypothetical bookkeeping. There are two identical `a` helpers
+// building admin routes, one in server.go and one in resources.go, each
+// repeating `h: s.admin(scope, h)`. A third that forgets it, or an edit to one
+// of the two, is a silent change from "scoped" to "public" that the route table
+// would keep describing as scoped.
+//
+// Dispatching is safe without a store: a request carrying no credential is
+// refused before anything is looked up.
+func TestEveryAdminRouteRefusesAnUncredentialedRequest(t *testing.T) {
+	s := testRoutes(t)
+
+	checked := 0
+	for _, r := range s.adminRoutes() {
+		method, path, ok := strings.Cut(r.pattern, " ")
+		if !ok {
+			t.Fatalf("route %q has no method", r.pattern)
+		}
+		// Fill the wildcards; the value never matters because nothing should
+		// get far enough to read it.
+		for _, seg := range []string{"{ref}", "{id}", "{routeId}", "{addr}"} {
+			path = strings.ReplaceAll(path, seg, "x")
+		}
+		if strings.ContainsAny(path, "{}") {
+			t.Fatalf("route %q has a wildcard this test does not know how to fill", r.pattern)
+		}
+
+		req := httptest.NewRequest(method, path, strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+
+		// A handler that was NOT wrapped runs for real, and with no store that
+		// ends in a nil dereference. Contain it per route: the panic is a
+		// symptom of the same bug, and without this the first offender takes
+		// the process down and hides every other one.
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					t.Errorf("%s reached its handler without a credential and panicked (%v). "+
+						"It is registered without s.admin(scope, h).", r.pattern, v)
+				}
+			}()
+			r.h.ServeHTTP(rec, req)
+		}()
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s answered %d without a credential, want 401. "+
+				"Its handler is probably registered without s.admin(scope, h).",
+				r.pattern, rec.Code)
+		}
+		checked++
+	}
+
+	if checked < 40 {
+		t.Fatalf("only %d admin routes dispatched; this test is not seeing the table", checked)
 	}
 }
