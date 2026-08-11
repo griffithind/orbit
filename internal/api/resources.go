@@ -1506,6 +1506,35 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A token may not mint a token stronger than itself.
+	//
+	// Without this, tokens:write was the only scope that mattered: a CI
+	// credential allowed to rotate its own key could ask for "*" and get it, so
+	// every carefully separated scope above it — cas:write, memberships:block,
+	// policy:write — was one request away from any token that could manage
+	// tokens at all.
+	//
+	// Bootstrap is unaffected. The first token comes from `orbitd token create`
+	// and cmd/orbitd's own bootstrap, both of which write through the store
+	// directly, so an operator with database access can still mint "*" and
+	// nothing reachable over the network can.
+	for _, sc := range req.Scopes {
+		if sc != "*" && !IsKnownScope(sc) {
+			// Typos were accepted silently and produced a token that could
+			// reach nothing — a 403 later with no explanation and nothing to
+			// grep for. knownScopes existed to prevent exactly that and was
+			// consulted only by tests.
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+				"unknown scope %q; see GET /v1/whoami for the scopes this token holds", sc))
+			return
+		}
+		if !id.HasScope(sc) {
+			writeErr(w, http.StatusForbidden, fmt.Sprintf(
+				"cannot grant %q: a token may not create one with scopes it does not hold itself", sc))
+			return
+		}
+	}
+
 	plaintext, hash, err := store.NewAPIToken()
 	if err != nil {
 		s.log.Error("token generation failed", "error", err)

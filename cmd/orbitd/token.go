@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/store"
 )
 
@@ -63,6 +64,15 @@ func tokenCreate(args []string) error {
 	scopeList := splitCSV(*scopes)
 	if len(scopeList) == 0 {
 		return errors.New("-scopes must name at least one scope")
+	}
+	// A typo here mints a token that can reach nothing, and says so only later
+	// as a 403 with no explanation. "*" is accepted: this command runs against
+	// the database, so it is where an operator bootstraps an unlimited
+	// credential — the API refuses to grant one it does not already hold.
+	for _, sc := range scopeList {
+		if sc != "*" && !api.IsKnownScope(sc) {
+			return fmt.Errorf("unknown scope %q", sc)
+		}
 	}
 
 	ctx := context.Background()

@@ -136,6 +136,14 @@ var knownScopes = map[string]bool{
 	"policy:read": true, "policy:write": true,
 }
 
+// IsKnownScope reports whether a scope is one this API recognises.
+//
+// "*" is not in knownScopes and is deliberately not accepted here: it is not a
+// scope, it is the absence of a limit, and the two places that may grant it —
+// orbitd's bootstrap and an operator with database access — do not come through
+// this function.
+func IsKnownScope(scope string) bool { return knownScopes[scope] }
+
 // ReadOnlyScopes returns the read half of knownScopes, sorted.
 //
 // This is what a read-only browser session on a "*" token is narrowed to.
