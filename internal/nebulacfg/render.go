@@ -143,13 +143,29 @@ func DirFor(slug string) string { return path.Join(AuthoritativeRoot, slug) }
 // ConfigPathFor is the file nebula's -config flag names.
 func ConfigPathFor(slug string) string { return path.Join(DirFor(slug), ConfigFileName) }
 
+// The material filenames inside a per-network directory.
+//
+// They live here rather than beside the agent's layout because this package is
+// what writes them into pki.ca, pki.cert and pki.key — the config nebula reads.
+// The agent must put the files exactly where that config says, so the renderer
+// owns the names and internal/agent/paths derives its own from these. They were
+// two independent sets of string literals that happened to agree; a rename on
+// one side would have signed every host a config pointing at a file the agent
+// does not write, and nebula would fail to start fleet-wide with nothing naming
+// the cause.
+const (
+	CAName   = "ca.crt"
+	CertName = "host.crt"
+	KeyName  = "host.key"
+)
+
 // PathsFor are the authoritative-mode material locations for a network.
 func PathsFor(slug string) Paths {
 	dir := DirFor(slug)
 	return Paths{
-		CA:   path.Join(dir, "ca.crt"),
-		Cert: path.Join(dir, "host.crt"),
-		Key:  path.Join(dir, "host.key"),
+		CA:   path.Join(dir, CAName),
+		Cert: path.Join(dir, CertName),
+		Key:  path.Join(dir, KeyName),
 	}
 }
 

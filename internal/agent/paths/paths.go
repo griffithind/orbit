@@ -39,7 +39,7 @@ import (
 // writes and replaces. On an image-based system (bootc, OSTree, Fedora CoreOS)
 // /usr is read-only and /etc is an overlay the image reconciles on upgrade, so
 // state written to /etc can be reverted underneath a running host.
-const DefaultRoot = "/var/lib/orbit"
+const DefaultRoot = nebulacfg.AuthoritativeRoot
 
 // DirFor is the directory a network's agent owns, and the value systemd's
 // StateDirectory=orbit/<slug> creates.
@@ -98,11 +98,13 @@ func ValidateNetwork(slug string) error {
 const (
 	// ConfigFileName is the complete configuration in authoritative mode. It is
 	// what `nebula -config` points at — the FILE, not a directory.
-	ConfigFileName = "nebula.yml"
+	ConfigFileName = nebulacfg.ConfigFileName
 
-	CAName   = "ca.crt"
-	CertName = "host.crt"
-	KeyName  = "host.key"
+	// Derived, not restated. The renderer writes these names into the config it
+	// signs; the agent writes the files. One definition or they can disagree.
+	CAName   = nebulacfg.CAName
+	CertName = nebulacfg.CertName
+	KeyName  = nebulacfg.KeyName
 
 	// SignedConfigName is the config EXACTLY as the control plane sent it, and
 	// SigName is the envelope and signature over it.
