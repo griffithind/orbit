@@ -92,7 +92,10 @@ jobs:
           # allowing one would silently allow all of them.
           sed -nE 's#^([^:]+):[0-9]+:[0-9]+: unreachable func: (.+)$#\1 \2#p' found.txt \
             | sort -u > found-names.txt
-          grep -vE '^\s*(#|$)' .github/deadcode-allow.txt | sort -u > allowed.txt
+          # Each entry carries its reason after a '#'. Strip it, and the
+          # surrounding space, so what is compared is the name alone.
+          sed -E 's/#.*$//; s/[[:space:]]+$//' .github/deadcode-allow.txt \
+            | grep -vE '^[[:space:]]*$' | sort -u > allowed.txt
           if comm -23 found-names.txt allowed.txt | grep -q .; then
             echo "Unreachable from the binaries, and not in .github/deadcode-allow.txt:"
             comm -23 found-names.txt allowed.txt | sed 's/^/  /'

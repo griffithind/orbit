@@ -390,32 +390,3 @@ func TestCertificateWindow(t *testing.T) {
 		t.Errorf("window is %s, want about 24h", d)
 	}
 }
-
-func TestKeypairFromPrivateRoundTrips(t *testing.T) {
-	for _, curve := range []cert.Curve{cert.Curve_CURVE25519, cert.Curve_P256} {
-		t.Run(curve.String(), func(t *testing.T) {
-			kp, err := agent.GenerateKeypair(curve)
-			if err != nil {
-				t.Fatal(err)
-			}
-			raw, _, gotCurve, err := cert.UnmarshalPrivateKeyFromPEM([]byte(kp.PrivatePEM))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if gotCurve != curve {
-				t.Fatalf("curve = %v, want %v", gotCurve, curve)
-			}
-
-			// Reusing the key must derive the same public half, or a
-			// A renewal would otherwise mint a certificate for a key the host
-			// does not hold.
-			again, err := agent.KeypairFromPrivate(curve, raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if again.PublicB64 != kp.PublicB64 {
-				t.Errorf("derived public key differs from the generated one")
-			}
-		})
-	}
-}

@@ -182,21 +182,6 @@ func decodeResponse(resp *http.Response, out any) error {
 	return json.Unmarshal(body, out)
 }
 
-// KeypairFromPrivate reconstructs a Keypair from an existing private key.
-//
-// The private half never leaves the host; only the derived public half is sent.
-func KeypairFromPrivate(curve cert.Curve, priv []byte) (*Keypair, error) {
-	pub, err := ca.PublicFromHostKey(curve, priv)
-	if err != nil {
-		return nil, err
-	}
-	return &Keypair{
-		Curve:      curve,
-		PublicB64:  base64.StdEncoding.EncodeToString(pub),
-		PrivatePEM: string(cert.MarshalPrivateKeyToPEM(curve, priv)),
-	}, nil
-}
-
 // Watch long-polls for changes.
 //
 // It returns as soon as an epoch advances, or empty after the server's hold
@@ -230,12 +215,11 @@ func (c *Client) Watch(ctx context.Context, configEpoch, blockEpoch int64, hold 
 //
 // The device key signs the request; nothing secret travels. What comes back is
 // a membership id and a state, not a certificate — see Claim for the second
-// half, and docs/design-device-identity.md §3 for why it is two steps.
-func (c *Client) Join(ctx context.Context, id *device.Identity, network, name, hostname string, now time.Time) (*wire.JoinResponse, error) {
-	return c.JoinWithCode(ctx, id, network, name, hostname, "", now)
-}
-
-// JoinWithCode is Join carrying a reservation code.
+// half.
+//
+// code is a reservation code, empty when there is none. It used to be a second
+// method wrapping this one with "", which production never called and only
+// tests reached — two spellings of one request.
 //
 // A valid code auto-authorizes: the membership is created with the name,
 // address and role the reservation named, instead of landing in a queue. That
@@ -247,7 +231,7 @@ func (c *Client) Join(ctx context.Context, id *device.Identity, network, name, h
 // pre-authorized. They are independent claims, and binding them would mean a
 // reservation could only ever be redeemed by a device chosen before the code was
 // minted — which is the opposite of what a reservation is for.
-func (c *Client) JoinWithCode(ctx context.Context, id *device.Identity,
+func (c *Client) Join(ctx context.Context, id *device.Identity,
 	network, name, hostname, code string, now time.Time) (*wire.JoinResponse, error) {
 
 	sig, err := id.SignJoin(network, name, now)

@@ -119,31 +119,6 @@ func (s *memorySigner) Sign(_ context.Context, certBytes []byte) ([]byte, error)
 
 func (s *memorySigner) Close() error { return nil }
 
-// PublicFromHostKey derives the public half of a host static key.
-//
-// The private half stays where it is; only the derived public half is sent, so
-// the control plane can mint a certificate over a key it has never seen.
-func PublicFromHostKey(curve cert.Curve, priv []byte) ([]byte, error) {
-	switch curve {
-	case cert.Curve_CURVE25519:
-		key, err := ecdh.X25519().NewPrivateKey(priv)
-		if err != nil {
-			return nil, fmt.Errorf("derive x25519 public key: %w", err)
-		}
-		return key.PublicKey().Bytes(), nil
-
-	case cert.Curve_P256:
-		key, err := ecdh.P256().NewPrivateKey(priv)
-		if err != nil {
-			return nil, fmt.Errorf("derive p256 public key: %w", err)
-		}
-		return key.PublicKey().Bytes(), nil
-
-	default:
-		return nil, fmt.Errorf("unsupported curve: %s", curve)
-	}
-}
-
 // ParseCurve reads a curve name.
 //
 // One function so the CLI, the enrollment wire, and the bootstrap flag cannot

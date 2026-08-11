@@ -78,7 +78,7 @@ func joinCmd(args []string) error {
 	// the two are different keys with different jobs — nebula needs CKA_DERIVE,
 	// an identity needs CKA_SIGN, and one object cannot be both.
 	client := agent.NewClient(*fl.url)
-	joined, err := client.JoinWithCode(ctx, id, *fl.network, *fl.name, hostname, *fl.code, time.Now())
+	joined, err := client.Join(ctx, id, *fl.network, *fl.name, hostname, *fl.code, time.Now())
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {

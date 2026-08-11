@@ -1123,7 +1123,7 @@ func (h *harness) createHost(t *testing.T, baseURL string, spec membershipSpec, 
 		t.Fatalf("device key: %v", err)
 	}
 	client := agent.NewClient(baseURL)
-	joined, err := client.JoinWithCode(ctx, id, networkRef, spec.Name, "", code.Code, time.Now())
+	joined, err := client.Join(ctx, id, networkRef, spec.Name, "", code.Code, time.Now())
 	if err != nil {
 		t.Fatalf("join %s: %v", spec.Name, err)
 	}

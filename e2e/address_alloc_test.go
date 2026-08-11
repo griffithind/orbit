@@ -105,7 +105,7 @@ func TestAddressExhaustionIsAClear409(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = agent.NewClient(ts.URL).JoinWithCode(context.Background(), id,
+	_, err = agent.NewClient(ts.URL).Join(context.Background(), id,
 		net.ID, "overflow", "", code.Code, time.Now())
 	var apiErr *agent.APIError
 	if !errors.As(err, &apiErr) {

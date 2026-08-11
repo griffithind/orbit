@@ -65,6 +65,18 @@ An allowlist file exists for genuine exceptions — platform-specific implementa
 unreachable on the CI host, and nothing else. Every entry carries a one-line reason. A growing
 allowlist is the signal that this ADR is being evaded.
 
+> **The reasons were missing until 2026-08-11.** The file shipped as 31 bare lines, and the
+> requirement above went unmet for as long as nobody tried to write one. Writing them cost three
+> entries on the spot — `Client.Join` was a wrapper duplicating a call production already made
+> directly, and `KeypairFromPrivate` with `PublicFromHostKey` existed so a test could round-trip a
+> derivation that nothing performs, because renewal generates a fresh keypair every time. A fourth,
+> `Loop.RenewNow`, was justified by an operator command (`orbit agent renew`) that has never
+> existed; it is genuinely needed by e2e and its reason now says so.
+>
+> That is the argument for the rule rather than an aside about it: an exemption nobody has to
+> justify is one nobody checks. The remaining 25 entries are all "reachable only from tests", which
+> is not the category this paragraph describes, so the file is still a baseline to shrink.
+
 ## Alternatives considered
 
 **A periodic manual sweep.** Rejected: the current 71 functions accumulated under exactly that

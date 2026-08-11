@@ -50,7 +50,7 @@ func TestJoinEndToEnd(t *testing.T) {
 	}
 
 	client := agent.NewClient(ts.URL)
-	joined, err := client.Join(ctx, id, h.netID.String(), "joiner", "test-machine", time.Now())
+	joined, err := client.Join(ctx, id, h.netID.String(), "joiner", "test-machine", "", time.Now())
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestClaimRefusesAnotherDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := agent.NewClient(ts.URL)
-	joined, err := client.Join(ctx, joiner, h.netID.String(), "rightful", "", time.Now())
+	joined, err := client.Join(ctx, joiner, h.netID.String(), "rightful", "", "", time.Now())
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -238,11 +238,11 @@ func TestJoinIsIdempotentOverHTTP(t *testing.T) {
 	}
 	client := agent.NewClient(ts.URL)
 
-	first, err := client.Join(ctx, id, h.netID.String(), "retrier", "", time.Now())
+	first, err := client.Join(ctx, id, h.netID.String(), "retrier", "", "", time.Now())
 	if err != nil {
 		t.Fatalf("first join: %v", err)
 	}
-	second, err := client.Join(ctx, id, h.netID.String(), "retrier", "", time.Now())
+	second, err := client.Join(ctx, id, h.netID.String(), "retrier", "", "", time.Now())
 	if err != nil {
 		t.Fatalf("second join: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestPostureFlowsToTheDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := agent.NewClient(ts.URL)
-	joined, err := client.Join(ctx, id, h.netID.String(), "reporter", "lab-01", time.Now())
+	joined, err := client.Join(ctx, id, h.netID.String(), "reporter", "lab-01", "", time.Now())
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestBlockedDeviceCannotJoinOrClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := agent.NewClient(ts.URL)
-	joined, err := client.Join(ctx, id, h.netID.String(), "doomed", "", time.Now())
+	joined, err := client.Join(ctx, id, h.netID.String(), "doomed", "", "", time.Now())
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestBlockedDeviceCannotJoinOrClaim(t *testing.T) {
 	}
 
 	// And it cannot re-join to get a fresh row.
-	if _, err := client.Join(ctx, id, h.netID.String(), "doomed-again", "", time.Now()); err == nil {
+	if _, err := client.Join(ctx, id, h.netID.String(), "doomed-again", "", "", time.Now()); err == nil {
 		t.Fatal("a blocked device joined again")
 	}
 }
@@ -414,7 +414,7 @@ func TestExpiredCertificateRecoversByRejoining(t *testing.T) {
 	}
 	client := agent.NewClient(ts.URL)
 
-	joined, err := client.Join(ctx, id, h.netID.String(), "long-lived", "", time.Now())
+	joined, err := client.Join(ctx, id, h.netID.String(), "long-lived", "", "", time.Now())
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestExpiredCertificateRecoversByRejoining(t *testing.T) {
 
 	// Time passes; the certificate expires; the machine's overlay is dead and
 	// the agent API is unreachable. It re-runs the same command it joined with.
-	rejoined, err := client.Join(ctx, id, h.netID.String(), "a-different-name", "", time.Now())
+	rejoined, err := client.Join(ctx, id, h.netID.String(), "a-different-name", "", "", time.Now())
 	if err != nil {
 		t.Fatalf("re-join after expiry: %v", err)
 	}
@@ -648,7 +648,7 @@ func TestJoinByNetworkID(t *testing.T) {
 	// is why.
 	pretty := strings.ToUpper(h.networkID[:4] + "-" + h.networkID[4:8] + "-" +
 		h.networkID[8:12] + "-" + h.networkID[12:])
-	joined, err := client.Join(ctx, id, pretty, "by-id", "", time.Now())
+	joined, err := client.Join(ctx, id, pretty, "by-id", "", "", time.Now())
 	if err != nil {
 		t.Fatalf("join by network id: %v", err)
 	}
@@ -724,7 +724,7 @@ func TestJoinRefusesAControlPlaneThatCannotProveItself(t *testing.T) {
 
 	// The operator's own network ID, dialled at the wrong URL.
 	_, err = agent.NewClient(impostor.URL).
-		Join(ctx, id, h.networkID, "misdirected", "", time.Now())
+		Join(ctx, id, h.networkID, "misdirected", "", "", time.Now())
 	if err == nil {
 		t.Fatal("a machine joined a control plane that does not hold the network's identity key")
 	}
@@ -736,7 +736,7 @@ func TestJoinRefusesAControlPlaneThatCannotProveItself(t *testing.T) {
 	// everything — which is the way this kind of test usually passes for the
 	// wrong reason.
 	if _, err := agent.NewClient(ts.URL).
-		Join(ctx, id, h.networkID, "correct", "", time.Now()); err != nil {
+		Join(ctx, id, h.networkID, "correct", "", "", time.Now()); err != nil {
 		t.Fatalf("the real control plane was refused: %v", err)
 	}
 }

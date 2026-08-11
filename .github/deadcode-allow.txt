@@ -1,48 +1,67 @@
 # Functions permitted to be unreachable from ./cmd/..., one "file symbol" per
-# line. See docs/adr/0006-code-must-be-reachable.md.
+# line, each carrying its reason after a '#'. See
+# docs/adr/0006-code-must-be-reachable.md.
 #
 # The gate matches package-qualified names, not bare identifiers: Status,
 # Describe and Restart each name methods on several types, and allowing one
 # must not silently allow the rest.
 #
-# What belongs here permanently: code the static analysis genuinely cannot see —
-# platform-specific implementations that do not build on the CI host, and code
-# reached by reflection.
-#
-# Everything below is the BASELINE as of 2026-08-10, not a permanent exemption.
-# It is 28 entries, mostly *Func adapter types and test-only affordances, and it
-# exists so the gate can be switched on today rather than after a triage that
-# would block every other change. ADR-0006 says a growing allow file means the
-# rule is being evaded; this one is expected to SHRINK, and a PR that adds a
-# line to it needs the reason in its message.
-#
 # This file only ever covers the ./cmd/... gate. The second gate — nothing may
 # be unreachable even counting tests — takes no exemptions and has none.
-internal/agent/client.go Client.Join
-internal/agent/client.go KeypairFromPrivate
-internal/agent/paths/paths.go Layout.StatePath
-internal/agent/loop.go Loop.RenewNow
-internal/agent/loop.go Loop.SetClock
-internal/agent/generation/reload.go ReloaderFunc.Describe
-internal/agent/generation/reload.go ReloaderFunc.Reload
-internal/agent/dataplane/supervise.go SupervisorFuncs.Describe
-internal/agent/dataplane/supervise.go SupervisorFuncs.Ensure
-internal/agent/dataplane/supervise.go SupervisorFuncs.Restart
-internal/agent/dataplane/supervise.go SupervisorFuncs.Status
-internal/agent/generation/verify.go VerifierFunc.Describe
-internal/agent/generation/verify.go VerifierFunc.Verify
-internal/api/routes.go ReadOnlyScopes
-internal/api/server.go Server.Handler
-internal/ca/ca.go Issuer.Certificate
-internal/ca/ca.go Issuer.Fingerprint
-internal/ca/keys.go PublicFromHostKey
-internal/db/migrate.go EnsureRoleLogin
-internal/db/migrate.go quoteIdentifier
-internal/db/migrate.go quoteLiteral
-internal/fwmatch/parse/parse.go LoadRules
-internal/mesh/node.go Node.MembershipID
-internal/nebulacfg/render.go ConfigPathFor
-internal/policy/compile.go Compiler.All
-internal/renewal/renewal.go Policy.Assess
-internal/renewal/renewal.go Urgency.String
-internal/store/session.go ReadOnlyScopes
+#
+# ADR-0006 asked for a reason per entry from the start, and the first version of
+# this file shipped as 31 bare lines without them. Writing them down cost three
+# entries immediately, because three could not be written honestly:
+#
+#   Client.Join           a one-line wrapper passing "" to JoinWithCode, which
+#                         production called directly. Two spellings of one
+#                         request; JoinWithCode is now simply Join.
+#   KeypairFromPrivate    derived a public half from an existing private key so
+#   PublicFromHostKey     a test could check the derivation round-trips. Nothing
+#                         reuses a private key — doRenew generates a fresh
+#                         keypair on every renewal with no way to opt out — so
+#                         the failure that test described cannot happen. Both,
+#                         and the test, are deleted.
+#
+# A fourth was defended by something imagined rather than something false:
+# Loop.RenewNow claimed to exist "for the operator escape hatch (orbit agent
+# renew)", a command that has never been built. It stays, because nine e2e tests
+# genuinely need it, but its reason below is now the true one.
+#
+# The remaining 25 are one thing: reachable only from tests. That is NOT what
+# ADR-0006 says this file is for — it names platform-specific code and
+# reflection — so this is still a baseline to shrink, not a category to grow. A
+# line added here needs its reason in the commit message too.
+
+# Seams: exported so a test in another package can drive an internal path.
+internal/agent/loop.go Loop.RenewNow           # e2e drives renewal directly; doRenew is unexported
+internal/agent/loop.go Loop.SetClock           # every guard decision is a deadline comparison, so tests cannot use the real clock
+internal/agent/paths/paths.go Layout.StatePath # tests assert where state lands; the agent reaches it through WriteState
+internal/api/server.go Server.Handler          # one mux for tests; production mounts the three route sets on separate listeners
+internal/db/migrate.go EnsureRoleLogin         # migrations create orbit_app NOLOGIN; giving it a password is a deployment step, done here only by tests
+internal/db/migrate.go quoteIdentifier         # reached only from EnsureRoleLogin
+internal/db/migrate.go quoteLiteral            # reached only from EnsureRoleLogin
+
+# Adapters: exist so a test can supply behaviour without a real process.
+internal/agent/dataplane/supervise.go SupervisorFuncs.Describe # fake supervisor
+internal/agent/dataplane/supervise.go SupervisorFuncs.Ensure   # fake supervisor
+internal/agent/dataplane/supervise.go SupervisorFuncs.Restart  # fake supervisor
+internal/agent/dataplane/supervise.go SupervisorFuncs.Status   # fake supervisor
+internal/agent/generation/reload.go ReloaderFunc.Describe      # fake reloader
+internal/agent/generation/reload.go ReloaderFunc.Reload        # fake reloader
+internal/agent/generation/verify.go VerifierFunc.Describe      # fake verifier
+internal/agent/generation/verify.go VerifierFunc.Verify        # fake verifier
+
+# Accessors and alternate forms production does not use yet.
+internal/ca/ca.go Issuer.Certificate           # tests read the CA cert back; the issuer signs with it internally
+internal/ca/ca.go Issuer.Fingerprint           # same, for the issuer field tests assert on
+internal/mesh/node.go Node.MembershipID        # tests identify the control plane's own membership
+internal/nebulacfg/render.go ConfigPathFor     # the agent uses paths.Layout for this; render's own copy is exercised by its tests
+internal/renewal/renewal.go Policy.Assess      # the loop asks through maybeRenew; Assess is the pure form tests use
+internal/renewal/renewal.go Urgency.String     # a Stringer nothing formats yet
+internal/policy/compile.go Compiler.All        # the bulk form; the API compiles one membership at a time
+internal/fwmatch/parse/parse.go LoadRules      # reads rules off disk; `orbit why` asks the running engine instead
+
+# Deliberate duplication, with a test that keeps the two in step.
+internal/api/routes.go ReadOnlyScopes          # store cannot import api, so it carries its own copy
+internal/store/session.go ReadOnlyScopes       # that copy; session_test asserts the two agree
