@@ -57,24 +57,27 @@ jobs:
             echo "::error::these files need gofmt"; echo "$out"; exit 1
           fi
 
-      - name: vet
-        run: go vet ./...
-
-      - name: build
-        run: go build ./...
-
       # Every platform, because build tags hide breakage from the platforms you
       # do build. Splitting the agent left dns_other.go behind in the old
       # package; its //go:build !linux && !darwin meant neither this runner nor
       # a developer Mac compiled it, and hostcfg was broken on every other OS
-      # while CI stayed green. Compiling is all this checks — the tests below
-      # still only run on the host platform — but a missing symbol is exactly
-      # the class of error a move introduces.
-      - name: build on every platform we tag for
+      # while CI stayed green.
+      #
+      # vet rather than build, and that difference is the whole point: go build
+      # does not compile _test.go files. The first version of this step built
+      # four platforms and still missed policyroute_linux_test.go, orphaned by
+      # the same move — green on a developer Mac, green through this step, and
+      # a compile error the moment CI's own linux vet reached it. vet typechecks
+      # tests, so it sees what build cannot, and it subsumes the build anyway.
+      #
+      # This replaces the separate `go vet ./...` and `go build ./...` steps that
+      # stood here. On this runner both were the loop's first iteration run a
+      # second time.
+      - name: vet on every platform we tag for
         run: |
           for os in linux darwin freebsd windows; do
             echo "── GOOS=$os"
-            GOOS=$os GOARCH=amd64 go build ./... || exit 1
+            GOOS=$os GOARCH=amd64 go vet ./... || exit 1
           done
 
       # Reachability, not coverage. See docs/adr/0006-code-must-be-reachable.md.
