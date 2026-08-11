@@ -2,6 +2,7 @@ package enroll
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
@@ -1086,6 +1087,22 @@ func validatePublicKey(curve cert.Curve, pub []byte) error {
 	case cert.Curve_P256:
 		if len(pub) != 65 || pub[0] != 0x04 {
 			return fmt.Errorf("%w: p256 key must be a 65 byte uncompressed point", ErrInvalidPublicKey)
+		}
+		// ON the curve, not merely the right shape. The length and the 0x04
+		// prefix say it is formatted like a point; they say nothing about
+		// whether it is one.
+		//
+		// A CA should not sign a key it has not checked. Nebula's cert package
+		// validates PRIVATE keys through crypto/ecdh and never the public key
+		// in a certificate, so nothing between here and a peer's handshake
+		// looks at this. A Go peer is safe either way — crypto/ecdh rejects an
+		// off-curve point when it parses one — but that is a property of the
+		// implementation on the other side, and this is the side doing the
+		// signing. The visible cost of not checking is a certificate that is
+		// valid, signed, distributed, and cannot complete a handshake, which
+		// reports itself as a host that mysteriously never comes up.
+		if _, err := ecdh.P256().NewPublicKey(pub); err != nil {
+			return fmt.Errorf("%w: p256 key is not a point on the curve", ErrInvalidPublicKey)
 		}
 	}
 
