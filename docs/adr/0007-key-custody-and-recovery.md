@@ -1,6 +1,6 @@
 # ADR-0007: The KEK passphrase is a custody item of its own, and losing it is not recoverable
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-11
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0008: Six signals defend the objectives; everything else is a dashboard
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-11
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0009: Control-plane replicas are peers coordinated only by Postgres
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-11
 
 ## Context
@@ -147,6 +147,31 @@ load-balanceable without sticky sessions, and we accept that rather than weaken 
 silently hold a stale key through a rotation. A replica now needs one secret, the KEK passphrase.
 
 ## Consequences
+
+> **Three of the findings above were fixed on 2026-08-11, after this was drafted.** The Context is
+> left as written — it is the record of what was true when the decision was made — and this is what
+> changed since.
+>
+> - **Two replicas on one overlay address** are now refused. The defence was always `SelfIssue`'s
+>   "reuse only when the name matches"; it was inert because the default name was derived from the
+>   very address it refereed. The name is the machine's hostname now, which differs between replicas
+>   and is stable across a restart. `mesh.Config.Addr`'s claim that the `membership_address`
+>   uniqueness constraint enforced this is also corrected: the second replica adopts the first's
+>   membership rather than inserting a row, so no constraint was ever consulted.
+> - **The `BaseURL` fallback** is not implementable and the code was right; two comments were wrong.
+>   The public listener mounts enroll, admin and health and not the agent routes, so there is nothing
+>   to fall back to — and putting `/agent/v1` there would expose an API whose identity is the caller's
+>   source address to the internet. Both comments now describe the real recovery path, which is
+>   re-enrolment with a fresh code.
+> - **The UI is load-balanceable.** The CSRF key is derived from the KEK through HKDF, so every
+>   replica computes the same bytes without them being stored. `docs/design.md`'s unqualified "run N
+>   replicas behind a load balancer" is accurate again.
+>
+> Still open from this ADR: a decommissioned replica's membership is never removed, so it counts as
+> lagging and blocks CA rotation; and adding a replica reaches existing agents only at renewal,
+> because `StateResponse` carries no endpoint list.
+
+
 
 **Easy.** Adding a replica is one process with its own overlay address and the same KEK
 passphrase. It registers itself, appears in the live list within one heartbeat, and starts taking
