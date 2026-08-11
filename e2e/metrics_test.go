@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -197,5 +200,114 @@ func TestTheFourMetricsADR0008CommittedToExist(t *testing.T) {
 	}
 	if got := gauge(t, body, "orbit_ca_min_remaining_seconds", h.netName); got <= 0 {
 		t.Errorf("orbit_ca_min_remaining_seconds = %v, want the active CA's remaining life", got)
+	}
+}
+
+// TestEveryMetricTheDocsAlertOnExists.
+//
+// docs/deployment.md alerted on orbit_certificates_issued_total{reason="recover"}
+// for as long as that table existed. No code path has ever emitted that label,
+// so the rule could not fire — an operator following the runbook had a
+// monitoring gap that looked like coverage. It was found by reading, which is
+// not a strategy.
+//
+// Checked against the DECLARATIONS in internal/metrics, not against a scrape.
+// A scrape is not the authoritative list: a CounterVec emits nothing until a
+// label combination is observed, so orbit_certificates_issued_total and two
+// others are registered and absent from a fresh scrape. Reading the declaration
+// site avoids a second hand-maintained list, which would drift exactly the way
+// the docs did.
+func TestEveryMetricTheDocsAlertOnExists(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+	h.createAndEnroll(t, ts, "doc-metrics", "10.42.9.9", false, false, nil)
+
+	// Every name the metrics package declares, from both forms it uses:
+	// prometheus.*Opts{Name: "..."} for process counters and gauges, and
+	// prometheus.NewDesc("...") for the collector that reads Postgres.
+	declared := map[string]bool{}
+	decl := regexp.MustCompile(`(?:Name:\s*|NewDesc\()"(orbit_[a-z_]+)"`)
+	for _, f := range []string{"../internal/metrics/metrics.go", "../internal/metrics/collector.go"} {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		for _, m := range decl.FindAllStringSubmatch(string(src), -1) {
+			declared[m[1]] = true
+		}
+	}
+	if len(declared) < 15 {
+		t.Fatalf("found only %d declared metrics; this test is not reading the package", len(declared))
+	}
+
+	// Not metrics, and named in these files for other reasons.
+	notMetrics := map[string]bool{
+		"orbit_app":   true, // the unprivileged database role
+		"orbit_epoch": true, // the Postgres NOTIFY channel, store.go BumpEpoch
+	}
+
+	name := regexp.MustCompile(`orbit_[a-z_]+`)
+	checked := 0
+	for _, doc := range []string{"../docs/deployment.md", "../docs/revocation.md", "../README.md"} {
+		text, err := os.ReadFile(doc)
+		if err != nil {
+			t.Fatalf("%s: %v", doc, err)
+		}
+		seen := map[string]bool{}
+		for _, m := range name.FindAllString(string(text), -1) {
+			if seen[m] || notMetrics[m] {
+				continue
+			}
+			seen[m] = true
+			checked++
+			if !declared[m] {
+				t.Errorf("%s names %s, which internal/metrics does not declare. "+
+					"An alert on it can never fire.", doc, m)
+			}
+		}
+	}
+	if checked < 15 {
+		t.Fatalf("only %d metric names found across the docs; this test has stopped reading them", checked)
+	}
+
+	// And the LABEL VALUES, which is where the original defect actually lived.
+	//
+	// orbit_certificates_issued_total is declared and always was; the alert named
+	// reason="recover", and nothing has ever passed "recover" to
+	// Metrics.CertificateIssued. Checking names alone would have called that
+	// table healthy, so this reads the strings the code actually emits.
+	emitted := map[string]bool{}
+	call := regexp.MustCompile(`(?:CertificateIssued|EnrollAttempt|EpochNotified)\("([a-z_]+)"\)`)
+	for _, dir := range []string{"../internal", "../cmd"} {
+		_ = filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
+			if err != nil || fi.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			src, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return nil
+			}
+			for _, m := range call.FindAllStringSubmatch(string(src), -1) {
+				emitted[m[1]] = true
+			}
+			return nil
+		})
+	}
+	if len(emitted) < 4 {
+		t.Fatalf("found only %d emitted label values; this test is not reading the call sites", len(emitted))
+	}
+
+	label := regexp.MustCompile(`\{(?:reason|result|kind)="([a-z_]+)"\}`)
+	for _, doc := range []string{"../docs/deployment.md", "../docs/revocation.md", "../README.md"} {
+		text, err := os.ReadFile(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range label.FindAllStringSubmatch(string(text), -1) {
+			if !emitted[m[1]] {
+				t.Errorf("%s alerts on the label value %q, which no call site passes. "+
+					"The metric exists; the series does not.", doc, m[1])
+			}
+		}
 	}
 }

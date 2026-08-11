@@ -741,20 +741,46 @@ The fleet gauges are read from Postgres **at scrape time**, not held in memory.
 That is why two replicas report identical numbers and why a restart does not
 reset convergence to zero and page you during every deploy.
 
-| Metric | Alert when |
-|---|---|
-| `orbit_convergence_lag_seconds` | `> 300` — a membership has been behind for 5 minutes |
-| `orbit_certificates_expiring_soon` | `> 0` — renewal is failing for someone, well before they drop off |
-| `orbit_epoch_listener_up` | `== 0` — push is down, every agent has fallen back to polling |
-| `orbit_db_scrape_up` | `== 0` — serving, but cannot reach Postgres |
-| `orbit_agent_poll_fallback_total` | any increase — watcher cap reached or the network path changed |
-| `orbit_certificates_issued_total{reason="recover"}` | any increase — recovery is not routine; renewal is broken for that host |
+Every rule below names what to do when it fires. A signal with no written action
+is how this table came to alert for two years on
+a `reason="recover"` series on the certificates-issued counter — a label value
+nothing has ever passed to `Metrics.CertificateIssued`, so the alert could not
+fire and nobody noticed, because nobody had to say what they would do about it. ADR-0008 is the decision that produced this
+table; it is also where the reasoning for each threshold lives.
 
-Also exported: `orbit_config_epoch`, `orbit_blocklist_epoch`,
-`orbit_hosts_total`, `orbit_hosts_config_converged`,
+| Alert when | Why, and what to do |
+|---|---|
+| `orbit_hosts_config_converged < orbit_hosts_total` for 15m | Hosts are behind and staying behind. **This is the one that catches a stuck fleet**, and it is not the same as the lag gauge below — see the note after this table. Check `orbit_config_reverts_total` first: a revert means the pushed generation broke hosts and they are running the previous one. |
+| `orbit_convergence_lag_seconds > 300` | A host has been behind AND silent for five minutes. Catches a machine that has stopped talking; it cannot catch one that talks and refuses to apply. |
+| `orbit_hosts_data_plane_down > 0` | Nebula is not running on a host whose agent is healthy. It polls, it reports an applied epoch, and every other gauge here counts it as converged — it carries no traffic. Systemd owns nebula on that host; look there, not at the control plane. |
+| `orbit_ca_min_remaining_seconds < 604800` (7d) | The active signer expires in a week. At zero, enrolment and renewal stop for the whole network at once. Create and activate a replacement — `orbit ca create` then `orbit ca activate`, which requires convergence first. |
+| `orbit_certificates_expiring_soon > 0` | Renewal is failing for someone, well before they drop off. The control plane cannot renew on a host's behalf — it holds the key — so this is a per-host investigation. `orbit_certificate_min_remaining_seconds` says how long there is. |
+| `increase(orbit_renewals_failed_total[15m]) > 0` | Renewals are being refused. Successes were always counted and failures only logged, so without this a fleet that had stopped renewing looked like one that had stopped needing to, until the row above tripped weeks later. |
+| `time() - orbit_maintenance_last_success_seconds > 3600` | The maintenance sweep has stopped. Blocklist pruning and expired-CA detection stop with it, silently. Zero means one has never completed since this process started. |
+| `orbit_epoch_listener_up == 0` | Push is down and every agent on this replica has fallen back to polling. Convergence goes from seconds to a poll interval. Do NOT deploy this rule with `--no-push`, where the gauge reads 0 by design. |
+| `orbit_db_scrape_up == 0` | Serving, but cannot reach Postgres. |
+| `increase(orbit_config_reverts_total[1h]) > 0` | A pushed generation severed hosts and their guard reverted it. More than one host means the push broke the fleet; those hosts run the previous generation and have quarantined the new one for 30 minutes. |
+| `increase(orbit_agent_poll_fallback_total[1h]) > 0` | The watcher cap was reached. Note this is a one-way door per agent process: raising `--max-watchers` does not bring those agents back, only restarting them does. |
+
+**Why two convergence rules, and why the first one is the real alert.**
+`orbit_convergence_lag_seconds` is derived from the device's `last_seen_at`,
+which every poll stamps — including a poll from a host that then refuses to
+apply. So it measures SILENCE, not staleness. A host polling every thirty
+seconds while quarantining a generation, or one restored by `unblock` that never
+enrolled, pins that gauge under one poll interval forever and the 300-second
+rule can never fire for it. The converged-count comparison does move, which is
+why it is the page. Both are kept: the lag gauge is still the fastest signal for
+a machine that has genuinely gone quiet.
+
+Also exported, and deliberately not alerted on: `orbit_config_epoch`,
+`orbit_blocklist_epoch`, `orbit_hosts_total`,
 `orbit_hosts_blocklist_converged`, `orbit_blocklist_entries`,
 `orbit_certificate_min_remaining_seconds`, `orbit_watch_connections`,
-`orbit_enrollments_total{result}`, and the standard Go runtime collectors.
+`orbit_enrollments_total{result}`, `orbit_certificates_issued_total{reason}`,
+`orbit_epoch_notifications_total{kind}`, and the standard Go runtime collectors.
+Enrolment failures are the loudest of these and are still not a page: the
+enrolment endpoint is public and unauthenticated, so a scanner produces them,
+and an alert on other people's typos is one an operator learns to close.
 
 Everything is labelled by network only. Per-host labels would grow a time series
 per machine and make Prometheus the most expensive part of a deployment that
@@ -848,7 +874,6 @@ something happened, the log line tells you to which host.
 | `host deleted and its certificates revoked` | a decommission; check it was intended |
 | `token revoked itself; this request was its last` | end of a credential rotation, or someone locked themselves out |
 | `certificate is overdue for renewal` | a membership has stopped rotating; it will drop off at expiry |
-| `host recovered after certificate expiry` | renewal is broken for that host — recovery is not routine |
 | `CA activated before convergence` | someone forced a rotation; memberships were cut off |
 | `active certificate authority has expired` | the network's signer outlived itself; enrollment and renewal fail until a replacement CA is created and activated. The sweep deliberately does not retire it — retiring is a rotation step and cannot be undone through the API |
 | `host reverted a pushed generation` | that host applied a config and then could not reach the control plane, so its guard rolled back. More than one means the push severed the fleet |
