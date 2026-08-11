@@ -61,6 +61,17 @@ Unreachable code does not merge.
    which was a test helper the agent split had duplicated into a second package and never called
    there.
 
+> **What the second gate cannot see, found 2026-08-11.** `deadcode` uses rapid type analysis, which
+> treats an exported method on a live receiver type as potentially callable from outside the module.
+> `store.Tx` is instantiated everywhere, so an unused exported method on it is invisible to point 4 —
+> `Tx.ListSecrets` and `Tx.ResealSecret` have no caller anywhere in the repository and the gate reports
+> neither. Confirmed by adding two canaries: the unexported one is caught, the exported method on `Tx`
+> is not.
+>
+> A green run therefore means "no unreachable unexported code, and none on types nothing instantiates".
+> It is not a statement about the exported surface of a library package. That gap was found by reading,
+> not by tooling, which is the honest summary of what a reachability gate buys.
+
 An allowlist file exists for genuine exceptions — platform-specific implementations that are
 unreachable on the CI host, and nothing else. Every entry carries a one-line reason. A growing
 allowlist is the signal that this ADR is being evaded.

@@ -150,7 +150,11 @@ fine; running them on one listener is not.
 | Agent | **overlay address only** | source overlay IP (see §4.3) | per host |
 
 The control plane is **stateless**. All state is Postgres. Run N replicas behind
-a load balancer.
+a load balancer — with one exception, recorded in ADR-0009: the browser console
+derives its CSRF form token from a key generated per process, so a form rendered
+by one replica cannot be submitted to another. The JSON API and the agent API
+load-balance freely; the UI needs a sticky session or a single replica until
+that key is shared.
 
 ### 2.1 The agent runs Nebula in-process
 

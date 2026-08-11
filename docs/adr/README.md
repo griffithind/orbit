@@ -45,3 +45,6 @@ Do **not** write one for a refactor, a naming choice, or a decision with an obvi
 | [0004](0004-no-cli-framework.md) | The CLI stays on stdlib `flag` | Accepted |
 | [0005](0005-no-compatibility-before-v1.md) | No backward compatibility before v1.0 | Accepted |
 | [0006](0006-code-must-be-reachable.md) | Code must be reachable from `main` | Accepted |
+| [0007](0007-key-custody-and-recovery.md) | Key custody and recovery | Proposed |
+| [0008](0008-what-we-measure.md) | What we measure | Proposed |
+| [0009](0009-control-plane-replicas.md) | Control-plane replicas | Proposed |

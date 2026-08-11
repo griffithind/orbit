@@ -122,6 +122,18 @@ jobs:
       # function that nothing in the repository calls to exist. It found six the
       # day it was added, one of which was a test helper duplicated into a second
       # package by the agent split and never called there.
+      #
+      # WHAT IT CANNOT SEE. deadcode uses rapid type analysis, which treats an
+      # EXPORTED method on a live receiver type as potentially callable from
+      # outside the module. store.Tx is instantiated everywhere, so any unused
+      # exported method on it is invisible here — Tx.ListSecrets and
+      # Tx.ResealSecret have no caller anywhere in the repository and this gate
+      # reports neither. Verified by adding one of each: an unexported function
+      # is caught, an exported method on Tx is not.
+      #
+      # So a green run means "no unreachable unexported code, and no unreachable
+      # exported code on types nothing instantiates". It does not mean the
+      # exported surface is used.
       - name: no code that nothing calls
         run: |
           go run golang.org/x/tools/cmd/deadcode@latest -test ./... > all.txt || true
