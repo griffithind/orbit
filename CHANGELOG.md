@@ -11,10 +11,63 @@ without one.
 
 ## Unreleased
 
-**This release requires a fresh database, and changes the CLI and the admin API.**
-Nothing is deployed yet and there is no upgrade path from v0.4.5 — see
-ADR-0005. The headline is that the agent daemon has been running a code path
-that skipped most of what the agent does.
+**This release requires a fresh database, and changes the CLI, the admin API and
+where the KEK passphrase is stored.** Nothing is deployed yet and there is no
+upgrade path from v0.4.5 — see ADR-0005.
+
+Two headlines. The agent daemon had been running a code path that skipped most
+of what the agent does. And four security defects are fixed, of which two are
+serious: any enrolled host could obtain a certificate for any other member of
+its network, and any token that could manage tokens could grant itself
+everything.
+
+### Security
+
+- **Any enrolled host could take over any other host in its network.** The agent
+  API authenticates by source address alone, and resolved that address through a
+  helper that honours `X-Forwarded-For` when `-trust-forwarded-for` is set. That
+  flag is for the public listener behind a reverse proxy — an ordinary
+  deployment — and `orbitd` builds the overlay listener's config by copying the
+  public one, so enabling it for the proxy enabled it for a socket that has no
+  proxy in front of it and never will.
+
+  `POST /agent/v1/renew` takes its identity from that address and issues a
+  certificate for a public key the request supplies, with no proof of
+  possession. One header was therefore a complete identity takeover, laterally,
+  from inside the mesh the product exists to segment. Identity now reads the
+  peer address and nothing else; three tests hold it there, one of them static
+  because the check cannot be exercised without a database.
+
+- **A token could mint a token stronger than itself.** `POST /v1/tokens` wrote
+  the requested scopes to the database unread — no check that the caller held
+  what it was granting, and no check that the scope exists. `tokens:write` was
+  therefore the only scope that mattered: a CI credential allowed to rotate its
+  own key could ask for `*` and get it. A caller may now grant only what it
+  holds, and an unknown scope is refused by name. Bootstrap is unaffected, since
+  `orbitd` writes the first token through the database directly.
+
+- **One noisy client could rate-limit enrolment for everyone.** The limiter
+  checked the global ceiling before the per-key one, and `rate.Limiter.Allow`
+  spends a token whether or not the request is served — so a source already over
+  its own limit kept draining the global budget with requests that were about to
+  be refused anyway. 600 refusals a minute from one address locked out every
+  other client. The rejections were the attack.
+
+- **A certificate authority could be created with no certificate.** The errors
+  from marshalling and fingerprinting a new CA were discarded, and both columns
+  are `NOT NULL` without being non-empty — so the failure mode was not an error
+  but a CA row with an empty certificate, returned as 201 and published into
+  every host's trust bundle as a blank entry. Checked now, and the schema
+  refuses it.
+
+- **The KEK passphrase is no longer written beside the database it protects.**
+  `scripts/setup-control-plane.sh` put it in `.env`, next to the database
+  passwords, in the directory that also carries the database volume — so the
+  default state on disk was a backup and the key that opens it, together.
+  Anyone who archived that directory took both. It is written to `./kek.pass`
+  now, and compose reads it through `ORBIT_KEK_PASSPHRASE_FILE`, which also
+  keeps it out of `docker inspect`. **Existing deployments must move the value
+  out of `.env` into `kek.pass` before upgrading.**
 
 ### Fixed
 
@@ -81,6 +134,35 @@ that skipped most of what the agent does.
 
 ### Changed
 
+- **The KEK can be rotated.** `orbitd kek rotate` re-seals every stored secret
+  under a new passphrase and replaces the salt and verifier, in one transaction.
+  The documentation had claimed this worked since it was written; the primitives
+  existed and nothing called them. One transaction is the design rather than
+  tidiness — a partial rotation leaves secrets under two keys and a control
+  plane that will not start, with every CA key present and unreadable.
+
+  Rotation is offline and needs the database, because it needs the current
+  passphrase to read what it rewrites. Every replica must be given the new
+  passphrase before it next starts.
+
+- **The browser console works behind a load balancer.** Its CSRF form token was
+  an HMAC under a key generated per process, so a form rendered by one replica
+  was refused by another — every time, not merely after a restart. The key is
+  derived from the KEK now, so every replica computes the same bytes and none
+  are stored. `docs/design.md` said to run N replicas behind a load balancer and
+  the console was the one surface that could not.
+
+- **Two control planes given the same overlay address are refused.** The check
+  that was supposed to catch this compared names, and the default name was
+  derived from the very address it refereed — so both replicas computed the same
+  name, the refusal never fired, and the second silently adopted the first's
+  membership. Both then issued certificates for one overlay IP. The name is the
+  machine's hostname now.
+
+- **`orbit policy check -host` is `-membership`**, and the endpoint behind it
+  takes `?membership=` rather than `?host=`. It was the last flag in the tree
+  still using the old noun.
+
 - **The schema is one migration.** Twenty-six sequential migrations were
   collapsed into `0001_initial.sql`. Equivalence was proved through the
   catalogs rather than by reading a dump — 173 columns, 100 constraints, 58
@@ -109,6 +191,23 @@ that skipped most of what the agent does.
   every host a config naming a file the agent does not write.
 
 ### Added
+
+- **Four metrics that close failures nothing measured**:
+  `orbit_hosts_data_plane_down` (a host whose agent is healthy and whose nebula
+  is not — it polls, reports an applied epoch, and every other gauge counted it
+  as converged), `orbit_ca_min_remaining_seconds` (an expired signer stops
+  enrolment and renewal network-wide and had one log line),
+  `orbit_maintenance_last_success_seconds` (a stopped sweep is invisible, and
+  blocklist pruning stops with it), and `orbit_renewals_failed_total` (successes
+  were counted and failures logged, so a fleet that had stopped renewing looked
+  like one that had stopped needing to).
+
+  The alert rules in `docs/deployment.md` are rewritten around them, and each
+  rule now names what to do when it fires. One rule was removed rather than
+  rewritten: it alerted on a label value nothing has ever emitted, so it could
+  not fire, and an operator following the runbook had a gap shaped like
+  coverage. A test now checks every metric and label value the docs name against
+  the code that declares and emits them.
 
 - **`orbit netcheck`** — DNS, TCP, TLS and clock skew against the control
   plane, for when nothing works yet and `status` has nothing to report.
