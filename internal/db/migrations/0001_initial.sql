@@ -105,6 +105,7 @@ CREATE INDEX secret_network_idx ON orbit.secret USING btree (network_id, kind);
 -- curve carries one permitted value and one constraint saying so. It had two —
 -- an enum-style check listing CURVE25519 and P256, and a narrower one requiring
 -- P256 — where the narrower subsumes the wider, so the wider could never fail.
+-- orbit.ca carried the same pair and lost the same one.
 -- The column stays because nebula's config names the curve; the dead constraint
 -- does not.
 --
@@ -248,8 +249,14 @@ CREATE TABLE orbit.ca (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     unsafe_networks text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT ca_check CHECK ((not_after > not_before)),
-    CONSTRAINT ca_curve_check CHECK ((curve = ANY (ARRAY['CURVE25519'::text, 'P256'::text]))),
     CONSTRAINT ca_curve_p256 CHECK ((curve = 'P256'::text)),
+    -- NOT NULL does not mean non-empty, and both of these are worse empty than
+    -- absent: a CA row with no certificate is published into every host's trust
+    -- bundle as a blank entry, and one with no fingerprint cannot be matched
+    -- against the certificates it signed. The API discarded the errors from
+    -- marshalling and fingerprinting until 2026-08-11, so this was reachable.
+    CONSTRAINT ca_cert_pem_present CHECK ((length(cert_pem) > 0)),
+    CONSTRAINT ca_fingerprint_present CHECK ((length(fingerprint) > 0)),
     CONSTRAINT ca_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'active'::text, 'retiring'::text, 'retired'::text])))
 );
 

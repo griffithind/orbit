@@ -1297,8 +1297,24 @@ func (s *Server) handleCreateCA(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not create certificate authority")
 		return
 	}
-	pem, _ := caCert.MarshalPEM()
-	fingerprint, _ := caCert.Fingerprint()
+	// Checked, unlike before. Neither is expected to fail on a certificate this
+	// function just created, but both columns are NOT NULL without being
+	// non-empty, so a discarded error stored a CA whose certificate is the empty
+	// string and whose fingerprint is nothing — published into every host's
+	// trust bundle as blank, promotable to active, and returned as 201. The
+	// enrollment path checks the same two calls; this one was the exception.
+	pem, err := caCert.MarshalPEM()
+	if err != nil {
+		s.log.Error("marshalling the new CA failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "could not create certificate authority")
+		return
+	}
+	fingerprint, err := caCert.Fingerprint()
+	if err != nil {
+		s.log.Error("fingerprinting the new CA failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "could not create certificate authority")
+		return
+	}
 
 	row := store.CA{
 		NetworkID: networkID, Name: req.Name, Fingerprint: fingerprint,
