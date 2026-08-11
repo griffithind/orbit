@@ -12,10 +12,10 @@ import (
 // The escape hatch: keeping the recovery path outside the thing it recovers from.
 //
 // The agent has two ways to the control plane and they are meant to be independent.
-// Steady-state traffic goes to AgentURLs, the control plane's OVERLAY addresses. When the
-// overlay is down it falls back to BaseURL, the public endpoint it enrolled against —
-// State calls that "the recovery path: if the overlay is unreachable the agent has
-// nowhere else to go".
+// Steady-state traffic goes to AgentURLs, the control plane's OVERLAY addresses. Recovery
+// goes to BaseURL, the public endpoint it enrolled against — not automatically, because
+// the public listener mounts no agent routes, but as `orbit agent enroll` with a fresh
+// code. That is the path this file exists to keep reachable.
 //
 // An exit node collapses the two into one. The rendered default route captures everything
 // this machine sends, and listen.so_mark and IP_BOUND_IF protect NEBULA's UDP socket, not

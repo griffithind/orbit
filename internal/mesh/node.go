@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -41,11 +42,19 @@ type Config struct {
 	NetworkID uuid.UUID
 
 	// Addr is this instance's overlay address on the network. Each replica
-	// needs its own; the membership_address uniqueness constraint enforces that
-	// rather than letting two silently collide.
+	// needs its own, and SelfIssue is what refuses a second claimant: it
+	// reuses an existing record only when the NAME matches, and returns
+	// "overlay address is already held by host X" otherwise.
+	//
+	// That check was inert until the default name stopped being derived from
+	// this field — see defaultName. The membership_address uniqueness
+	// constraint does NOT referee this, whatever an earlier version of this
+	// comment claimed: the second replica adopts the first's membership rather
+	// than inserting a row, so there is no second row for a constraint to
+	// reject.
 	Addr netip.Addr
 
-	// Name is the host record's name. Defaults to "orbit-control-<addr>".
+	// Name is the host record's name. Defaults to "orbit-control-<hostname>".
 	Name string
 
 	// DeviceKey is this control plane's own device public key, DER SPKI.
@@ -133,13 +142,39 @@ type Node struct {
 // makes a healthy replica disappear from the list agents are given.
 const DefaultHeartbeat = 30 * time.Second
 
+// defaultName names this replica after the machine it runs on.
+//
+// It was "orbit-control-<addr>", derived from the very address the name is used
+// to referee. SelfIssue reuses an existing membership when the name matches and
+// refuses when it differs, so two replicas started with the same -mesh address
+// computed the same name, the refusal never fired, and the second silently
+// adopted the first's membership. Both then self-issued valid certificates for
+// one overlay IP and both brought up nebula on it, while RegisterControlPlane
+// upserts on (network_id, addr) so the registry showed a single endpoint for two
+// processes. Nothing warned.
+//
+// The hostname is what actually differs between replicas, and it is stable
+// across a restart — which is the property the check needs, since a replica
+// restarting must be allowed to reclaim its own record.
+//
+// Falling back to the address keeps a machine with no hostname working, at the
+// cost of restoring the old blind spot for that machine alone. Two replicas that
+// BOTH cannot read a hostname and share an address still collide silently; a
+// deployment in that state has a more immediate problem.
+func defaultName(addr netip.Addr) string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return "orbit-control-" + h
+	}
+	return "orbit-control-" + addr.String()
+}
+
 // Join issues the control plane a certificate and brings up its nebula stack.
 func Join(ctx context.Context, es *enroll.Service, cfg Config, log *slog.Logger) (*Node, error) {
 	if !cfg.Addr.IsValid() {
 		return nil, fmt.Errorf("mesh: no overlay address for network %s", cfg.NetworkID)
 	}
 	if cfg.Name == "" {
-		cfg.Name = "orbit-control-" + cfg.Addr.String()
+		cfg.Name = defaultName(cfg.Addr)
 	}
 
 	hosts, advertisePort, err := splitLighthouseAddrs(cfg.LighthouseAddrs, cfg.ListenPort)

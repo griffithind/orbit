@@ -31,9 +31,22 @@ import (
 // read back from the certificate on disk rather than stored, so the two can
 // never disagree.
 type State struct {
-	// BaseURL is the public endpoint this host enrolled against. Retained as
-	// the recovery path: if the overlay is unreachable the agent has nowhere
-	// else to go.
+	// BaseURL is the public endpoint this host enrolled against. It is the
+	// BOOTSTRAP endpoint, and it is used until the first response names the
+	// overlay replicas — ControlURL returns it only while AgentURLs is empty.
+	//
+	// It is NOT a steady-state fallback, and this comment used to say it was.
+	// The public listener mounts the enroll, admin and health routes and not
+	// the agent routes (cmd/orbitd/main.go), so there is no /agent/v1 there to
+	// fall back TO — and putting one there would expose an API whose identity is
+	// the caller's source address to the internet, where that means nothing.
+	// The same listener deliberately refuses the mirror image, keeping the
+	// admin API off the overlay.
+	//
+	// So when every advertised overlay endpoint is unreachable, the agent fails
+	// static on the configuration it already has and keeps trying. Recovery is
+	// re-enrolment against this endpoint with a fresh code — `orbit agent
+	// enroll` — which reaches the enroll routes that ARE mounted there.
 	BaseURL string `json:"base_url"`
 
 	// AgentURLs are the control plane's overlay addresses, one per live
