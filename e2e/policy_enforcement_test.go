@@ -76,7 +76,7 @@ func servePolicy(t *testing.T, h *harness, nebulaPort int, doc []byte) *httptest
 	})
 
 	srv := api.New(h.store, svc, api.Config{
-		Agent:               &api.AgentListener{NetworkID: h.netID},
+		Agent:               &api.AgentListener{NetworkID: h.netID, TrustForwardedForIdentity: true},
 		SignerFactory:       h.vault.SignerFactory(),
 		SealNetworkIdentity: h.sealNetworkIdentity,
 		SealCAKey:           h.sealCAKey,

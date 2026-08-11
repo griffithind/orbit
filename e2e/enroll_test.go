@@ -300,7 +300,10 @@ func (h *harness) serve(t *testing.T, nebulaPort int) *httptest.Server {
 	})
 
 	srv := api.New(h.store, svc, api.Config{
-		Agent:               &api.AgentListener{NetworkID: h.netID},
+		// Test-only: lets a test assert an overlay source address without booting
+		// nebula. Scoped to this listener so it cannot be switched on by the
+		// public reverse-proxy flag. serveOverlay below uses the real path.
+		Agent:               &api.AgentListener{NetworkID: h.netID, TrustForwardedForIdentity: true},
 		SignerFactory:       h.vault.SignerFactory(),
 		SealNetworkIdentity: h.sealNetworkIdentity,
 		SealCAKey:           h.sealCAKey,

@@ -53,6 +53,22 @@ var Version = version.Version
 // on. Orbit therefore runs one agent listener per network.
 type AgentListener struct {
 	NetworkID uuid.UUID
+
+	// TrustForwardedForIdentity lets THIS listener resolve a caller's identity
+	// from X-Forwarded-For. It is for tests, and it is dangerous.
+	//
+	// Any client that can reach the listener can then claim to be any member of
+	// the network, and POST /agent/v1/renew will issue that member's certificate
+	// to a key the caller supplies. cmd/orbitd never sets it — there is a test
+	// that says so — and e2e sets it to assert an overlay source address without
+	// booting two nebula nodes.
+	//
+	// It is a field on the AGENT listener rather than a use of
+	// Config.TrustForwardedFor because that flag is for the public listener
+	// behind a reverse proxy, and cmd/orbitd builds this listener's config by
+	// copying that one. Sharing the flag meant an ordinary proxy deployment
+	// silently made every host impersonatable.
+	TrustForwardedForIdentity bool
 }
 
 type Config struct {
@@ -64,6 +80,11 @@ type Config struct {
 	// TrustForwardedFor makes the server read the client address from
 	// X-Forwarded-For. Only enable behind a proxy that overwrites the header;
 	// on a directly-exposed listener it lets any client claim any address.
+	//
+	// It does NOT affect the agent surface, which resolves identity with
+	// peerAddr and ignores the header whatever this says. cmd/orbitd copies this
+	// config onto the overlay listener, so a flag set for a public reverse proxy
+	// would otherwise reach a socket that has no proxy in front of it.
 	TrustForwardedFor bool
 
 	// Notifier powers /agent/v1/watch. Nil disables push, and agents fall back
@@ -393,7 +414,7 @@ func (s *Server) agentIdentity(w http.ResponseWriter, r *http.Request) (*store.A
 		return nil, false
 	}
 
-	addr := s.clientAddr(r)
+	addr := s.agentPeerAddr(r)
 	if !addr.IsValid() {
 		writeErr(w, http.StatusBadRequest, "could not determine source address")
 		return nil, false
@@ -717,16 +738,23 @@ func (s *Server) pushUp() bool {
 // Helpers
 //------------------------------------------------------------------------------
 
-// clientAddr extracts the caller's IP.
-func (s *Server) clientAddr(r *http.Request) netip.Addr {
-	if s.cfg.TrustForwardedFor {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first, _, _ := strings.Cut(xff, ",")
-			if a, err := netip.ParseAddr(strings.TrimSpace(first)); err == nil {
-				return a.Unmap()
-			}
-		}
-	}
+// peerAddr is where the connection actually came from. It never reads a
+// forwarding header.
+//
+// This is what the agent surface authenticates with, and the distinction is not
+// defensive tidiness. That surface listens on the OVERLAY: nothing proxies it,
+// so X-Forwarded-For arriving there is a value the caller typed. Resolving
+// identity from it would let any enrolled host claim any other host's address —
+// and POST /agent/v1/renew issues a certificate for whatever identity is
+// resolved, to a public key the request supplies. That is a complete takeover
+// of another member from one header, not a disclosure.
+//
+// It was reached through clientAddr, which honours the header when
+// TrustForwardedFor is set. That flag exists for the PUBLIC listener behind a
+// reverse proxy, which is an ordinary deployment — and cmd/orbitd builds the
+// overlay listener's config by copying the public one, so turning it on for the
+// proxy turned it on here too.
+func (s *Server) peerAddr(r *http.Request) netip.Addr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -736,6 +764,49 @@ func (s *Server) clientAddr(r *http.Request) netip.Addr {
 		return netip.Addr{}
 	}
 	return a.Unmap()
+}
+
+// agentPeerAddr is where the agent surface gets identity from.
+//
+// peerAddr, except for the test-only escape hatch on AgentListener. Kept as its
+// own function so the rule "identity never reads the header" stays checkable in
+// one place — see TestOnlyIdentityFreeCallersReadTheForwardingHeader.
+func (s *Server) agentPeerAddr(r *http.Request) netip.Addr {
+	// Reads the header itself rather than going through clientAddr, so the seam
+	// does not also depend on Config.TrustForwardedFor. Two flags governing one
+	// decision is how the wrong one ends up governing it.
+	if s.cfg.Agent != nil && s.cfg.Agent.TrustForwardedForIdentity {
+		if a, ok := forwardedFor(r); ok {
+			return a
+		}
+	}
+	return s.peerAddr(r)
+}
+
+// forwardedFor is the first address in X-Forwarded-For, if there is one.
+func forwardedFor(r *http.Request) (netip.Addr, bool) {
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return netip.Addr{}, false
+	}
+	first, _, _ := strings.Cut(xff, ",")
+	a, err := netip.ParseAddr(strings.TrimSpace(first))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
+}
+
+// clientAddr is peerAddr plus the forwarding header, for the surfaces where a
+// proxy legitimately sits in front: rate limiting and the recorded source of an
+// enrolment. Never for identity — see peerAddr.
+func (s *Server) clientAddr(r *http.Request) netip.Addr {
+	if s.cfg.TrustForwardedFor {
+		if a, ok := forwardedFor(r); ok {
+			return a
+		}
+	}
+	return s.peerAddr(r)
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
