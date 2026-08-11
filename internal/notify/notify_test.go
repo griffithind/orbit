@@ -63,12 +63,35 @@ func TestDispatchIsSafeUnderSubscribeChurn(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	// Churn for a while, then keep going until the fan-out has demonstrably
+	// delivered — bounded, so a genuine failure still fails.
+	//
+	// This was a flat 200ms sleep followed by "at least one subscriber was
+	// woken". That asserts a scheduling outcome inside one window of wall
+	// clock: each subscriber waits 1ms for a wake before releasing, and under
+	// -race, where the detector costs five to twenty times, a loaded runner can
+	// spend the whole window without ever lining up a dispatch with a waiting
+	// receiver. Nothing would be wrong, and the test would say the fan-out is
+	// not delivering.
+	//
+	// The lower bound is what finds the lock bug this test exists for, so it is
+	// kept; the upper bound is what makes the assertion about delivery instead
+	// of about timing.
+	const churn = 200 * time.Millisecond
+	start := time.Now()
+	deadline := start.Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if woken.Load() > 0 && time.Since(start) >= churn {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	stop.Store(true)
 	wg.Wait()
 
 	if woken.Load() == 0 {
-		t.Error("no subscriber was ever woken; the fan-out is not delivering")
+		t.Errorf("no subscriber was woken in %s of continuous dispatch; "+
+			"the fan-out is not delivering", time.Since(start).Round(time.Millisecond))
 	}
 	if got := n.Subscribers(net); got != 0 {
 		t.Errorf("%d subscribers left after every release; the map leaks", got)
