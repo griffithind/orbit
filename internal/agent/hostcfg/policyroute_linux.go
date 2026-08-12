@@ -39,6 +39,10 @@ const (
 	// removed by name, so removal needs no memory of what was put in them.
 	routeTable   = 4242
 	rulePriority = 4242
+
+	// backstopPriority is the fail-closed rule, immediately below the lookup so
+	// that nothing else can be inserted between them.
+	backstopPriority = 4243
 )
 
 // applyPolicyRoute makes the marked-traffic escape hatch true, or removes it.
@@ -95,6 +99,23 @@ func applyPolicyRoute(h HostState) error {
 			"lookup", strconv.Itoa(routeTable), "priority", strconv.Itoa(rulePriority)); err != nil {
 			return err
 		}
+
+		// THE BACKSTOP, one priority below. A marked packet that finds nothing
+		// in table 4242 used to fall through to main at 32766 — where
+		// 0.0.0.0/1 sits on the tun — and loop. That is the exact failure the
+		// header of this file exists to prevent, in the window where the table
+		// is empty, stale, or points at an interface that has gone away.
+		//
+		// Tailscale spends a whole extra rule on the same problem
+		// (router_linux.go, baseIPRules, RTN_UNREACHABLE at pref +50): "packets
+		// from us should be aborted rather than falling through to the tailscale
+		// routes, because that would create routing loops."
+		//
+		// Dropping the host's own traffic is a louder failure than looping it,
+		// and that is the trade. See docs/adr/0016-the-exit-route-fails-closed.md.
+		if err := ensureUnreachableBackstop(fam, mark); err != nil {
+			return err
+		}
 		installed++
 	}
 
@@ -103,6 +124,29 @@ func applyPolicyRoute(h HostState) error {
 			"to send nebula's own traffic out of; every default route leads back into a tunnel")
 	}
 	return nil
+}
+
+// ensureUnreachableBackstop installs the fail-closed rule below the lookup.
+//
+// Idempotent in the same shape as the rule above it: read back first, and only
+// churn when it is wrong, because deleting first opens the window the whole
+// mechanism exists to close.
+func ensureUnreachableBackstop(fam, mark string) error {
+	want := fmt.Sprintf("fwmark %s", mark)
+	have, err := ipOut(fam, "rule", "show", "priority", strconv.Itoa(backstopPriority))
+	if err != nil {
+		return err
+	}
+	if strings.Contains(have, want) && strings.Contains(have, "unreachable") {
+		return nil
+	}
+	if strings.TrimSpace(have) != "" {
+		if err := ip(fam, "rule", "del", "priority", strconv.Itoa(backstopPriority)); err != nil {
+			return err
+		}
+	}
+	return ip(fam, "rule", "add", "fwmark", mark, "type", "unreachable",
+		"priority", strconv.Itoa(backstopPriority))
 }
 
 // removePolicyRoute takes both objects away, in both families.
@@ -116,12 +160,18 @@ func removePolicyRoute() error {
 		return nil
 	}
 	for _, fam := range []string{"-4", "-6"} {
-		// A loop, because a previous crash between del and add could have left
-		// more than one rule at this priority. Bounded so a kernel that never
-		// stops reporting them cannot hang the agent.
-		for i := 0; i < 4; i++ {
-			if err := ip(fam, "rule", "del", "priority", strconv.Itoa(rulePriority)); err != nil {
-				break
+		// Both priorities. The backstop is fail-CLOSED, so leaving it behind on
+		// a host that is no longer an exit-node client would drop that host's
+		// own marked traffic with nothing to catch it — removal matters more
+		// here than for the rule it protects.
+		for _, prio := range []int{rulePriority, backstopPriority} {
+			// A loop, because a previous crash between del and add could have
+			// left more than one rule at this priority. Bounded so a kernel that
+			// never stops reporting them cannot hang the agent.
+			for i := 0; i < 4; i++ {
+				if err := ip(fam, "rule", "del", "priority", strconv.Itoa(prio)); err != nil {
+					break
+				}
 			}
 		}
 		_ = ip(fam, "route", "flush", "table", strconv.Itoa(routeTable))

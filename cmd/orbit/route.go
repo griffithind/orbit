@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/google/uuid"
@@ -166,8 +167,27 @@ func routeAdd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// NAT defaults ON for a default route, and only for a default route.
+	//
+	// `orbit route add gw 0.0.0.0/0` with no flag produced an exit node that
+	// cannot work — the internet has no route back to an overlay address — and
+	// said nothing at add time. The flag's own help already read "usually wanted
+	// for 0.0.0.0/0", which is a default chosen against its own documentation.
+	// Every e2e test passed Masquerade: true explicitly, so the default-off path
+	// was never exercised.
+	//
+	// fs.Visit rather than a sentinel, so an operator who writes
+	// `-masquerade=false` on a /0 still gets what they asked for.
+	masq := *fl.masquerade
+	if !flagSet(fs, "masquerade") {
+		if p, err := netip.ParsePrefix(fs.Arg(1)); err == nil && p.Bits() == 0 {
+			masq = true
+			o.announce("NAT is on for this default route; pass -masquerade=false to turn it off")
+		}
+	}
+
 	req := wire.CreateRouteRequest{
-		Prefix: fs.Arg(1), Weight: *fl.weight, Masquerade: *fl.masquerade, MTU: *fl.mtu,
+		Prefix: fs.Arg(1), Weight: *fl.weight, Masquerade: masq, MTU: *fl.mtu,
 	}
 	if *fl.noInstall {
 		no := false
@@ -248,10 +268,25 @@ func bindRouteAdd(fs *flag.FlagSet, o *options) routeAddFlags {
 				"It does not order different prefixes against each other — "+
 				"longest-prefix match does that"),
 		masquerade: fs.Bool("masquerade", false,
-			"NAT forwarded traffic. Usually wanted for 0.0.0.0/0 and usually not "+
-				"for a LAN prefix, where the far side can be told a static route"),
+			"NAT forwarded traffic. Defaults ON for a default route, where the "+
+				"internet has no way back to an overlay address, and off for a LAN "+
+				"prefix, where the far side can be told a static route"),
 		noInstall: fs.Bool("no-install", false,
 			"do not put this route in consumers' system routing tables"),
 		mtu: fs.Int("mtu", 0, "per-route MTU; 0 uses the tun's"),
 	}
+}
+
+// flagSet reports whether a flag was named on the command line, as opposed to
+// holding its default. The distinction matters wherever a default depends on
+// another argument: "not given" and "given the zero value" have to be
+// different answers.
+func flagSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
