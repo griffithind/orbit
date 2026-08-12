@@ -626,7 +626,14 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		// The addresses live on the DEVICE now, so this reads the machine rather
 		// than the membership — and the fix an operator is pointed at is
 		// `orbit device set-addrs`, which repairs every network at once.
-		if lighthouse && len(host.StaticAddrs) == 0 && req.AdvertisePort == nil {
+		// A lighthouse OR a relay needs an address peers can dial. Both are
+		// published into every host's static_host_map by the same query, and a
+		// relay with no public address is an entry the whole network will try
+		// and fail to reach — which is worse than a lighthouse in the same
+		// state, because relaying is what a host falls back to when direct
+		// fails. is_lighthouse had this check from the start and is_relay had
+		// none at all. See docs/adr/0032-discovery-survives-the-lighthouse.md.
+		if (lighthouse || relay) && len(host.StaticAddrs) == 0 && req.AdvertisePort == nil {
 			dev, err := tx.GetDevice(ctx, *host.DeviceID)
 			if err != nil {
 				return err
@@ -663,7 +670,10 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, membershipResponse(host, net))
 }
 
-var errLighthouseNeedsAddr = errors.New("lighthouse requires static_addrs")
+// errLighthouseNeedsAddr covers relays too — both are published into every
+// host's static_host_map, and an entry with no reachable address is one the
+// whole network dials and fails.
+var errLighthouseNeedsAddr = errors.New("a lighthouse or relay requires a public address")
 
 func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 	membershipID, ok := pathUUID(w, r, "id")

@@ -586,7 +586,30 @@ const (
 	// The comment here used to read "nebula's own default", which was false and
 	// made this line look like a no-op. A host that roams takes up to a minute
 	// to become findable at its new address; that is the trade.
-	defaultLighthouseInterval = 60     // seconds
+	defaultLighthouseInterval = 60 // seconds
+
+	// punchy.delay is nebula's own default, restated because the two values
+	// below only make sense read together.
+	defaultPunchyDelay = "1s"
+
+	// punchy.respond_delay, chosen AGAINST nebula's handshake give-up rather
+	// than left at its default, which races it.
+	//
+	// hsTimeout(retries, interval) at third_party/nebula/handshake_manager.go:645
+	// with the defaults at :23-24 is 10/2 * (2*100ms + 9*100ms) = 5500ms: the
+	// initiator deletes the hostinfo and gives up there. nebula's default
+	// respond_delay is 5000ms (punchy.go:131), and the responder's clock starts
+	// strictly LATER — it is scheduled only when the punch notification arrives
+	// via the lighthouse, so after A→lighthouse→B. That left under 500ms, minus
+	// scheduler wakeup and one RTT, for the mechanism to land. The symptom is
+	// "slow to connect, works on the second try".
+	//
+	// Orbit turns `respond` on, against nebula's default of off, and that is
+	// right — nebula's own example config calls it "extremely useful if one node
+	// is behind a difficult nat, such as a symmetric NAT". Turning it on without
+	// touching this was not. 2s leaves 3.5s of margin.
+	// See docs/adr/0032-discovery-survives-the-lighthouse.md.
+	defaultPunchyRespondDelay = "2s"
 	defaultTunMTU             = 1300   // nebula's own default
 	defaultLogLevel           = "info" // the level an operator changes most often
 	defaultLogFormat          = "text"
