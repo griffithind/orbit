@@ -215,3 +215,165 @@ func TestAKnownNameWithNoAddressOfThatFamilyIsNODATA(t *testing.T) {
 		t.Errorf("want NOERROR with no answers, got %v", rec.msg)
 	}
 }
+
+// TestAnOversizedAnswerIsTruncatedWithTC.
+//
+// The TCP listener's own justification is TC-then-TCP, and nothing ever set TC:
+// the authoritative path never copied an OPT RR, never called Truncate, and
+// never marked an answer short. A name with many addresses would have produced
+// a datagram the asker could not receive, with no signal to come back over TCP.
+func TestAnOversizedAnswerIsTruncatedWithTC(t *testing.T) {
+	// Enough addresses that the answer cannot fit in 512 bytes.
+	var addrs []netip.Addr
+	for i := range 60 {
+		addrs = append(addrs, netip.AddrFrom4([4]byte{10, 42, byte(i / 256), byte(i%254 + 1)}))
+	}
+	r := &Resolver{log: discardLog{}}
+	r.state = DNSState{Domain: "lab.internal", Hosts: map[string][]netip.Addr{
+		"many.lab.internal.": addrs,
+	}}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("many.lab.internal.", dns.TypeA))
+
+	if rec.msg == nil {
+		t.Fatal("no answer")
+	}
+	if !rec.msg.Truncated {
+		t.Errorf("an answer over 512 bytes was sent without TC, so the client has "+
+			"no reason to retry over TCP: %d answers", len(rec.msg.Answer))
+	}
+	if n := rec.msg.Len(); n > dns.MinMsgSize {
+		t.Errorf("answer is %d bytes, over the %d-byte limit the asker advertised",
+			n, dns.MinMsgSize)
+	}
+}
+
+// TestAnEDNS0AskerGetsItsLargerBudgetAndAnOPTBack. A responder that answers an
+// EDNS0 query without an OPT RR is telling the asker to stop using EDNS0.
+func TestAnEDNS0AskerGetsItsLargerBudgetAndAnOPTBack(t *testing.T) {
+	var addrs []netip.Addr
+	for i := range 60 {
+		addrs = append(addrs, netip.AddrFrom4([4]byte{10, 42, byte(i / 256), byte(i%254 + 1)}))
+	}
+	r := &Resolver{log: discardLog{}}
+	r.state = DNSState{Domain: "lab.internal", Hosts: map[string][]netip.Addr{
+		"many.lab.internal.": addrs,
+	}}
+
+	req := new(dns.Msg).SetQuestion("many.lab.internal.", dns.TypeA)
+	req.SetEdns0(4096, false)
+
+	rec := &capture{}
+	r.ServeDNS(rec, req)
+
+	if rec.msg == nil {
+		t.Fatal("no answer")
+	}
+	if rec.msg.IsEdns0() == nil {
+		t.Error("no OPT RR in the reply to an EDNS0 query")
+	}
+	if rec.msg.Truncated {
+		t.Errorf("truncated at 4096 bytes: the answer is %d", rec.msg.Len())
+	}
+	if len(rec.msg.Answer) != len(addrs) {
+		t.Errorf("answers = %d, want %d — the larger budget was not used",
+			len(rec.msg.Answer), len(addrs))
+	}
+}
+
+// TestAReverseLookupOfAnOverlayAddressIsAnsweredHere.
+//
+// `dig -x 10.42.0.9` used to be forwarded, telling the machine's upstream — an
+// ISP or a corporate resolver — an address from the operator's own mesh. There
+// is also nothing out there to find: nobody else is authoritative for these.
+func TestAReverseLookupOfAnOverlayAddressIsAnsweredHere(t *testing.T) {
+	var leaked atomic.Bool
+	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
+		leaked.Store(true)
+		_ = w.WriteMsg(new(dns.Msg).SetRcode(req, dns.RcodeNameError))
+	})
+
+	r := &Resolver{log: discardLog{}, upstream: []string{up}}
+	r.state = DNSState{
+		Domain:   "lab.internal",
+		Networks: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")},
+		Hosts: map[string][]netip.Addr{
+			"db.lab.internal.": {netip.MustParseAddr("10.42.0.9")},
+		},
+	}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("9.0.42.10.in-addr.arpa.", dns.TypePTR))
+
+	if leaked.Load() {
+		t.Error("a reverse lookup of an overlay address went to the public internet")
+	}
+	if rec.msg == nil || len(rec.msg.Answer) != 1 {
+		t.Fatalf("want one PTR answer, got %v", rec.msg)
+	}
+	if ptr, ok := rec.msg.Answer[0].(*dns.PTR); !ok || ptr.Ptr != "db.lab.internal." {
+		t.Errorf("PTR = %v, want db.lab.internal.", rec.msg.Answer[0])
+	}
+}
+
+// TestAReverseLookupOutsideTheOverlayStillForwards. Authority is for our own
+// addresses; the rest of in-addr.arpa is not ours to answer for.
+func TestAReverseLookupOutsideTheOverlayStillForwards(t *testing.T) {
+	var forwarded atomic.Bool
+	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
+		forwarded.Store(true)
+		_ = w.WriteMsg(new(dns.Msg).SetReply(req))
+	})
+	r := &Resolver{log: discardLog{}, upstream: []string{up}}
+	r.state = DNSState{Domain: "lab.internal",
+		Networks: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")}}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("1.113.0.203.in-addr.arpa.", dns.TypePTR))
+
+	if !forwarded.Load() {
+		t.Error("a reverse lookup outside the overlay was not forwarded")
+	}
+}
+
+// TestAnUpstreamAnswerIntoTheOverlayIsRefused is DNS rebinding.
+//
+// A public name resolving to a mesh address lets a web page reach something
+// that only trusts its own network. Nothing inspected upstream answers at all.
+func TestAnUpstreamAnswerIntoTheOverlayIsRefused(t *testing.T) {
+	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
+		answerA(w, req, "10.42.0.9") // inside the overlay
+	})
+	r := &Resolver{log: discardLog{}, upstream: []string{up}}
+	r.state = DNSState{Domain: "lab.internal",
+		Networks: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")}}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("evil.example.com.", dns.TypeA))
+
+	if rec.msg == nil {
+		t.Fatal("no answer at all; a client would wait out its own timeout")
+	}
+	if rec.msg.Rcode == dns.RcodeSuccess && len(rec.msg.Answer) > 0 {
+		t.Errorf("a public name resolved into the overlay and was relayed: %v", rec.msg.Answer)
+	}
+}
+
+// TestAnOrdinaryUpstreamAnswerIsUnaffected. The guard must not cost every
+// lookup on the machine.
+func TestAnOrdinaryUpstreamAnswerIsUnaffected(t *testing.T) {
+	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
+		answerA(w, req, "203.0.113.7")
+	})
+	r := &Resolver{log: discardLog{}, upstream: []string{up}}
+	r.state = DNSState{Domain: "lab.internal",
+		Networks: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")}}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("example.com.", dns.TypeA))
+
+	if rec.msg == nil || rec.msg.Rcode != dns.RcodeSuccess || len(rec.msg.Answer) != 1 {
+		t.Errorf("an ordinary answer was disturbed: %v", rec.msg)
+	}
+}

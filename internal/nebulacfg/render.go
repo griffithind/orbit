@@ -263,7 +263,10 @@ type Input struct {
 	// that has not enabled it is byte-identical to what it was.
 	DNSDomain string
 	DNSListen netip.Addr
-	Names     []Name
+
+	// DNSNetworks are the network's own overlay CIDRs. See dnsSection.Networks.
+	DNSNetworks []netip.Prefix
+	Names       []Name
 
 	// SoMark is nebula's packet mark, set only when this host has a default
 	// route. Zero omits it.
@@ -719,7 +722,7 @@ func Render(in Input) ([]byte, error) {
 			UnsafeRoutes: renderRoutes(in.Routes),
 		},
 		Firewall: fw,
-		Orbit:    renderOrbit(in.Serves, hasDefault(in.Routes), renderDNS(in.DNSDomain, in.DNSListen, in.Names)),
+		Orbit:    renderOrbit(in.Serves, hasDefault(in.Routes), renderDNS(in.DNSDomain, in.DNSListen, in.Names, in.DNSNetworks)),
 	}
 	if in.LogLevel != "" || in.LogFormat != "" {
 		doc.Logging = &loggingSection{Level: in.LogLevel, Format: in.LogFormat}
@@ -852,6 +855,14 @@ type dnsSection struct {
 	// Hosts is every reachable machine in this network, this one included: a
 	// host that cannot resolve its own name is a surprise nobody needs.
 	Hosts []dnsHost `yaml:"hosts,omitempty"`
+
+	// Networks are this network's own overlay CIDRs, and they are what let the
+	// resolver do two things it could not before: answer PTR for its own
+	// addresses instead of forwarding a reverse lookup of an internal host to
+	// the public internet, and REFUSE an upstream answer that points into the
+	// overlay — the DNS rebinding case, where a public name resolves to a mesh
+	// address and a browser treats it as a local-network host. See ADR-0029.
+	Networks []string `yaml:"networks,omitempty"`
 }
 
 // dnsHost is one machine and every overlay address it answers on.
@@ -872,11 +883,14 @@ type Name struct {
 // Grouping here rather than in SQL because the answer to an A query is every
 // address that machine has, and a resolver that returned one of them would work
 // until the day the other was the reachable one.
-func renderDNS(domain string, listen netip.Addr, names []Name) *dnsSection {
+func renderDNS(domain string, listen netip.Addr, names []Name, networks []netip.Prefix) *dnsSection {
 	if len(names) == 0 || !listen.IsValid() {
 		return nil
 	}
 	out := &dnsSection{Domain: domain, Listen: netip.AddrPortFrom(listen, 53).String()}
+	for _, n := range networks {
+		out.Networks = append(out.Networks, n.String())
+	}
 	for _, n := range names {
 		if n.Name == "" || !n.Addr.IsValid() {
 			continue

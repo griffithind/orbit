@@ -906,6 +906,7 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 	fragment, err := nebulacfg.Render(nebulacfg.Input{
 		DNSDomain:    dnsDomainFor(net),
 		DNSListen:    firstAddr(host.Addrs),
+		DNSNetworks:  net.CIDRs,
 		Names:        names,
 		Paths:        inst.paths,
 		AmLighthouse: host.IsLighthouse,

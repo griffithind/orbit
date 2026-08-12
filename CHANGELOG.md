@@ -23,6 +23,19 @@ everything.
 
 ### Security
 
+- **Reverse lookups of overlay addresses went to the public internet.**
+  `dig -x 10.42.0.9` was forwarded, telling an ISP or corporate resolver an
+  address from the operator's own mesh — and there was nothing out there to
+  find, since nobody else is authoritative for them. PTR is now answered
+  locally from the same table the forward direction uses.
+
+- **No DNS rebinding protection.** Upstream answers were relayed verbatim, so a
+  public name could resolve into the overlay and be treated by a browser as a
+  local-network host. An answer pointing into the network's own CIDRs is now
+  refused rather than stripped: an answer with the offending records removed
+  says the name exists and is somewhere else, which is a lie of a different
+  shape. See ADR-0029.
+
 - **An enrollment code alone could mint a certificate.** `orbit agent enroll`
   re-issues to a membership that already exists, and the request carried no
   signature — so whoever held the code, from a CI log or a scrollback buffer,

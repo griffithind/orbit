@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -68,6 +69,12 @@ type DNSState struct {
 	// every name this machine looks up.
 	Global bool
 
+	// Networks are this network's own overlay CIDRs. Two uses, both of which
+	// need to know which addresses are "inside": answering PTR locally instead
+	// of forwarding a reverse lookup of an internal host to the public
+	// internet, and refusing an upstream answer that points into the overlay.
+	Networks []netip.Prefix
+
 	// Hosts maps a lowercased fully-qualified name to every address it has.
 	//
 	// EVERY address: a dual-stack machine has two and an answer carrying one of
@@ -109,6 +116,7 @@ func DNSStateFromConfig(yamlCfg string) (DNSState, error) {
 					Name  string   `yaml:"name"`
 					Addrs []string `yaml:"addrs"`
 				} `yaml:"hosts"`
+				Networks []string `yaml:"networks"`
 			} `yaml:"dns"`
 		} `yaml:"orbit"`
 	}
@@ -134,6 +142,13 @@ func DNSStateFromConfig(yamlCfg string) (DNSState, error) {
 		TunDev: doc.Tun.Dev,
 		Global: doc.Orbit.ExitNode,
 		Hosts:  make(map[string][]netip.Addr, len(src.Hosts)*2),
+	}
+	for _, raw := range src.Networks {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return DNSState{}, fmt.Errorf("network %q: %w", raw, err)
+		}
+		d.Networks = append(d.Networks, p)
 	}
 	for _, h := range src.Hosts {
 		if h.Name == "" {
@@ -397,6 +412,20 @@ func (r *Resolver) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	domain := r.state.Domain
 	r.mu.RUnlock()
 
+	if q.Qtype == dns.TypePTR {
+		// A reverse lookup of an overlay address used to be forwarded, so
+		// `dig -x 10.42.0.9` told the machine's upstream — an ISP or a
+		// corporate resolver — an address from the operator's own mesh. There
+		// is also nothing out there to find: nobody else is authoritative for
+		// our addresses. See ADR-0029.
+		if addr, ok := addrFromPTR(name); ok && r.owns(addr) {
+			r.answerPTR(w, req, addr)
+			return
+		}
+		r.forward(w, req)
+		return
+	}
+
 	if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
 		// Not an address question. Still ours to answer if it names our own
 		// suffix — see below — but there is nothing to answer WITH, so it is
@@ -445,6 +474,34 @@ func (r *Resolver) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	// answers, not NXDOMAIN. Saying the name does not exist would make a
 	// v4-only host invisible to anything that asked for AAAA first, and most
 	// resolvers ask for both.
+	r.write(w, req, m)
+}
+
+// write sends an answer, truncating it to what the asker can receive.
+//
+// Nothing here ever copied an OPT RR, called Truncate, or set TC — while the
+// comment justifying the TCP listener gives TC-then-TCP as the reason that
+// listener exists. Answers are small today (one host, one or two addresses), so
+// this was latent rather than broken; a network with many addresses on one name
+// would have produced a datagram the asker could not receive, with no signal to
+// escalate. See docs/adr/0030-the-forwarder-is-a-real-forwarder.md.
+//
+// The size comes from the request's own OPT RR, or RFC 1035's 512 without one.
+// TCP has no such limit, so the whole point of setting TC is that the client
+// comes back over TCP and gets the complete answer.
+func (r *Resolver) write(w dns.ResponseWriter, req, m *dns.Msg) {
+	if _, tcp := w.RemoteAddr().(*net.TCPAddr); !tcp {
+		size := dns.MinMsgSize // 512
+		if opt := req.IsEdns0(); opt != nil {
+			if adv := int(opt.UDPSize()); adv > size {
+				size = adv
+			}
+			// Echo the OPT back. A responder that answers an EDNS0 query
+			// without one is telling the asker to stop using EDNS0.
+			m.SetEdns0(uint16(size), opt.Do())
+		}
+		m.Truncate(size)
+	}
 	_ = w.WriteMsg(m)
 }
 
@@ -525,6 +582,21 @@ func (r *Resolver) forward(w dns.ResponseWriter, req *dns.Msg) {
 				}
 				continue
 			}
+			if r.rebinds(a.msg) {
+				// DNS REBINDING. An upstream answer that points into this
+				// network's own overlay lets a public name be treated by a
+				// browser as a local-network host — the classic path from a web
+				// page to something that only trusts its own network.
+				//
+				// Refused rather than stripped: an answer with the offending
+				// records removed is an answer that says the name exists and is
+				// somewhere else, which is a lie of a different shape.
+				// See ADR-0029.
+				r.log.Warn("upstream answer points into the overlay; refusing",
+					"name", req.Question[0].Name)
+				soft = nil
+				goto done
+			}
 			_ = w.WriteMsg(a.msg)
 			return
 		case <-ctx.Done():
@@ -592,12 +664,116 @@ func ownsName(name, domain string) bool {
 func (r *Resolver) nxdomain(w dns.ResponseWriter, req *dns.Msg) {
 	m := new(dns.Msg).SetRcode(req, dns.RcodeNameError)
 	m.Authoritative = true
-	_ = w.WriteMsg(m)
+	r.write(w, req, m)
 }
 
 // nodata says the name exists but has nothing of the type asked for.
 func (r *Resolver) nodata(w dns.ResponseWriter, req *dns.Msg) {
 	m := new(dns.Msg).SetReply(req)
 	m.Authoritative = true
-	_ = w.WriteMsg(m)
+	r.write(w, req, m)
+}
+
+// owns reports whether an address belongs to this network's overlay.
+func (r *Resolver) owns(a netip.Addr) bool {
+	r.mu.RLock()
+	nets := r.state.Networks
+	r.mu.RUnlock()
+	for _, p := range nets {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// addrFromPTR reads the address out of an in-addr.arpa or ip6.arpa name.
+func addrFromPTR(name string) (netip.Addr, bool) {
+	labels := dns.SplitDomainName(strings.TrimSuffix(name, "."))
+	switch {
+	case strings.HasSuffix(name, ".in-addr.arpa."):
+		if len(labels) != 6 {
+			return netip.Addr{}, false
+		}
+		// Reversed nibbles: 9.0.42.10.in-addr.arpa -> 10.42.0.9
+		v4 := labels[3] + "." + labels[2] + "." + labels[1] + "." + labels[0]
+		addr, err := netip.ParseAddr(v4)
+		return addr, err == nil
+	case strings.HasSuffix(name, ".ip6.arpa."):
+		if len(labels) != 34 {
+			return netip.Addr{}, false
+		}
+		var b strings.Builder
+		for i := 31; i >= 0; i-- {
+			b.WriteString(labels[i])
+			if i%4 == 0 && i != 0 {
+				b.WriteByte(':')
+			}
+		}
+		addr, err := netip.ParseAddr(b.String())
+		return addr, err == nil
+	}
+	return netip.Addr{}, false
+}
+
+// answerPTR names the machine at an overlay address, from the same table the
+// forward direction is answered from.
+func (r *Resolver) answerPTR(w dns.ResponseWriter, req *dns.Msg, addr netip.Addr) {
+	r.mu.RLock()
+	hosts, domain := r.state.Hosts, r.state.Domain
+	r.mu.RUnlock()
+
+	suffix := strings.ToLower(strings.Trim(domain, ".")) + "."
+	var found string
+	for name, addrs := range hosts {
+		if !strings.HasSuffix(name, "."+suffix) {
+			continue // the bare key names the same machine; answer the qualified one
+		}
+		for _, a := range addrs {
+			if a == addr {
+				found = name
+				break
+			}
+		}
+		if found != "" {
+			break
+		}
+	}
+	if found == "" {
+		// Ours, and nobody is at it. Authoritatively absent beats a forward.
+		r.nxdomain(w, req)
+		return
+	}
+	m := new(dns.Msg).SetReply(req)
+	m.Authoritative = true
+	if rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN PTR %s", req.Question[0].Name, found)); err == nil {
+		m.Answer = append(m.Answer, rr)
+	}
+	r.write(w, req, m)
+}
+
+// rebinds reports whether an upstream answer points into this network's overlay.
+//
+// Only for FORWARDED answers. The authoritative table is Orbit's own and is
+// supposed to name overlay addresses; it is an answer from the public internet
+// claiming one that has no business being trusted.
+func (r *Resolver) rebinds(m *dns.Msg) bool {
+	if m == nil {
+		return false
+	}
+	for _, rr := range m.Answer {
+		var a netip.Addr
+		switch v := rr.(type) {
+		case *dns.A:
+			a, _ = netip.AddrFromSlice(v.A.To4())
+		case *dns.AAAA:
+			a, _ = netip.AddrFromSlice(v.AAAA.To16())
+		default:
+			continue
+		}
+		if a.IsValid() && r.owns(a.Unmap()) {
+			return true
+		}
+	}
+	return false
 }
