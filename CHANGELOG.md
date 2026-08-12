@@ -23,6 +23,55 @@ everything.
 
 ### Security
 
+- **`orbit device block` did not stop the device getting certificates.**
+  `ResolveAgentHost` resolved an agent by overlay address through `membership`
+  and `membership_address` and never touched `orbit.device`, so a blocked device
+  kept renewing every twelve hours, indefinitely. `docs/credential-model.md`
+  promised that block "refuses a device everywhere on the control plane
+  immediately", and that promise is the whole argument for holding device keys
+  in plaintext on disk. Blocking a device now also blocks every membership it
+  holds, which revokes the certificates and puts the fingerprints on the
+  blocklist. See ADR-0023.
+
+- **A quarantined host refused revocations for up to thirty minutes.** The
+  revert guard keyed on the config epoch alone, and blocking a host advances the
+  BLOCKLIST epoch and nothing else — so a revocation arrived carrying the same
+  config epoch the guard was refusing and was refused with it. The revert then
+  rolled the installed blocklist back to its pre-revocation value. A blocklist
+  can only withdraw trust in a peer, never in the host's own certificate, so it
+  can never be the generation that broke us; the guard now keys on both epochs.
+  See ADR-0025.
+
+- **A gateway's firewall silently narrowed, minutes after `orbit route add`.**
+  Nebula treats an omitted `local_cidr` as "any address" only while the host's
+  certificate carries no unsafe networks; once it does, the rule narrows to the
+  host's own overlay addresses and everything the host forwards is dropped.
+  Orbit puts a gateway's routes into that certificate, so forwarding worked and
+  then stopped when the next certificate arrived — and `orbit why` reported
+  ALLOW for the rules nebula was dropping. See ADR-0021.
+
+- **Choosing an exit node leaked the other address family.** `exit_route_id` is
+  a single row, and a gateway offering both `0.0.0.0/0` and `::/0` produces two,
+  so a dual-stack host could tunnel IPv4 and send IPv6 in the clear. Refused
+  now, naming the missing prefix. See ADR-0016.
+
+- **Split DNS never happened.** The Linux applier took a `global` flag, named it
+  `_`, and made Orbit the resolver of last resort unconditionally — so every
+  host sent its entire query stream, corporate and personal included, to the
+  mesh resolver. The flag is honoured. See ADR-0013.
+
+- **A mesh name could shadow a public one.** Membership names were free text up
+  to 253 bytes and are published into the resolver answered authoritatively, so
+  a membership called `login.microsoftonline.com` shadowed the real one for the
+  whole network. Names are now one DNS label. See ADR-0029.
+
+- **Host state survived a kill.** Everything Orbit writes outside its own
+  directory — the nftables table, the policy route, the firewalld zone
+  assignment, the macOS resolver settings — outlived the process, so a host that
+  was SIGKILLed kept forwarding and NAT-ing for a mesh it may no longer be on.
+  The agent now sweeps all of it by name at start, before anything is applied.
+  See ADR-0015.
+
 - **Any enrolled host could take over any other host in its network.** The agent
   API authenticates by source address alone, and resolved that address through a
   helper that honours `X-Forwarded-For` when `-trust-forwarded-for` is set. That
@@ -133,6 +182,39 @@ everything.
   state.
 
 ### Changed
+
+- **`orbit route add <gw> 0.0.0.0/0` now enables NAT by default.** Without it
+  the internet has no route back to an overlay address, so an exit node created
+  without `-masquerade` could not work. Pass `-masquerade=false` to opt out.
+
+- **Membership names must be a single DNS label** — 63 characters, letters
+  digits and hyphens. Existing names containing a dot will be refused on the
+  next join.
+
+- **`orbitd serve` refuses to start when its embedded migration set disagrees
+  with the database**, by name rather than by count. It used to start cleanly
+  and fail later on the first request touching a new column. `orbitd doctor`
+  reports which side is ahead, and recognises a database predating the migration
+  collapse instead of claiming a newer binary migrated it.
+
+- **Upgrade order changed: install the new binary first, then migrate with it.**
+  `orbitd migrate` runs whatever is on the path, so migrating before installing
+  ran the old binary's old migration set and printed "database is up to date".
+
+- **The agent surface decodes tolerantly; the admin API stays strict.** A newer
+  agent talking to an older replica took a hard 400 on any added field and could
+  neither retry nor fail over, which is the direction a rolling upgrade takes.
+
+- **Only one network per host configures host state.** The nftables table, route
+  table and ip rule are named once per machine, so two networks that both wanted
+  them destroyed and rebuilt each other's rules once per reconcile, silently.
+  The lowest slug wins and the others say so.
+
+- **A relay now needs a public address**, the precondition a lighthouse has
+  always had.
+
+- **`orbitd serve` gains `-name`**, for restoring onto a host with a different
+  hostname.
 
 - **The KEK can be rotated.** `orbitd kek rotate` re-seals every stored secret
   under a new passphrase and replaces the salt and verifier, in one transaction.
