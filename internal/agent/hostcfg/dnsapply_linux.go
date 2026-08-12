@@ -30,12 +30,21 @@ import (
 // Windows and the BSDs. If non-resolved Linux is ever worth supporting, the mechanism is
 // resolvconf's `-a`/`-d` registration — an ownership protocol — and not editing the file.
 
-// applyDNS points this machine's resolver at addr.
+// applyDNS points this machine's resolver at addr, for the mesh domain — and for
+// everything, when global is set.
 //
-// `~.` alongside the mesh domain is what closes the exit-node DNS leak: the first is the
-// search suffix so `ssh laptop` works, the second routes every other lookup here too, so
-// a full-tunnel machine stops telling the local network what it looks up.
-func applyDNS(dev, domain, addr string, _ bool) error {
+// SCOPE IS THE ARGUMENT, and it used to be discarded. This function took `global bool`,
+// named it `_`, and issued `~.` plus `default-route yes` unconditionally. `~.` is
+// resolved's routing-domain wildcard: it makes this link the resolver of last resort for
+// every name. So a host that joined a network wanting SPLIT DNS — mesh names here,
+// everything else as before — had its entire query stream sent to Orbit, corporate and
+// personal lookups included, and nothing said so.
+//
+// The wildcard is right for a full-tunnel machine: it is what stops an exit-node host
+// telling the local network what it looks up. It is wrong for everyone else, and
+// "everyone else" is nearly every host.
+// See docs/adr/0013-the-resolver-is-restored-not-just-set.md.
+func applyDNS(dev, domain, addr string, global bool) error {
 	if dev == "" {
 		return fmt.Errorf("no tun device to attach DNS settings to")
 	}
@@ -45,10 +54,31 @@ func applyDNS(dev, domain, addr string, _ bool) error {
 	if err := run("resolvectl", "dns", dev, addr); err != nil {
 		return err
 	}
-	if err := run("resolvectl", "domain", dev, domain, "~."); err != nil {
+
+	// The domain list, and then whether this link is also the last resort.
+	//
+	// Both commands are issued in both cases rather than skipped, because
+	// resolved keeps the previous value otherwise: a host that was global and is
+	// no longer would keep `~.` and keep capturing everything. Removal has to be
+	// as explicit as installation, which is the same rule the nftables table and
+	// the ip rule follow.
+	domains := []string{"resolvectl", "domain", dev}
+	if domain != "" {
+		domains = append(domains, domain)
+	}
+	route := "no"
+	if global {
+		domains = append(domains, "~.")
+		route = "yes"
+	}
+	if len(domains) == 3 && !global {
+		// resolvectl needs at least one argument; the empty list is spelled "".
+		domains = append(domains, "")
+	}
+	if err := run(domains[0], domains[1:]...); err != nil {
 		return err
 	}
-	return run("resolvectl", "default-route", dev, "yes")
+	return run("resolvectl", "default-route", dev, route)
 }
 
 // removeDNS puts this machine's resolver back. One command, no memory of what was set,
@@ -68,6 +98,16 @@ func hasResolved() bool {
 	// plenty of machines where resolved is masked, and its commands fail there
 	// in a way that reads as a bug rather than as "this machine cannot do it".
 	return run("resolvectl", "status") == nil
+}
+
+// output runs a command and returns its stdout, for the few places that read a
+// setting back rather than assert one.
+func output(name string, args ...string) (string, error) {
+	b, err := exec.Command(name, args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return string(b), nil
 }
 
 func run(name string, args ...string) error {

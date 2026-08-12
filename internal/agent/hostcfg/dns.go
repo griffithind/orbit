@@ -12,10 +12,17 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// Every platform records the address it is serving on, because Apply is shared;
-// only the platforms with a resolver reader consult it. See isOwnResolver in
-// dns_unix.go.
-var ownResolvers sync.Map // string -> struct{}
+// Every platform records the address it is serving on, and the device it hung
+// its settings from, because Apply is shared; only the platforms with a resolver
+// reader consult them. See isOwnResolver and isOwnDevice in dns_unix.go.
+//
+// The var declarations live HERE and the readers live there, which is the split
+// ADR-0017 exists about: a helper in a file every platform compiles, called only
+// from two of them, is an orphan the gates could not see until they ran per-GOOS.
+var (
+	ownResolvers sync.Map // string -> struct{}
+	ownDevices   sync.Map // string -> struct{}
+)
 
 // The agent's resolver: mesh names answered locally, everything else forwarded.
 //
@@ -211,6 +218,9 @@ func (r *Resolver) Apply(d DNSState) error {
 	// Registered before the upstreams are read, so a re-read that happens after
 	// the OS was pointed here cannot pick this address up as an upstream.
 	ownResolvers.Store(d.Listen.Addr().String(), struct{}{})
+	if d.TunDev != "" {
+		ownDevices.Store(d.TunDev, struct{}{})
+	}
 
 	r.mu.Lock()
 	if len(r.upstream) == 0 {

@@ -4,6 +4,7 @@ package hostcfg
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -33,6 +34,35 @@ import (
 func isOwnResolver(host string) bool {
 	_, ok := ownResolvers.Load(strings.TrimSpace(host))
 	return ok
+}
+
+func isOwnDevice(dev string) bool {
+	_, ok := ownDevices.Load(strings.TrimSpace(dev))
+	return ok
+}
+
+// usableUpstream reports whether an address is somewhere worth forwarding to.
+//
+// Three refusals, and the last two are the loop guard. Empty is a parse
+// artefact. An address this process serves is us. And LOOPBACK is any resolver
+// running on this machine — including systemd-resolved's 127.0.0.53 stub, which
+// forwards back to Orbit the moment Orbit is the last resort, and which the
+// address-identity check could never recognise because it is not an address
+// Orbit listens on.
+func usableUpstream(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" || isOwnResolver(host) {
+		return false
+	}
+	// Bare address or host:port; anything unparseable is left to the dialer.
+	h := host
+	if a, _, err := net.SplitHostPort(host); err == nil {
+		h = a
+	}
+	if ip, err := netip.ParseAddr(h); err == nil && ip.IsLoopback() {
+		return false
+	}
+	return true
 }
 
 // hostPort53 normalises a bare address into something dns.Client can dial.

@@ -2,6 +2,8 @@ package hostcfg
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,7 +40,17 @@ const scutilKey = "State:/Network/Service/orbit/DNS"
 // applyDNS points this machine at addr for the mesh domain, and for everything when
 // global is set.
 func applyDNS(_, domain, addr string, global bool) error {
-	host, _, _ := strings.Cut(addr, ":")
+	// AddrPort, not a string split. `strings.Cut(addr, ":")` took the first
+	// colon, so an IPv6 listen address — "[fd42::5]:53" — became "[fd42", which
+	// was then written into /etc/resolver and handed to scutil as a nameserver.
+	// The renderer produces a v6 listen address whenever the network is v6, so
+	// this was reachable, silent, and total.
+	host := addr
+	if ap, err := netip.ParseAddrPort(addr); err == nil {
+		host = ap.Addr().String()
+	} else if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
 	if domain != "" {
 		if err := os.MkdirAll(resolverDir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", resolverDir, err)
