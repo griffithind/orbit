@@ -74,7 +74,8 @@ func (s *Store) PeekEnrollmentCredential(ctx context.Context, secretHash []byte)
 	err := s.pool.QueryRow(ctx, `
 		SELECT membership_id, network_id
 		  FROM orbit.enrollment_credential
-		 WHERE secret_hash = $1 AND used_at IS NULL AND expires_at > now()`,
+		 WHERE secret_hash = $1 AND used_at IS NULL AND expires_at > now()
+		   AND locked_at IS NULL`,
 		secretHash,
 	).Scan(&out.MembershipID, &out.NetworkID)
 	if err != nil {
@@ -84,6 +85,34 @@ func (s *Store) PeekEnrollmentCredential(ctx context.Context, secretHash []byte)
 		return nil, mapErr(err, "peek enrollment credential")
 	}
 	return &out, nil
+}
+
+// MaxEnrollFailures is how many bad signatures a code tolerates before it locks.
+//
+// Not about guessing the code — 24 random bytes are not guessable. It bounds
+// what a LEAKED code is worth: an attacker holding one can try their own device
+// key a few times and then the code is dead, and the operator mints another.
+// Five, because a legitimate machine gets it right the first time and a retry
+// loop after a transient failure should not spend the budget.
+const MaxEnrollFailures = 5
+
+// FailEnrollment records a rejected attempt and locks the code at the ceiling.
+//
+// Per CODE, in Postgres, which is the dimension the in-process limiter cannot
+// see: that one is keyed by source address and lives on a single Server, so N
+// replicas give N times the deployment-wide budget and nothing counts against
+// the credential itself. internal/api/ratelimit.go says as much — "Nothing
+// finer is available".
+//
+// Best effort by design. A failure to record a failure must not turn into a
+// second error for the caller, who is already being refused.
+func (s *Store) FailEnrollment(ctx context.Context, secretHash []byte) {
+	_, _ = s.pool.Exec(ctx, `
+		UPDATE orbit.enrollment_credential
+		   SET failed_attempts = failed_attempts + 1,
+		       locked_at = CASE WHEN failed_attempts + 1 >= $2 THEN now() ELSE locked_at END
+		 WHERE secret_hash = $1 AND used_at IS NULL`,
+		secretHash, MaxEnrollFailures)
 }
 
 // RedeemEnrollmentCredential atomically consumes an enrollment secret.

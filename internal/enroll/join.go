@@ -591,9 +591,7 @@ func (s *Service) Reserve(ctx context.Context, networkRef string, r store.Reserv
 		return nil, fmt.Errorf("%w: one DNS label, 1-%d characters, letters digits "+
 			"and hyphens", ErrJoinName, maxNameLen)
 	}
-	if ttl <= 0 {
-		ttl = DefaultCodeTTL
-	}
+	ttl = clampCodeTTL(ttl)
 	addrs, err := store.ValidatePublicAddrs(r.PublicAddrs)
 	if err != nil {
 		return nil, err

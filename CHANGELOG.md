@@ -31,6 +31,12 @@ everything.
   along. Enrollment now does too, checked against the key the membership already
   names, and checked *before* the code is spent so a bad signature cannot burn a
   live code. See ADR-0024.
+  A code also locks after five rejected attempts, counted in Postgres against
+  the code itself — the enrollment limiter is keyed by source address and lives
+  in one process, so it neither survives a rotating source nor counts across
+  replicas. And `membership reserve` no longer takes an unbounded lifetime from
+  the request body: reservations auto-authorise on redemption, so an arbitrary
+  TTL is an unattended admission credential with no expiry. Capped at 24 hours.
 
 - **`orbit device block` did not stop the device getting certificates.**
   `ResolveAgentHost` resolved an agent by overlay address through `membership`

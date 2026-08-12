@@ -1338,3 +1338,46 @@ func TestACodeAloneCannotMintACertificate(t *testing.T) {
 		t.Fatalf("the real machine could not enroll: %v", err)
 	}
 }
+
+// TestARepeatedlyMisusedCodeLocks bounds what a leaked code is worth.
+//
+// Refusing a bad signature is not enough on its own: without a per-code budget
+// an attacker holding a code can keep trying indefinitely, and the enrollment
+// limiter cannot help — it is keyed by source address and lives in one process,
+// so it neither survives a rotating source nor counts across replicas. See
+// ADR-0024.
+func TestARepeatedlyMisusedCodeLocks(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+	ctx := context.Background()
+
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
+		NetworkID: h.netID.String(), Name: "lockout", OverlayAddr: "10.42.77.9",
+		RoleID: h.roleID.String(),
+	}, &host); code != http.StatusCreated {
+		t.Fatalf("create host: %d", code)
+	}
+
+	var codeResp wire.EnrollmentCodeResponse
+	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp)
+
+	thief, err := device.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
+	client := agent.NewClient(ts.URL)
+	for range store.MaxEnrollFailures {
+		if _, err := client.Enroll(ctx, thief, codeResp.Code, kp, "e2e"); err == nil {
+			t.Fatal("a device that does not own the membership enrolled")
+		}
+	}
+
+	// The code is now dead even for the machine it was minted for. That is the
+	// correct trade — an operator mints another, and there is no path where a
+	// caller can reset its own budget.
+	if _, err := client.Enroll(ctx, h.deviceFor(t, host.ID), codeResp.Code, kp, "e2e"); err == nil {
+		t.Errorf("the code still worked after %d rejected attempts", store.MaxEnrollFailures)
+	}
+}

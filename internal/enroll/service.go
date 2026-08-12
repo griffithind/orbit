@@ -39,6 +39,28 @@ var (
 // else.
 const DefaultCodeTTL = 15 * time.Minute
 
+// MaxCodeTTL is the ceiling a caller cannot raise.
+//
+// Reserve took its TTL straight from the request body and only FLOORED it —
+// `if ttl <= 0 { ttl = DefaultCodeTTL }` — so a caller could ask for a year. A
+// reservation auto-authorises on redemption, which makes it an unattended
+// admission credential, and the comment above is exactly the failure an
+// arbitrary lifetime produces.
+//
+// Twenty-four hours because unattended provisioning does have a real need the
+// default is too short for: an image baked today and booted tomorrow. Past
+// that, mint another code — the whole point is that the window is short enough
+// that a leak expires before anyone finds it. See ADR-0024.
+const MaxCodeTTL = 24 * time.Hour
+
+// clampCodeTTL applies the floor and the ceiling.
+func clampCodeTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return DefaultCodeTTL
+	}
+	return min(ttl, MaxCodeTTL)
+}
+
 // Config parameterizes the service.
 type Config struct {
 	// Paths is where the agent will place files on the managed host.
@@ -166,6 +188,7 @@ func (s *Service) CreateCode(ctx context.Context, membershipID uuid.UUID, ttl ti
 	if ttl <= 0 {
 		ttl = DefaultCodeTTL
 	}
+	ttl = clampCodeTTL(ttl)
 
 	plaintext, stored, err := NewCredential()
 	if err != nil {
@@ -227,6 +250,9 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 	// the machine it was minted for. An e2e test found that within a minute of
 	// existing. See ADR-0024.
 	if err := s.checkEnrollSignature(ctx, req); err != nil {
+		// Counted against the CODE, not just the source address. A leaked code
+		// is worth a handful of attempts and then nothing.
+		s.store.FailEnrollment(ctx, Hash(req.Credential))
 		s.log.Warn("enrollment rejected: bad device signature", "from", from)
 		return nil, err
 	}
