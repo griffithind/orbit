@@ -3,6 +3,7 @@ package hostcfg
 import (
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,9 +148,13 @@ func (discardLog) Debug(string, ...any) {}
 // network's own topology and host inventory one typo at a time. There is also
 // nothing out there to find: nobody else is authoritative for our suffix.
 func TestAMissInsideTheMeshDomainIsNXDOMAIN(t *testing.T) {
-	leaked := false
+	// atomic, because the handler runs on the dns server's goroutine and the
+	// assertion reads from the test's. A plain bool here is a data race that
+	// happens to pass — which the race detector caught on the sibling test
+	// below, where the write actually occurs.
+	var leaked atomic.Bool
 	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
-		leaked = true
+		leaked.Store(true)
 		answerA(w, req, "203.0.113.7")
 	})
 
@@ -161,7 +166,7 @@ func TestAMissInsideTheMeshDomainIsNXDOMAIN(t *testing.T) {
 	rec := &capture{}
 	r.ServeDNS(rec, new(dns.Msg).SetQuestion("typo.lab.internal.", dns.TypeA))
 
-	if leaked {
+	if leaked.Load() {
 		t.Error("an internal hostname was sent to the machine's upstream resolver")
 	}
 	if rec.msg == nil || rec.msg.Rcode != dns.RcodeNameError {
@@ -175,9 +180,9 @@ func TestAMissInsideTheMeshDomainIsNXDOMAIN(t *testing.T) {
 // TestANameOutsideTheMeshDomainStillForwards. Authority is for our suffix and
 // nothing else — this resolver is the only one many hosts have.
 func TestANameOutsideTheMeshDomainStillForwards(t *testing.T) {
-	forwarded := false
+	var forwarded atomic.Bool
 	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
-		forwarded = true
+		forwarded.Store(true)
 		answerA(w, req, "203.0.113.7")
 	})
 	r := &Resolver{log: discardLog{}, upstream: []string{up}}
@@ -186,7 +191,7 @@ func TestANameOutsideTheMeshDomainStillForwards(t *testing.T) {
 	rec := &capture{}
 	r.ServeDNS(rec, new(dns.Msg).SetQuestion("example.com.", dns.TypeA))
 
-	if !forwarded {
+	if !forwarded.Load() {
 		t.Error("a public name was not forwarded; this resolver is the only one many hosts have")
 	}
 	if rec.msg == nil || rec.msg.Rcode != dns.RcodeSuccess {
