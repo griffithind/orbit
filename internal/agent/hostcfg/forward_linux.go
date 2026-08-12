@@ -58,6 +58,14 @@ func ensureForwardAllowed(h HostState) error {
 // removeForwardAllowed puts the machine back.
 func removeForwardAllowed(tunDev string) error {
 	if tunDev == "" {
+		// Nothing to name, so nothing to remove BY name — which is exactly the
+		// case a crash produces: nftConfigurer.tunDev lives only in memory, so
+		// after a restart on a host that is no longer a gateway this returned
+		// nil and left the interface in firewalld's `trusted` zone. The
+		// assignment was written --permanent, so it survived reboots too.
+		//
+		// sweepForwardAllowed is the answer for that path; this one still needs
+		// a device, because it is the graceful case where we know it.
 		return nil
 	}
 	if firewalldRunning() {
@@ -129,4 +137,33 @@ func fwcmdOut(args ...string) (string, error) {
 			strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
+}
+
+// sweepForwardAllowed removes Orbit's zone assignments without being told which
+// device they were for.
+//
+// Enumerates firewalld's trusted zone and drops anything matching the tun names
+// Orbit renders, rather than remembering. Removal by NAME with no in-memory
+// state is the rule ADR-0015 applies to every host object, and this was the one
+// that could not follow it.
+func sweepForwardAllowed(devMatches func(string) bool) error {
+	if !firewalldRunning() {
+		return nil
+	}
+	out, err := fwcmdOut("--zone=trusted", "--list-interfaces")
+	if err != nil {
+		return nil // firewalld present but not answering; nothing safe to do
+	}
+	removed := false
+	for _, dev := range strings.Fields(out) {
+		if !devMatches(dev) {
+			continue
+		}
+		_ = fwcmd("--permanent", "--zone=trusted", "--remove-interface="+dev)
+		removed = true
+	}
+	if removed {
+		return fwcmd("--reload")
+	}
+	return nil
 }

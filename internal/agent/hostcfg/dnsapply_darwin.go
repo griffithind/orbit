@@ -33,6 +33,10 @@ import (
 
 const resolverDir = "/etc/resolver"
 
+// resolverMarker opens every file Orbit writes there, and is how the sweep
+// recognises its own work when it has no record of what it wrote.
+const resolverMarker = "# Managed by Orbit. Do not edit.\n"
+
 // scutilKey is the store entry the global override lives under. Named, so removal needs
 // no memory of what was in it.
 const scutilKey = "State:/Network/Service/orbit/DNS"
@@ -55,7 +59,7 @@ func applyDNS(_, domain, addr string, global bool) error {
 		if err := os.MkdirAll(resolverDir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", resolverDir, err)
 		}
-		body := fmt.Sprintf("# Managed by Orbit. Do not edit.\nnameserver %s\n", host)
+		body := fmt.Sprintf("%snameserver %s\n", resolverMarker, host)
 		path := filepath.Join(resolverDir, domain)
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
@@ -106,6 +110,34 @@ func scutil(script string) error {
 	if err != nil {
 		return fmt.Errorf("scutil: %w: %s\n--- script ---\n%s",
 			err, strings.TrimSpace(string(out)), script)
+	}
+	return nil
+}
+
+// sweepResolverDir removes every /etc/resolver file Orbit wrote, without being
+// told which domains it wrote them for.
+//
+// By CONTENT, because the filename is the mesh domain and the sweep runs before
+// any network is configured — there is nothing to consult. Every file Orbit
+// writes opens with the marker line below, and nothing else on the machine
+// writes it, so matching on it removes ours and only ours.
+func sweepResolverDir() error {
+	entries, err := os.ReadDir(resolverDir)
+	if err != nil {
+		return nil // no such directory is the normal case
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		path := filepath.Join(resolverDir, e.Name())
+		b, err := os.ReadFile(path)
+		if err != nil || !strings.HasPrefix(string(b), resolverMarker) {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }

@@ -240,6 +240,21 @@ func runCmd(args []string) error {
 		return fmt.Errorf("no joined networks under %s: join one with `orbit join`", *fl.root)
 	}
 
+	// BEFORE any network is configured, and unconditionally.
+	//
+	// Everything Orbit writes outside its own directory — the nftables table,
+	// the policy route and its backstop, the firewalld zone assignment, the
+	// macOS resolver settings — outlives the process. A previous run that was
+	// SIGKILLed, or a reboot without a clean shutdown, leaves a host forwarding
+	// and NAT-ing for a mesh it may no longer be on, and leaves a Mac pointed at
+	// a resolver address that no longer exists.
+	//
+	// A stop hook cannot cover that, because it does not run for a killed
+	// process. Only a sweep at start does, and it has to run before the
+	// reconcile that will reinstall whatever this host still needs — so a
+	// gateway sees a brief gap on restart, which is the cost ADR-0015 accepts.
+	hostcfg.Sweep(log)
+
 	// The set of networks is DISCOVERED and REDISCOVERED, not fixed at startup.
 	//
 	// This is what lets `orbit agent install` be a device-level action and
@@ -917,15 +932,17 @@ func uninstallCmd(args []string) error {
 	// and works even if somebody edited the rules. A machine that had rules
 	// left behind here would keep forwarding for a network it is no longer part
 	// of, which is the one uninstall failure with a security consequence.
-	if err := hostcfg.NewHostConfigurer(newLogger()).Remove(); err != nil {
-		// Reported, not fatal. The rest of the uninstall is still worth doing,
-		// and stopping here would leave a machine half-removed with no obvious
-		// way forward.
-		fmt.Fprintf(errOut, "WARNING: could not remove forwarding rules: %v\n"+
-			"Remove them by hand with: nft destroy table inet %s\n", err, hostcfg.TableName)
-	} else {
-		fmt.Fprintf(errOut, "removed any forwarding rules (nft table inet %s)\n", hostcfg.TableName)
-	}
+	// The same sweep the agent runs at start, for the same reason and by the
+	// same mechanism: remove by name, consult nothing.
+	//
+	// It replaces a Remove() call that could not cover the DNS settings at all —
+	// the resolver's own remove has exactly one call site, the Empty() branch of
+	// Apply, which an uninstalling host never reaches. So /etc/resolver and the
+	// scutil key survived a clean, deliberate, successful uninstall, and on an
+	// exit-node Mac that meant a machine left unable to resolve anything.
+	hostcfg.Sweep(newLogger())
+	fmt.Fprintf(errOut, "removed host state: forwarding rules (nft table inet %s), "+
+		"policy routes, and resolver settings\n", hostcfg.TableName)
 
 	removed, err := plan.RemoveUnit(len(others) > 0)
 	if err != nil {
