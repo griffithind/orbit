@@ -30,6 +30,11 @@ func systemResolvers() []string {
 	return resolvConfServers()
 }
 
+func isOwnDevice(dev string) bool {
+	_, ok := ownDevices.Load(strings.TrimSpace(dev))
+	return ok
+}
+
 // resolvedUpstreams asks resolved what it actually forwards to.
 //
 // `resolvectl dns` prints one line per link plus a Global line:

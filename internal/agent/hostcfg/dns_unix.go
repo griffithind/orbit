@@ -36,11 +36,6 @@ func isOwnResolver(host string) bool {
 	return ok
 }
 
-func isOwnDevice(dev string) bool {
-	_, ok := ownDevices.Load(strings.TrimSpace(dev))
-	return ok
-}
-
 // usableUpstream reports whether an address is somewhere worth forwarding to.
 //
 // Three refusals, and the last two are the loop guard. Empty is a parse

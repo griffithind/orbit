@@ -25,10 +25,17 @@ func systemResolvers() []string {
 		if len(f) != 3 || !strings.HasPrefix(f[0], "nameserver[") || f[1] != ":" {
 			continue
 		}
+		// Skip ourselves, and skip anything on loopback. The first guard CAN
+		// fire here, unlike on Linux: once the OS points at us, scutil reports
+		// this resolver among the system's by its overlay address, which is
+		// exactly what isOwnResolver knows. The second catches any other
+		// resolver running on this machine, which can close the same loop by
+		// forwarding back to us.
+		if !usableUpstream(f[2]) {
+			continue
+		}
 		addr := hostPort53(f[2])
-		// Skip ourselves. Once the OS points here, scutil reports this resolver
-		// among the system's, and forwarding to it is an infinite loop.
-		if isOwnResolver(f[2]) || seen[addr] {
+		if seen[addr] {
 			continue
 		}
 		seen[addr] = true
