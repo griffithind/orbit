@@ -148,20 +148,8 @@ func enrollCmd(args []string) error {
 		return fmt.Errorf("generate keypair: %w", err)
 	}
 
-	// The device key, because an enrollment code no longer stands on its own.
-	// It is generated on first use, so a machine that has never joined anything
-	// gets one here — and from then on the code authorises the BINDING while
-	// the signature proves possession. See ADR-0024.
-	// The root is the layout's parent, so this honours -dir and -network the
-	// same way the rest of the command does. The device key is per MACHINE and
-	// lives beside the per-network directories, not inside one.
-	id, err := device.LoadOrCreate(paths.DeviceKeyPath(filepath.Dir(layout.Dir)))
-	if err != nil {
-		return fmt.Errorf("device key: %w", err)
-	}
-
 	client := agent.NewClient(*fl.url)
-	resp, err := client.Enroll(ctx, id, *fl.code, kp, version.Version)
+	resp, err := client.Enroll(ctx, *fl.code, kp, version.Version)
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {

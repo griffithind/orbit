@@ -1,8 +1,6 @@
 package device
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -162,66 +160,4 @@ func VerifyClaim(spki []byte, membershipID, meshPublicKey string, at, now time.T
 		return fmt.Errorf("%w: off by %s", ErrStaleJoin, d.Round(time.Second))
 	}
 	return Verify(spki, ClaimStatement(membershipID, Fingerprint(spki), meshPublicKey, at), sig)
-}
-
-// HashCredential is the enrollment code's identity inside a signed statement.
-//
-// The statement must name the code without carrying it: an enrollment request
-// already carries the plaintext, and repeating it inside the signed bytes would
-// put the secret in two places for no gain. Hex of SHA-256, matching what the
-// control plane stores — enroll.Hash produces the same digest.
-func HashCredential(credential string) string {
-	sum := sha256.Sum256([]byte(credential))
-	return hex.EncodeToString(sum[:])
-}
-
-// EnrollStatementV1 is the domain separator for a code-based enrolment.
-const EnrollStatementV1 = "orbit-enroll-v1"
-
-// EnrollStatement is what a device signs to redeem an enrollment code.
-//
-// The gap it closes: wire.EnrollRequest carried no signature at all, so a code
-// was a bearer credential that minted a certificate over a key the bearer
-// chose — for a membership `claim` protects with proof of possession. Two doors
-// to the same result, one of them with a lock. See ADR-0024.
-//
-// It binds the CODE (by hash, so the statement never carries the secret), the
-// device, and the mesh public key. Binding the mesh key is the same reason
-// ClaimStatement does: without it a certificate could be issued over a key the
-// signer never saw.
-func EnrollStatement(credentialHash, fingerprint, meshPublicKey string, at time.Time) []byte {
-	var b strings.Builder
-	for _, f := range []string{
-		EnrollStatementV1,
-		credentialHash,
-		fingerprint,
-		meshPublicKey,
-		strconv.FormatInt(at.Unix(), 10),
-	} {
-		b.WriteString(strconv.Itoa(len(f)))
-		b.WriteByte(':')
-		b.WriteString(f)
-	}
-	return []byte(b.String())
-}
-
-// SignEnroll produces the signature an enrollment request carries.
-func (i *Identity) SignEnroll(credentialHash, meshPublicKey string, at time.Time) ([]byte, error) {
-	return i.Sign(EnrollStatement(credentialHash, i.Fingerprint(), meshPublicKey, at))
-}
-
-// VerifyEnroll checks an enrollment signature against a device public key.
-//
-// spki is the key to verify against, and WHERE IT COMES FROM is the caller's
-// decision and the security-relevant one. When the membership already names a
-// device, it must be that device's stored key — a caller-supplied key would
-// make the check vacuous, exactly as VerifyClaim's doc says. When the
-// membership names no device yet, the request's own key is correct: the
-// signature then proves possession of the private half, and the code is what
-// authorises the binding.
-func VerifyEnroll(spki []byte, credentialHash, meshPublicKey string, at, now time.Time, sig []byte) error {
-	if d := now.Sub(at); d > JoinFreshness || d < -JoinFreshness {
-		return fmt.Errorf("%w: off by %s", ErrStaleJoin, d.Round(time.Second))
-	}
-	return Verify(spki, EnrollStatement(credentialHash, Fingerprint(spki), meshPublicKey, at), sig)
 }
