@@ -1,6 +1,8 @@
 package device
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -160,4 +162,65 @@ func VerifyClaim(spki []byte, membershipID, meshPublicKey string, at, now time.T
 		return fmt.Errorf("%w: off by %s", ErrStaleJoin, d.Round(time.Second))
 	}
 	return Verify(spki, ClaimStatement(membershipID, Fingerprint(spki), meshPublicKey, at), sig)
+}
+
+// EnrollStatementV1 is the domain separator for a code-based re-issue.
+const EnrollStatementV1 = "orbit-enroll-v1"
+
+// HashCredential names the enrollment code inside a signed statement without
+// carrying it: the request already holds the plaintext, and repeating it in the
+// signed bytes would put the secret in two places for no gain. Hex of SHA-256,
+// the same digest enroll.Hash stores.
+func HashCredential(credential string) string {
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:])
+}
+
+// EnrollStatement is what a device signs to redeem an enrollment code.
+//
+// `orbit agent enroll` re-issues a certificate to a membership that ALREADY
+// EXISTS (docs/enrollment.md) — so the machine has already joined, and already
+// has a device key on file. Until now the request carried no signature at all,
+// which made a code a bearer credential: whoever held it got a certificate
+// issued over a public key THEY chose, for a machine somebody else owns. The
+// claim path has protected exactly this with a signature all along. See
+// ADR-0024.
+//
+// Binds the code, the device, and the mesh public key. The mesh key for the
+// same reason ClaimStatement binds it: otherwise a certificate could be issued
+// over a key the signer never saw.
+func EnrollStatement(credentialHash, fingerprint, meshPublicKey string, at time.Time) []byte {
+	var b strings.Builder
+	for _, f := range []string{
+		EnrollStatementV1,
+		credentialHash,
+		fingerprint,
+		meshPublicKey,
+		strconv.FormatInt(at.Unix(), 10),
+	} {
+		b.WriteString(strconv.Itoa(len(f)))
+		b.WriteByte(':')
+		b.WriteString(f)
+	}
+	return []byte(b.String())
+}
+
+// SignEnroll produces the signature an enrollment request carries.
+func (i *Identity) SignEnroll(credentialHash, meshPublicKey string, at time.Time) ([]byte, error) {
+	return i.Sign(EnrollStatement(credentialHash, i.Fingerprint(), meshPublicKey, at))
+}
+
+// VerifyEnroll checks the signature against the device key the membership
+// already names.
+//
+// spki comes from the DATABASE, never from the request — the same rule, and the
+// same reason, as VerifyClaim: a caller-supplied key would make the check
+// vacuous. There is no branch for a membership without a device, because a
+// membership always has one; a code is only ever issued against a membership
+// that has already been joined.
+func VerifyEnroll(spki []byte, credentialHash, meshPublicKey string, at, now time.Time, sig []byte) error {
+	if d := now.Sub(at); d > JoinFreshness || d < -JoinFreshness {
+		return fmt.Errorf("%w: off by %s", ErrStaleJoin, d.Round(time.Second))
+	}
+	return Verify(spki, EnrollStatement(credentialHash, Fingerprint(spki), meshPublicKey, at), sig)
 }

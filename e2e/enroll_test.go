@@ -70,6 +70,16 @@ type harness struct {
 	netID   uuid.UUID
 	netName string
 
+	// devices maps a membership id to the identity that joined it.
+	//
+	// The harness generated an identity inside createHost, joined with it, threw
+	// it away, and then enrolled the same membership with a DIFFERENT fresh key.
+	// No real machine does that — `orbit agent enroll` re-issues to a membership
+	// this machine already joined — and it only worked because enrollment
+	// checked no signature at all, which is the gap ADR-0024 closes.
+	devicesMu sync.Mutex
+	devices   map[string]*device.Identity
+
 	// vault is this deployment's key store. Every private key the control plane
 	// holds is sealed in it — there is no file path any more.
 	vault *vault.Vault
@@ -99,6 +109,34 @@ type harness struct {
 	// Empty unless a test asked, because that is what a real CA is created
 	// with — the authority has to be granted deliberately.
 	unsafeNetworks []netip.Prefix
+}
+
+// rememberDevice records which identity a membership was joined with, so a
+// later enrollment can prove possession of it (ADR-0024).
+func (h *harness) rememberDevice(membershipID string, id *device.Identity) {
+	h.devicesMu.Lock()
+	defer h.devicesMu.Unlock()
+	if h.devices == nil {
+		h.devices = map[string]*device.Identity{}
+	}
+	h.devices[membershipID] = id
+}
+
+// deviceFor returns the identity a membership belongs to.
+//
+// Fatal when there is none: an enrollment for a membership this harness did not
+// join is a test doing something no machine does, and inventing a key here
+// would hide exactly that.
+func (h *harness) deviceFor(t *testing.T, membershipID string) *device.Identity {
+	t.Helper()
+	h.devicesMu.Lock()
+	id, ok := h.devices[membershipID]
+	h.devicesMu.Unlock()
+	if !ok {
+		t.Fatalf("no device recorded for membership %s: enrollment re-issues to a "+
+			"membership this machine already joined", membershipID)
+	}
+	return id
 }
 
 func setup(t *testing.T) *harness {
@@ -574,7 +612,7 @@ func (h *harness) rerender(t *testing.T, ts *httptest.Server, host *enrolledHost
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := agent.NewClient(ts.URL).Enroll(context.Background(), code.Code, kp, "e2e")
+	resp, err := agent.NewClient(ts.URL).Enroll(context.Background(), h.deviceFor(t, host.id), code.Code, kp, "e2e")
 	if err != nil {
 		t.Fatalf("re-enroll %s: %v", host.name, err)
 	}
@@ -614,7 +652,7 @@ func (h *harness) createAndEnroll(t *testing.T, ts *httptest.Server, name, addr 
 	}
 
 	client := agent.NewClient(ts.URL)
-	resp, err := client.Enroll(ctx, codeResp.Code, kp, "e2e")
+	resp, err := client.Enroll(ctx, h.deviceFor(t, host.ID), codeResp.Code, kp, "e2e")
 	if err != nil {
 		t.Fatalf("enroll %s: %v", name, err)
 	}
@@ -875,13 +913,17 @@ func TestEnrollmentCodeIsSingleUse(t *testing.T) {
 	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp)
 
 	client := agent.NewClient(ts.URL)
+	// ONE identity for both attempts. What is under test is that a SPENT CODE is
+	// refused; a second device would also fail, for a different reason, and the
+	// test would stop proving what its name says.
+	id := h.deviceFor(t, host.ID)
 	kp1, _ := agent.GenerateKeypair(cert.Curve_P256)
-	if _, err := client.Enroll(ctx, codeResp.Code, kp1, "e2e"); err != nil {
+	if _, err := client.Enroll(ctx, id, codeResp.Code, kp1, "e2e"); err != nil {
 		t.Fatalf("first enrollment failed: %v", err)
 	}
 
 	kp2, _ := agent.GenerateKeypair(cert.Curve_P256)
-	_, err := client.Enroll(ctx, codeResp.Code, kp2, "e2e")
+	_, err := client.Enroll(ctx, id, codeResp.Code, kp2, "e2e")
 	if err == nil {
 		t.Fatal("second enrollment with the same code succeeded")
 	}
@@ -919,7 +961,7 @@ func TestBlockedHostCannotEnroll(t *testing.T) {
 	}
 
 	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
-	_, err := agent.NewClient(ts.URL).Enroll(ctx, codeResp.Code, kp, "e2e")
+	_, err := agent.NewClient(ts.URL).Enroll(ctx, h.deviceFor(t, host.ID), codeResp.Code, kp, "e2e")
 	if err == nil {
 		t.Fatal("a blocked host enrolled successfully")
 	}
@@ -1077,6 +1119,15 @@ type membershipSpec struct {
 	StaticAddrs []string
 	Tags        []string
 
+	// Identity is the device this membership belongs to.
+	//
+	// Set it when a test will later run the CLI against the same root: the CLI
+	// loads the device key from disk, and enrollment now proves possession of
+	// it (ADR-0024), so the key the harness joins with has to be the key that
+	// is there. Nil generates a fresh one, which is right for a test that never
+	// leaves the process.
+	Identity *device.Identity
+
 	// advertisePort is derived from StaticAddrs by createHost, not set by a
 	// caller.
 	advertisePort int
@@ -1121,15 +1172,19 @@ func (h *harness) createHost(t *testing.T, baseURL string, spec membershipSpec, 
 	// A fresh device per host. Real machines each have their own, and sharing
 	// one here would make every test host the same device — which would hide
 	// exactly the bugs the device model exists to prevent.
-	id, err := device.Generate()
-	if err != nil {
-		t.Fatalf("device key: %v", err)
+	id := spec.Identity
+	if id == nil {
+		var err error
+		if id, err = device.Generate(); err != nil {
+			t.Fatalf("device key: %v", err)
+		}
 	}
 	client := agent.NewClient(baseURL)
 	joined, err := client.Join(ctx, id, networkRef, spec.Name, "", code.Code, time.Now())
 	if err != nil {
 		t.Fatalf("join %s: %v", spec.Name, err)
 	}
+	h.rememberDevice(joined.MembershipID, id)
 
 	var host wire.MembershipResponse
 	if status := h.adminReq(t, http.MethodGet,
@@ -1239,4 +1294,47 @@ func splitHostPorts(t *testing.T, entries []string) (hosts []string, ports []int
 		ports = append(ports, n)
 	}
 	return hosts, ports
+}
+
+// TestACodeAloneCannotMintACertificate is the whole of ADR-0024.
+//
+// `orbit agent enroll` re-issues to a membership that already exists, and the
+// request used to carry no signature at all — so a code was a bearer
+// credential. Whoever saw it, in a CI log, a chat message or a scrollback
+// buffer, could have a certificate issued over a public key THEY chose, for a
+// machine somebody else owns. The claim path has required a signature all
+// along; this door did not.
+func TestACodeAloneCannotMintACertificate(t *testing.T) {
+	h := setup(t)
+	ts := h.servePublicOnly(t, freeUDPPort(t))
+	ctx := context.Background()
+
+	var host wire.MembershipResponse
+	if code := h.createHost(t, ts.URL, membershipSpec{
+		NetworkID: h.netID.String(), Name: "bearer", OverlayAddr: "10.42.77.3",
+		RoleID: h.roleID.String(),
+	}, &host); code != http.StatusCreated {
+		t.Fatalf("create host: %d", code)
+	}
+
+	var codeResp wire.EnrollmentCodeResponse
+	h.adminPost(t, ts.URL+"/v1/memberships/"+host.ID+"/enrollment-code", nil, &codeResp)
+
+	// An attacker who has the code but not the machine.
+	thief, err := device.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
+	if _, err := agent.NewClient(ts.URL).Enroll(ctx, thief, codeResp.Code, kp, "e2e"); err == nil {
+		t.Fatal("a stolen code issued a certificate to a device that does not own " +
+			"the membership; see docs/adr/0024-one-enrollment-door.md")
+	}
+
+	// And the machine itself still works, with the same code — the refusal
+	// above must not have spent it.
+	if _, err := agent.NewClient(ts.URL).Enroll(
+		ctx, h.deviceFor(t, host.ID), codeResp.Code, kp, "e2e"); err != nil {
+		t.Fatalf("the real machine could not enroll: %v", err)
+	}
 }

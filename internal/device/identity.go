@@ -210,15 +210,37 @@ func LoadOrCreate(path string) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	der, err := x509.MarshalECPrivateKey(id.key)
+	if err := id.Save(path); err != nil {
+		return nil, err
+	}
+	// Load back what is ACTUALLY on disk rather than returning what we just
+	// generated. Two processes starting together both generate, both link, and
+	// exactly one wins — the loser must end up with the winner's key, or a host
+	// holds an identity the file does not have and the control plane is told
+	// about a key that will not survive the next start.
+	// TestLoadOrCreateUnderRace pins this, and caught it when Save was lifted
+	// out of here and stopped re-reading on ErrExist.
+	return Load(path)
+}
+
+// Save writes the identity to path, atomically and at 0600.
+//
+// The body of LoadOrCreate, lifted so that a caller holding an identity can
+// persist it without a second copy of the careful parts: temp file in the same
+// directory so the link cannot cross a filesystem, chmod before write, fsync
+// before link, and an existing file left alone rather than overwritten — a
+// device key that changes underneath a running host is a new machine as far as
+// the control plane is concerned.
+func (i *Identity) Save(path string) error {
+	der, err := x509.MarshalECPrivateKey(i.key)
 	if err != nil {
-		return nil, fmt.Errorf("marshal device key: %w", err)
+		return fmt.Errorf("marshal device key: %w", err)
 	}
 	blob := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create the directory for the device key at %s "+
+		return fmt.Errorf("create the directory for the device key at %s "+
 			"(pass -device-key to put it somewhere writable): %w", dir, err)
 	}
 
@@ -228,7 +250,7 @@ func LoadOrCreate(path string) (*Identity, error) {
 		// Named with the DESTINATION, not the temporary file the write goes
 		// through. A permission error quoting `.device.key.1869827180` sends an
 		// operator looking for a file that has never existed.
-		return nil, fmt.Errorf("create the device key at %s "+
+		return fmt.Errorf("create the device key at %s "+
 			"(pass -device-key to put it somewhere writable): %w", path, err)
 	}
 	tmpName := tmp.Name()
@@ -236,11 +258,11 @@ func LoadOrCreate(path string) (*Identity, error) {
 
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
-		return nil, fmt.Errorf("secure device key: %w", err)
+		return fmt.Errorf("secure device key: %w", err)
 	}
 	if _, err := tmp.Write(blob); err != nil {
 		tmp.Close()
-		return nil, fmt.Errorf("write device key: %w", err)
+		return fmt.Errorf("write device key: %w", err)
 	}
 	// Synced before linking, not after. A key that is visible at its final name
 	// but not yet on disk is one a power loss can erase after the control plane
@@ -248,17 +270,14 @@ func LoadOrCreate(path string) (*Identity, error) {
 	// cannot be repaired by re-running anything.
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return nil, fmt.Errorf("write device key: %w", err)
+		return fmt.Errorf("write device key: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("write device key: %w", err)
+		return fmt.Errorf("write device key: %w", err)
 	}
 
-	if err := os.Link(tmpName, path); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return Load(path)
-		}
-		return nil, fmt.Errorf("install device key: %w", err)
+	if err := os.Link(tmpName, path); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("install device key: %w", err)
 	}
-	return id, nil
+	return nil
 }

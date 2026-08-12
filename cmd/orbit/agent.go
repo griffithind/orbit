@@ -148,8 +148,17 @@ func enrollCmd(args []string) error {
 		return fmt.Errorf("generate keypair: %w", err)
 	}
 
+	// The device key this machine already has. `orbit agent enroll` re-issues to
+	// a membership that already exists, so the key is on file at both ends and
+	// the signature is what ties the code to this machine rather than to whoever
+	// happens to be holding it.
+	id, err := device.LoadOrCreate(paths.DeviceKeyPath(filepath.Dir(layout.Dir)))
+	if err != nil {
+		return fmt.Errorf("device key: %w", err)
+	}
+
 	client := agent.NewClient(*fl.url)
-	resp, err := client.Enroll(ctx, *fl.code, kp, version.Version)
+	resp, err := client.Enroll(ctx, id, *fl.code, kp, version.Version)
 	if err != nil {
 		var apiErr *agent.APIError
 		if errors.As(err, &apiErr) && !apiErr.Retryable() {

@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,11 +15,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -344,7 +347,7 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 		}
 
 		// The strongest form of the assertion: it actually enrolls.
-		if !enrollWorks(t, ts, code) {
+		if !enrollWorks(t, ts, h.deviceFor(t, host.ID), code) {
 			t.Errorf("the code on stdout did not enroll")
 		}
 	})
@@ -370,15 +373,24 @@ func TestCLISecretsGoAloneOnStdout(t *testing.T) {
 	})
 }
 
-func enrollWorks(t *testing.T, ts *httptest.Server, code string) bool {
+// enrollWorks redeems a code the way a machine does: signed by the device the
+// membership was joined with (ADR-0024). A code alone no longer suffices, which
+// is the point — it used to mint a certificate over any key the caller chose.
+func enrollWorks(t *testing.T, ts *httptest.Server, id *device.Identity, code string) bool {
 	t.Helper()
 	kp, err := agent.GenerateKeypair(cert.Curve_P256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	sig, err := id.SignEnroll(device.HashCredential(code), kp.PublicB64, at)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out wire.EnrollResponse
 	body, err := jsonMarshal(wire.EnrollRequest{
 		Credential: code, PublicKey: kp.PublicB64, Curve: cert.Curve_P256.String(),
+		SignedAt: at.Unix(), Signature: base64.StdEncoding.EncodeToString(sig),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -23,6 +23,15 @@ everything.
 
 ### Security
 
+- **An enrollment code alone could mint a certificate.** `orbit agent enroll`
+  re-issues to a membership that already exists, and the request carried no
+  signature — so whoever held the code, from a CI log or a scrollback buffer,
+  got a certificate issued over a public key **they** chose, for a machine
+  somebody else owns. The `claim` path has required a device signature all
+  along. Enrollment now does too, checked against the key the membership already
+  names, and checked *before* the code is spent so a bad signature cannot burn a
+  live code. See ADR-0024.
+
 - **`orbit device block` did not stop the device getting certificates.**
   `ResolveAgentHost` resolved an agent by overlay address through `membership`
   and `membership_address` and never touched `orbit.device`, so a blocked device

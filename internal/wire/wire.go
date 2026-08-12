@@ -27,6 +27,17 @@ type EnrollRequest struct {
 	// Curve is CURVE25519 or P256 and must match the network's.
 	Curve string `json:"curve"`
 
+	// SignedAt and Signature prove the caller holds the device key the
+	// membership already names.
+	//
+	// Without them a code was a bearer credential: whoever held it got a
+	// certificate issued over a public key THEY chose, for a machine somebody
+	// else owns. `orbit agent enroll` re-issues to a membership that already
+	// exists, so there is always a device on file to check against. See
+	// ADR-0024.
+	SignedAt  int64  `json:"signed_at,omitempty"`
+	Signature string `json:"signature,omitempty"`
+
 	AgentVersion  string `json:"agent_version,omitempty"`
 	NebulaVersion string `json:"nebula_version,omitempty"`
 

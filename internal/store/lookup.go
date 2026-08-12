@@ -55,6 +55,37 @@ func (s *Store) TouchToken(ctx context.Context, tokenID uuid.UUID) {
 		`UPDATE orbit.api_token SET last_used_at = now() WHERE id = $1`, tokenID)
 }
 
+// PeekEnrollmentCredential resolves a credential WITHOUT consuming it.
+//
+// Enrollment has to check a signature against the device the membership names,
+// and it cannot know which membership that is until the credential resolves —
+// so something has to happen before redemption. This is that something, and it
+// consumes nothing: a caller with a bad signature must not be able to burn a
+// live code, which is a denial of service against the machine the code was
+// minted for. An e2e test found exactly that, because redeeming first meant a
+// thief who could not get a certificate could still spend the credential.
+//
+// It is safe to do first because the work it protects is asymmetric: this is
+// one indexed lookup, the signature check that follows is one ECDSA verify, and
+// what both of them stand in front of is a certificate issuance. Redemption
+// stays atomic and stays the thing that decides who wins a race.
+func (s *Store) PeekEnrollmentCredential(ctx context.Context, secretHash []byte) (*RedeemedCredential, error) {
+	var out RedeemedCredential
+	err := s.pool.QueryRow(ctx, `
+		SELECT membership_id, network_id
+		  FROM orbit.enrollment_credential
+		 WHERE secret_hash = $1 AND used_at IS NULL AND expires_at > now()`,
+		secretHash,
+	).Scan(&out.MembershipID, &out.NetworkID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, mapErr(err, "peek enrollment credential")
+	}
+	return &out, nil
+}
+
 // RedeemEnrollmentCredential atomically consumes an enrollment secret.
 //
 // Exactly one caller can succeed for a given credential. A replay, or two

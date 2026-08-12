@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/store"
 	"github.com/griffithind/orbit/internal/wire"
 )
@@ -56,6 +57,13 @@ func (h *harness) policyHosts(t *testing.T, ts *httptest.Server, doc, srcName, s
 // directory an agent will later be pointed at.
 func (h *harness) enrollIntoDirForHost(t *testing.T, ts *httptest.Server, membershipID, dir string) {
 	t.Helper()
+	// The CLI loads the device key from disk and enrollment proves possession
+	// of it (ADR-0024), so the key this membership was joined with has to be
+	// the key sitting where the CLI will look.
+	if err := h.deviceFor(t, membershipID).Save(paths.DeviceKeyPath(filepath.Dir(dir))); err != nil {
+		t.Fatalf("place device key for %s: %v", membershipID, err)
+	}
+
 	var code wire.EnrollmentCodeResponse
 	if c := h.adminPost(t, ts.URL+"/v1/memberships/"+membershipID+"/enrollment-code", nil, &code); c != http.StatusCreated {
 		t.Fatalf("mint code for %s: %d", membershipID, c)

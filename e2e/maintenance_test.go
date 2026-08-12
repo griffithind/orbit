@@ -12,6 +12,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/sched"
 	"github.com/griffithind/orbit/internal/store"
@@ -173,10 +174,17 @@ func TestEnrollmentIsRateLimited(t *testing.T) {
 
 	client := agent.NewClient(ts.URL)
 	kp, _ := agent.GenerateKeypair(cert.Curve_P256)
+	// Any identity: the credential is bogus and redemption fails before the
+	// signature is looked at, which is the order that keeps an attacker with a
+	// junk code from costing a signature verification.
+	id, err := device.Generate()
+	if err != nil {
+		t.Fatalf("device key: %v", err)
+	}
 
 	var limited bool
 	for i := 0; i < 40; i++ {
-		_, err := client.Enroll(context.Background(), "orb_1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", kp, "e2e")
+		_, err := client.Enroll(context.Background(), id, "orb_1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", kp, "e2e")
 		var apiErr *agent.APIError
 		if errorsAs(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests {
 			limited = true
@@ -216,7 +224,7 @@ func TestFailedEnrollmentIsAudited(t *testing.T) {
 	// library still knows both curves, so this exercises the control plane's
 	// check rather than a parse failure.
 	kp, _ := agent.GenerateKeypair(cert.Curve_CURVE25519)
-	_, err := agent.NewClient(ts.URL).Enroll(ctx, code.Code, kp, "e2e")
+	_, err := agent.NewClient(ts.URL).Enroll(ctx, h.deviceFor(t, host.ID), code.Code, kp, "e2e")
 	if err == nil {
 		t.Fatal("enrollment with a mismatched curve succeeded")
 	}

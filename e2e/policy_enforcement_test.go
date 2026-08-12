@@ -122,7 +122,7 @@ func (h *harness) enrollExisting(t *testing.T, ts *httptest.Server, membershipID
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := agent.NewClient(ts.URL).Enroll(ctx, codeResp.Code, kp, "e2e")
+	resp, err := agent.NewClient(ts.URL).Enroll(ctx, h.deviceFor(t, membershipID), codeResp.Code, kp, "e2e")
 	if err != nil {
 		t.Fatalf("enroll %s: %v", name, err)
 	}

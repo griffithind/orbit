@@ -113,7 +113,7 @@ func TestARouteOutsideTheCAIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = agent.NewClient(ts.URL).Enroll(t.Context(), codeResp.Code, kp, "e2e")
+	_, err = agent.NewClient(ts.URL).Enroll(t.Context(), h.deviceFor(t, gw.id), codeResp.Code, kp, "e2e")
 	if err == nil {
 		t.Fatal("a certificate was issued for a prefix the CA does not permit")
 	}

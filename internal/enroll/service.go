@@ -17,6 +17,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/policy"
 	"github.com/griffithind/orbit/internal/store"
@@ -213,10 +214,23 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 		return nil, ErrInvalidCredential
 	}
 
-	// Redemption first, and atomically. Everything after this point is work we
-	// only do for the one caller that actually consumed the credential; doing
-	// any of it beforehand would let an attacker with an already-used code
-	// still cost us a certificate issuance.
+	// The signature is checked BEFORE the credential is consumed, and that
+	// ordering is a fix rather than an oversight.
+	//
+	// Redemption used to come first, on the reasoning that doing anything
+	// beforehand would let an attacker with a spent code cost us a certificate
+	// issuance. That reasoning still holds for the expensive work, and this is
+	// not it: a peek is one indexed lookup and the check that follows is one
+	// ECDSA verify, both far cheaper than the issuance they now stand in front
+	// of. Redeeming first meant a thief holding a stolen code could not get a
+	// certificate but could still SPEND the code — a denial of service against
+	// the machine it was minted for. An e2e test found that within a minute of
+	// existing. See ADR-0024.
+	if err := s.checkEnrollSignature(ctx, req); err != nil {
+		s.log.Warn("enrollment rejected: bad device signature", "from", from)
+		return nil, err
+	}
+
 	redeemed, err := s.store.RedeemEnrollmentCredential(ctx, Hash(req.Credential), from)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -248,7 +262,6 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 		if host.State == store.MembershipSuspended {
 			return ErrHostBlocked
 		}
-
 		out, err := s.issueAndRender(ctx, tx, host, req.PublicKey, req.Curve)
 		if err != nil {
 			return err
@@ -1487,4 +1500,55 @@ func certStale(issuedAt time.Time, changes ...*time.Time) bool {
 		}
 	}
 	return false
+}
+
+// checkEnrollSignature proves the caller holds the device key the membership
+// already names, without consuming anything.
+//
+// The key comes from the DATABASE. That is the whole point: a caller-supplied
+// key would make the check vacuous, which is the reasoning device.VerifyClaim
+// has carried all along and which this door was missing entirely.
+//
+// A membership always names a device — `orbit agent enroll` re-issues to one
+// that already exists (docs/enrollment.md) — so there is no branch for a
+// membership without one. If that ever changes this fails loudly rather than
+// growing a path that trusts the request.
+func (s *Service) checkEnrollSignature(ctx context.Context, req wire.EnrollRequest) error {
+	sig, err := base64.StdEncoding.DecodeString(req.Signature)
+	if err != nil || len(sig) == 0 {
+		return fmt.Errorf("%w: enrollment requires a device signature", ErrInvalidCredential)
+	}
+
+	// Resolve the code without spending it. An unknown, spent or expired code
+	// returns the same error the redemption below would, so this adds no way to
+	// probe for live credentials.
+	peeked, err := s.store.PeekEnrollmentCredential(ctx, Hash(req.Credential))
+	if err != nil {
+		return ErrInvalidCredential
+	}
+	if peeked.MembershipID == nil {
+		return ErrNoHost
+	}
+
+	return s.store.Read(ctx, func(ctx context.Context, tx *store.Tx) error {
+		host, err := tx.GetHost(ctx, *peeked.MembershipID)
+		if err != nil {
+			return err
+		}
+		if host.DeviceID == nil {
+			return fmt.Errorf("%w: membership names no device to check against", ErrInvalidCredential)
+		}
+		dev, err := tx.GetDevice(ctx, *host.DeviceID)
+		if err != nil {
+			return err
+		}
+		if dev.Blocked() {
+			return ErrHostBlocked
+		}
+		if err := device.VerifyEnroll(dev.PublicKey, device.HashCredential(req.Credential),
+			req.PublicKey, time.Unix(req.SignedAt, 0), s.clock(), sig); err != nil {
+			return fmt.Errorf("%w: %s", ErrInvalidCredential, err)
+		}
+		return nil
+	})
 }

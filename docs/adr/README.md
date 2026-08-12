@@ -42,7 +42,8 @@ that landed it says which part is not — 0016 has its fail-closed rule and its
 address-family check but not the blackhole or the escape-hatch bootstrap, 0027
 has bring-up but no rehearsed restore, 0031 measures skew but does not report
 it, 0029 has name validation and the authority rule but not PTR or the
-rebinding guard, 0030 has concurrent upstreams, TCP escalation and re-assertion but no cache,
+rebinding guard, 0024 binds the code to a device signature but has no per-code attempt limit
+and no TTL cap on reservations, 0030 has concurrent upstreams, TCP escalation and re-assertion but no cache,
 0032 has the config half and not the endpoint cache, 0034 has the masquerade default,
 the MSS clamp and ruleset assertions, but not the netns forwarding test that
 would catch a rule that is present and wrong.
@@ -78,7 +79,7 @@ eight engineer-weeks before signing.
 | [0021](0021-gateway-reachability-is-derived-from-routes.md) | A gateway's inbound reachability is derived from its routes | Accepted | Implemented |
 | [0022](0022-what-a-host-renders-bumps-the-config-epoch.md) | Anything that changes what a host renders bumps the config epoch | Accepted | Implemented |
 | [0023](0023-blocking-a-device-stops-issuance.md) | Blocking a device stops issuance to it | Accepted | Implemented |
-| [0024](0024-one-enrollment-door.md) | One enrolment door, and it proves possession | Accepted | Not started |
+| [0024](0024-one-enrollment-door.md) | One enrolment door, and it proves possession | Accepted | Partial |
 | [0025](0025-quarantine-does-not-gate-revocation.md) | Quarantine does not gate revocation | Accepted | Implemented |
 | [0026](0026-a-process-that-disagrees-with-the-schema-refuses-to-serve.md) | A process that disagrees with the schema refuses to serve | Accepted | Implemented |
 | [0027](0027-a-restore-is-a-rehearsed-procedure.md) | A restore is a rehearsed procedure, not a list of files | Accepted | Partial |

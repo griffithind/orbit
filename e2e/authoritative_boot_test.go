@@ -59,7 +59,7 @@ func TestAuthoritativeConfigBootsNebula(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := agent.NewClient(ts.URL).Enroll(ctx, codeResp.Code, kp, "e2e")
+	resp, err := agent.NewClient(ts.URL).Enroll(ctx, h.deviceFor(t, host.ID), codeResp.Code, kp, "e2e")
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}

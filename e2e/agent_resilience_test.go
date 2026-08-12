@@ -20,6 +20,7 @@ import (
 
 	"github.com/griffithind/orbit/internal/agent"
 	"github.com/griffithind/orbit/internal/agent/paths"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/wire"
 )
 
@@ -43,9 +44,20 @@ import (
 func (h *harness) enrollIntoDir(t *testing.T, ts *httptest.Server, name, addr, dir string) {
 	t.Helper()
 
+	// The device key goes where the CLI will look for it, and the join happens
+	// WITH it. `orbit agent enroll` re-issues to a membership this machine
+	// already joined and proves possession of its key (ADR-0024), so a harness
+	// that joined as one device and enrolled as another was modelling something
+	// no machine does.
+	id, err := device.LoadOrCreate(paths.DeviceKeyPath(filepath.Dir(dir)))
+	if err != nil {
+		t.Fatalf("device key for %s: %v", name, err)
+	}
+
 	var membership wire.MembershipResponse
 	if code := h.createHost(t, ts.URL, membershipSpec{
-		NetworkID: h.netID.String(), Name: name, OverlayAddr: addr, RoleID: h.roleID.String(),
+		NetworkID: h.netID.String(), Name: name, OverlayAddr: addr,
+		RoleID: h.roleID.String(), Identity: id,
 	}, &membership); code != http.StatusCreated {
 		t.Fatalf("create membership %s: %d", name, code)
 	}
