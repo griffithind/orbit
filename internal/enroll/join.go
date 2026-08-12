@@ -49,9 +49,43 @@ var (
 	ErrNameTaken = errors.New("a membership with that name already exists in this network")
 )
 
-// maxNameLen matches what the database accepts, checked here so the failure is
-// a 400 with a reason rather than a constraint violation surfacing as a 500.
-const maxNameLen = 253
+// maxNameLen is one DNS label, which is what a membership name is.
+//
+// It was 253 — a whole domain name — and the name is published into the mesh
+// resolver's table under BOTH `<name>.` and `<name>.<domain>.`, answered
+// authoritatively ahead of any upstream. So a membership called
+// `login.microsoftonline.com` produced the table key
+// `login.microsoftonline.com.` and shadowed the real one for every host on the
+// network — and on Linux, where ADR-0013's `~.` makes Orbit the resolver of
+// last resort, for every query on the machine.
+//
+// The operator who creates a membership need not be the operator who trusts the
+// machine, so this is a privilege boundary and not a tidiness rule.
+// See docs/adr/0029-the-resolver-is-authoritative-for-its-own-domain.md.
+const maxNameLen = 63
+
+// validName reports whether a membership name is a single DNS label.
+//
+// Letters, digits and hyphens; not starting or ending with a hyphen; no dots,
+// which is the part that matters. RFC 1123 host-name rules, and the same shape
+// the database already enforces for tun_dev — a column that had a CHECK
+// constraint while this one was bare `name text NOT NULL`.
+func validName(name string) bool {
+	if name == "" || len(name) > maxNameLen {
+		return false
+	}
+	if name[0] == '-' || name[len(name)-1] == '-' {
+		return false
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // Join records a device and creates its pending membership.
 //
@@ -63,8 +97,10 @@ const maxNameLen = 253
 // an operator's queue and take the names those rows claim.
 func (s *Service) Join(ctx context.Context, req wire.JoinRequest, from netip.Addr) (*wire.JoinResponse, error) {
 	name := strings.TrimSpace(req.Name)
-	if name == "" || len(name) > maxNameLen {
-		return nil, fmt.Errorf("%w: 1-%d characters", ErrJoinName, maxNameLen)
+	if !validName(name) {
+		return nil, fmt.Errorf("%w: one DNS label, 1-%d characters, letters digits "+
+			"and hyphens — a name with a dot in it would be published into the mesh "+
+			"resolver and could shadow a public name", ErrJoinName, maxNameLen)
 	}
 
 	pub, err := base64.StdEncoding.DecodeString(req.PublicKey)
@@ -551,8 +587,9 @@ func (s *Service) Reserve(ctx context.Context, networkRef string, r store.Reserv
 	ttl time.Duration, actor store.Identity) (*wire.EnrollmentCodeResponse, error) {
 
 	r.Name = strings.TrimSpace(r.Name)
-	if r.Name == "" || len(r.Name) > maxNameLen {
-		return nil, fmt.Errorf("%w: 1-%d characters", ErrJoinName, maxNameLen)
+	if !validName(strings.TrimSpace(r.Name)) {
+		return nil, fmt.Errorf("%w: one DNS label, 1-%d characters, letters digits "+
+			"and hyphens", ErrJoinName, maxNameLen)
 	}
 	if ttl <= 0 {
 		ttl = DefaultCodeTTL

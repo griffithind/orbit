@@ -2,6 +2,7 @@ package hostcfg
 
 import (
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -138,3 +139,74 @@ func (discardLog) Info(string, ...any)  {}
 func (discardLog) Warn(string, ...any)  {}
 func (discardLog) Error(string, ...any) {}
 func (discardLog) Debug(string, ...any) {}
+
+// TestAMissInsideTheMeshDomainIsNXDOMAIN.
+//
+// A miss under `<slug>.internal` used to be forwarded to whatever the machine
+// resolves with — the operator's ISP or corporate resolver — which leaks the
+// network's own topology and host inventory one typo at a time. There is also
+// nothing out there to find: nobody else is authoritative for our suffix.
+func TestAMissInsideTheMeshDomainIsNXDOMAIN(t *testing.T) {
+	leaked := false
+	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
+		leaked = true
+		answerA(w, req, "203.0.113.7")
+	})
+
+	r := &Resolver{log: discardLog{}, upstream: []string{up}}
+	r.state = DNSState{Domain: "lab.internal", Hosts: map[string][]netip.Addr{
+		"db.lab.internal.": {netip.MustParseAddr("10.42.0.9")},
+	}}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("typo.lab.internal.", dns.TypeA))
+
+	if leaked {
+		t.Error("an internal hostname was sent to the machine's upstream resolver")
+	}
+	if rec.msg == nil || rec.msg.Rcode != dns.RcodeNameError {
+		t.Errorf("rcode = %v, want NXDOMAIN", rec.msg)
+	}
+	if rec.msg != nil && !rec.msg.Authoritative {
+		t.Error("the answer was not marked authoritative, so a caching resolver will re-ask")
+	}
+}
+
+// TestANameOutsideTheMeshDomainStillForwards. Authority is for our suffix and
+// nothing else — this resolver is the only one many hosts have.
+func TestANameOutsideTheMeshDomainStillForwards(t *testing.T) {
+	forwarded := false
+	up := upstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
+		forwarded = true
+		answerA(w, req, "203.0.113.7")
+	})
+	r := &Resolver{log: discardLog{}, upstream: []string{up}}
+	r.state = DNSState{Domain: "lab.internal"}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("example.com.", dns.TypeA))
+
+	if !forwarded {
+		t.Error("a public name was not forwarded; this resolver is the only one many hosts have")
+	}
+	if rec.msg == nil || rec.msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("rcode = %v, want NOERROR", rec.msg)
+	}
+}
+
+// TestAKnownNameWithNoAddressOfThatFamilyIsNODATA guards behaviour that is
+// already right: NXDOMAIN there would make a v4-only host invisible to anything
+// that asked for AAAA first, and most resolvers ask for both.
+func TestAKnownNameWithNoAddressOfThatFamilyIsNODATA(t *testing.T) {
+	r := &Resolver{log: discardLog{}}
+	r.state = DNSState{Domain: "lab.internal", Hosts: map[string][]netip.Addr{
+		"db.lab.internal.": {netip.MustParseAddr("10.42.0.9")},
+	}}
+
+	rec := &capture{}
+	r.ServeDNS(rec, new(dns.Msg).SetQuestion("db.lab.internal.", dns.TypeAAAA))
+
+	if rec.msg == nil || rec.msg.Rcode != dns.RcodeSuccess || len(rec.msg.Answer) != 0 {
+		t.Errorf("want NOERROR with no answers, got %v", rec.msg)
+	}
+}

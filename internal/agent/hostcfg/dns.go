@@ -390,15 +390,39 @@ func (r *Resolver) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	q := req.Question[0]
+	name := strings.ToLower(q.Name)
+
+	r.mu.RLock()
+	addrs, ok := r.state.Hosts[name]
+	domain := r.state.Domain
+	r.mu.RUnlock()
+
 	if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
+		// Not an address question. Still ours to answer if it names our own
+		// suffix — see below — but there is nothing to answer WITH, so it is
+		// NODATA rather than a forward.
+		if ownsName(name, domain) {
+			r.nodata(w, req)
+			return
+		}
 		r.forward(w, req)
 		return
 	}
 
-	r.mu.RLock()
-	addrs, ok := r.state.Hosts[strings.ToLower(q.Name)]
-	r.mu.RUnlock()
 	if !ok {
+		// AUTHORITY. A miss inside `<slug>.internal` is NXDOMAIN, not a forward.
+		//
+		// Forwarding it sent every typo, every search-list permutation
+		// (`laptop.lab.internal.lab.internal.`) and every stale internal
+		// hostname to the machine's upstream — the operator's ISP or corporate
+		// resolver — which is the network's own topology and host inventory,
+		// leaked one lookup at a time. There is also nothing out there to find:
+		// nobody else is authoritative for our suffix.
+		// See docs/adr/0029-the-resolver-is-authoritative-for-its-own-domain.md.
+		if ownsName(name, domain) {
+			r.nxdomain(w, req)
+			return
+		}
 		r.forward(w, req)
 		return
 	}
@@ -546,4 +570,34 @@ func exchange(ctx context.Context, req *dns.Msg, server string) (*dns.Msg, error
 		return msg, nil // the truncated answer beats no answer
 	}
 	return full, nil
+}
+
+// ownsName reports whether a query falls inside the suffix this resolver is
+// authoritative for.
+//
+// The bare `<name>.` keys are deliberately NOT covered: they sit in the DNS
+// root, which Orbit does not own, so a miss there has to go upstream. Removing
+// those keys is ADR-0029's other half and needs a working search domain on
+// every platform first — macOS writes /etc/resolver/<domain>, which is
+// per-domain resolution rather than a search suffix.
+func ownsName(name, domain string) bool {
+	if domain == "" {
+		return false
+	}
+	suffix := strings.ToLower(strings.TrimSuffix(domain, ".")) + "."
+	return strings.HasSuffix(name, "."+suffix) || name == suffix
+}
+
+// nxdomain says the name does not exist, authoritatively.
+func (r *Resolver) nxdomain(w dns.ResponseWriter, req *dns.Msg) {
+	m := new(dns.Msg).SetRcode(req, dns.RcodeNameError)
+	m.Authoritative = true
+	_ = w.WriteMsg(m)
+}
+
+// nodata says the name exists but has nothing of the type asked for.
+func (r *Resolver) nodata(w dns.ResponseWriter, req *dns.Msg) {
+	m := new(dns.Msg).SetReply(req)
+	m.Authoritative = true
+	_ = w.WriteMsg(m)
 }
