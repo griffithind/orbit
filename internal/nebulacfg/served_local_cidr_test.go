@@ -66,7 +66,7 @@ func TestAServedPrefixWidensRulesWithNoLocalCIDR(t *testing.T) {
 			"it to the host's own addresses, which is wanted", original)
 	}
 	if untouched != 1 {
-		t.Errorf("a rule that named its own local_cidr was rewritten; the author said "+
+		t.Errorf("a rule that named its own local_cidr was rewritten; the author said " +
 			"where it applies and that is not ours to widen")
 	}
 }
