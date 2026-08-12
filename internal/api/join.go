@@ -33,7 +33,7 @@ import (
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	var req wire.JoinRequest
-	if !decode(w, r, &req) {
+	if !decodeAgent(w, r, &req) {
 		return
 	}
 
@@ -84,7 +84,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req wire.ClaimRequest
-	if !decode(w, r, &req) {
+	if !decodeAgent(w, r, &req) {
 		return
 	}
 
@@ -182,7 +182,7 @@ func (s *Server) handleAuthorizeMembership(w http.ResponseWriter, r *http.Reques
 	var req wire.AuthorizeRequest
 	// A body is optional: authorizing with no role is the common case, and
 	// requiring "{}" would make the simple call the awkward one.
-	if r.ContentLength > 0 && !decode(w, r, &req) {
+	if r.ContentLength > 0 && !decodeAgent(w, r, &req) {
 		return
 	}
 
@@ -222,7 +222,7 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
 
 	var req wire.ReserveRequest
-	if !decode(w, r, &req) {
+	if !decodeAgent(w, r, &req) {
 		return
 	}
 

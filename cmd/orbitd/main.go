@@ -25,11 +25,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/agent/paths"
 	"github.com/griffithind/orbit/internal/api"
 	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/db"
 	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/enroll"
 	"github.com/griffithind/orbit/internal/mesh"
@@ -222,6 +224,31 @@ func openStore(ctx context.Context, dsn string) (*store.Store, error) {
 	return store.Open(ctx, dsn)
 }
 
+// checkSchema refuses to continue when this binary and this database disagree.
+//
+// Its own connection, because the comparison reads orbit.schema_migration and
+// the pool is opened as orbit_app, which holds no grant on it — the same
+// separation openStore's error message argues for.
+func checkSchema(ctx context.Context, dsn string) error {
+	if dsn == "" {
+		dsn = os.Getenv("ORBIT_DSN")
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("check schema: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	drift, err := db.CheckSchema(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("check schema: %w", err)
+	}
+	if !drift.OK() {
+		return fmt.Errorf("refusing to serve: %s", drift.Reason())
+	}
+	return nil
+}
+
 //------------------------------------------------------------------------------
 // serve
 //------------------------------------------------------------------------------
@@ -282,6 +309,19 @@ func serve(args []string) error {
 		return err
 	}
 	defer st.Close()
+
+	// The schema, before anything is served. Same disposition as the vault
+	// below, for the same reason and it was missing for no reason: a replica
+	// started against a database one migration behind came up cleanly, opened
+	// the vault, joined the mesh, answered /readyz 200 — and then failed on the
+	// first request that touched the new column, as a 500 with a pgx "column
+	// does not exist", at an unpredictable hour.
+	//
+	// No degraded mode. A process that cannot serve correctly must not be in
+	// rotation. See docs/adr/0026-a-process-that-disagrees-with-the-schema-refuses-to-serve.md.
+	if err := checkSchema(ctx, *dsn); err != nil {
+		return err
+	}
 
 	// The vault. Required, not optional: every private key this control plane
 	// holds is in it, so a deployment without one cannot sign anything.

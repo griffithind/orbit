@@ -190,34 +190,16 @@ func databaseChecks(ctx context.Context, dsn string) []check {
 	}
 	defer conn.Close(ctx)
 
-	var applied int
-	if err := conn.QueryRow(ctx,
-		`SELECT count(*) FROM orbit.schema_migration`).Scan(&applied); err != nil {
+	drift, err := db.CheckSchema(ctx, conn)
+	if err != nil {
 		return append(out, check{name: "migrations", detail: err.Error(),
 			advice: "the schema is absent or unreadable by this role; run `orbitd migrate`"})
 	}
-
-	bundled, err := db.Migrations()
-	if err != nil {
-		return append(out, check{name: "migrations", detail: err.Error()})
-	}
-	total := len(bundled)
-	switch {
-	case applied == total:
-		out = append(out, check{name: "migrations", ok: true,
-			detail: fmt.Sprintf("%d applied, up to date", applied)})
-	case applied < total:
-		out = append(out, check{name: "migrations",
-			detail: fmt.Sprintf("%d applied, %d bundled", applied, total),
-			advice: "run `orbitd migrate` before serving; serve does not migrate"})
-	default:
-		// More applied than this binary knows about: the database was migrated
-		// by a NEWER orbitd. Serving against it is the rolling-upgrade case
-		// nothing else warns about.
-		out = append(out, check{name: "migrations",
-			detail: fmt.Sprintf("%d applied, but this binary bundles only %d", applied, total),
-			advice: "this database was migrated by a newer orbitd; serving against it " +
-				"risks reading columns this build does not know about"})
+	if drift.OK() {
+		out = append(out, check{name: "migrations", ok: true, detail: drift.Reason()})
+	} else {
+		out = append(out, check{name: "migrations", detail: drift.Reason(),
+			advice: "serve refuses to start against a schema it disagrees with"})
 	}
 	return out
 }

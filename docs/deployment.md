@@ -933,13 +933,29 @@ to relaying through it.
 
 ```bash
 systemctl stop orbit-control
-orbitd migrate --dsn "postgres://postgres@localhost/orbit"   # forward-only
-install -m755 orbitd /usr/local/bin/orbitd
+install -m755 orbitd /usr/local/bin/orbitd                   # NEW binary first
+orbitd migrate --dsn "postgres://postgres@localhost/orbit"   # then migrate, with it
 systemctl start orbit-control
 ```
 
+**Install before you migrate.** The order used to be the other way round, and it
+could not work: `orbitd migrate` runs whatever binary is on the path, and before
+the install that is the *old* one, whose embedded migration set is the old set.
+It applied nothing and printed "database is up to date"; the new binary then
+served against an un-migrated database. `serve` now refuses to start in that
+state rather than failing later on the first request that touches a new column —
+see `docs/adr/0026-a-process-that-disagrees-with-the-schema-refuses-to-serve.md`.
+
+`orbitd doctor` compares the applied migration set to the bundled one by name,
+and says which side is ahead.
+
 Migrations are forward-only by design: a down migration against a database
 holding certificate state loses an audit trail rather than recovering anything.
+
+Across a migration, replicas upgrade together: a replica still running the old
+binary will refuse to start once the schema has moved. Agents are not affected —
+the surfaces they talk to decode tolerantly, so a newer agent against an older
+replica degrades rather than failing.
 
 The control plane being down does not disturb the mesh. Agents log a failed poll
 and keep their current configuration; existing tunnels are unaffected.

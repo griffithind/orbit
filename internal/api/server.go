@@ -345,7 +345,7 @@ func (s *Server) adminRoutes() []route {
 
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	var req wire.EnrollRequest
-	if !decode(w, r, &req) {
+	if !decodeAgent(w, r, &req) {
 		return
 	}
 
@@ -470,7 +470,7 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req wire.ReportRequest
-	if !decode(w, r, &req) {
+	if !decodeAgent(w, r, &req) {
 		return
 	}
 
@@ -570,7 +570,7 @@ func (s *Server) handleAgentRenew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req wire.RenewRequest
-	if !decode(w, r, &req) {
+	if !decodeAgent(w, r, &req) {
 		return
 	}
 
@@ -819,11 +819,38 @@ func (s *Server) clientAddr(r *http.Request) netip.Addr {
 	return s.peerAddr(r)
 }
 
+// decode reads a request body STRICTLY: an unknown field is a 400.
+//
+// For the admin API, where the caller is a human or a script and a misspelled
+// field should be an error rather than a silent no-op.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeBody(w, r, v, true)
+}
+
+// decodeAgent reads a request body TOLERANTLY: an unknown field is ignored.
+//
+// For the surfaces an AGENT talks to. Strict decoding here made a newer agent
+// talking to an older replica fail with a hard 400 on any field added to the
+// wire types — and it could not recover, because APIError.Retryable treats 4xx
+// as permanent and failover rotates only on transport errors. An upgraded agent
+// pinned to a not-yet-upgraded replica would neither retry nor move on. That is
+// the direction a rolling fleet upgrade actually takes.
+//
+// Tailscale's revealed preference over 145 capability versions is the same one:
+// two version gates in the whole codebase, and everything else absorbed at the
+// deserialisation boundary. See
+// docs/adr/0026-a-process-that-disagrees-with-the-schema-refuses-to-serve.md.
+func decodeAgent(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeBody(w, r, v, false)
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, v any, strict bool) bool {
 	// Cap the body. These are all small documents and an unbounded read on an
 	// unauthenticated endpoint is a free denial of service.
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	dec.DisallowUnknownFields()
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(v); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return false

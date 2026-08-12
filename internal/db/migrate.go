@@ -110,6 +110,14 @@ func Migrate(ctx context.Context, conn *pgx.Conn) (applied []string, err error) 
 		return nil, err
 	}
 
+	// Named before attempted. Without this, a database predating the collapse
+	// takes the loop below, re-runs the whole initial schema, and fails on
+	// `CREATE FUNCTION cidrs_have_ipv6` — safely, one transaction per file, but
+	// reported as a bare Postgres "already exists" that says nothing about why.
+	if drift, derr := CheckSchema(ctx, conn); derr == nil && drift.PreCollapse {
+		return nil, fmt.Errorf("refusing to migrate: %s", drift.Reason())
+	}
+
 	for _, m := range migrations {
 		if _, ok := seen[m.Name]; ok {
 			continue
