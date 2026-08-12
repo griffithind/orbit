@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -85,6 +86,9 @@ func (i *Identity) PublicKey() []byte { return i.spki }
 
 // Fingerprint is the device's stable name: hex SHA-256 of the SPKI.
 func (i *Identity) Fingerprint() string { return Fingerprint(i.spki) }
+
+// PublicB64 is the device's public key as a request carries it.
+func (i *Identity) PublicB64() string { return base64.StdEncoding.EncodeToString(i.spki) }
 
 // Fingerprint computes a device's fingerprint from its marshalled public key.
 //

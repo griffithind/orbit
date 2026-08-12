@@ -116,12 +116,20 @@ func GenerateKeypair(curve cert.Curve) (*Keypair, error) {
 }
 
 // Enroll redeems a credential and returns the host's first generation.
-func (c *Client) Enroll(ctx context.Context, credential string, kp *Keypair, agentVersion string) (*wire.EnrollResponse, error) {
+func (c *Client) Enroll(ctx context.Context, id *device.Identity, credential string, kp *Keypair, agentVersion string) (*wire.EnrollResponse, error) {
+	at := time.Now()
+	sig, err := id.SignEnroll(device.HashCredential(credential), kp.PublicB64, at)
+	if err != nil {
+		return nil, fmt.Errorf("sign enrollment: %w", err)
+	}
 	req := wire.EnrollRequest{
-		Credential:   credential,
-		PublicKey:    kp.PublicB64,
-		Curve:        kp.Curve.String(),
-		AgentVersion: agentVersion,
+		Credential:      credential,
+		PublicKey:       kp.PublicB64,
+		Curve:           kp.Curve.String(),
+		DevicePublicKey: id.PublicB64(),
+		SignedAt:        at.Unix(),
+		Signature:       base64.StdEncoding.EncodeToString(sig),
+		AgentVersion:    agentVersion,
 	}
 	var resp wire.EnrollResponse
 	if err := c.post(ctx, "/enroll/v1/enroll", req, &resp); err != nil {

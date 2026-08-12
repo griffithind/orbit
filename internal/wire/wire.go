@@ -27,6 +27,22 @@ type EnrollRequest struct {
 	// Curve is CURVE25519 or P256 and must match the network's.
 	Curve string `json:"curve"`
 
+	// DevicePublicKey, SignedAt and Signature are proof that the caller holds
+	// the device key, over a statement binding the code and the mesh key.
+	//
+	// Without them a code was a bearer credential: whoever held it got a
+	// certificate issued over a public key THEY chose, for a membership the
+	// `claim` path protects with exactly this check. Two doors to the same
+	// result and only one of them locked. See ADR-0024.
+	//
+	// The signature is verified against the membership's stored device key when
+	// it already has one, and against DevicePublicKey when it does not — in
+	// which case the code is what authorises the binding and the signature is
+	// what proves possession.
+	DevicePublicKey string `json:"device_public_key,omitempty"`
+	SignedAt        int64  `json:"signed_at,omitempty"`
+	Signature       string `json:"signature,omitempty"`
+
 	AgentVersion  string `json:"agent_version,omitempty"`
 	NebulaVersion string `json:"nebula_version,omitempty"`
 

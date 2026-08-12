@@ -162,8 +162,20 @@ func (n *Notifier) listen(ctx context.Context) error {
 	if _, err := conn.Exec(ctx, "LISTEN "+Channel); err != nil {
 		return err
 	}
-	n.readyOnce.Do(func() { close(n.ready) })
+	// UP BEFORE READY, and the order is load-bearing.
+	//
+	// It was the other way round, so Ready could return before the gauge was
+	// set and a caller that checked Up() immediately after saw a notifier that
+	// was listening and reported down. TestUpFollowsTheRealListener asserts
+	// exactly that pair and passed almost always — the window is two statements
+	// wide — which is what a race that is not a data race looks like.
+	//
+	// It is not only the test. `orbitd serve` waits on Ready and then serves,
+	// and /healthz reports push from Up(), so the same window is a control
+	// plane answering "push: false" while push is working. Brief, and the whole
+	// point of orbit_epoch_listener_up (ADR-0008) is that it does not lie.
 	n.up(true)
+	n.readyOnce.Do(func() { close(n.ready) })
 	n.log.Debug("listening for epoch changes", "channel", Channel)
 
 	for {
