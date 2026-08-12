@@ -268,6 +268,10 @@ type Input struct {
 	DNSNetworks []netip.Prefix
 	Names       []Name
 
+	// ExitNodeUnreachable says this host chose an exit node the control plane
+	// could not render a route to. See orbitSection.ExitNodeUnreachable.
+	ExitNodeUnreachable bool
+
 	// SoMark is nebula's packet mark, set only when this host has a default
 	// route. Zero omits it.
 	SoMark int
@@ -516,6 +520,18 @@ type orbitSection struct {
 	// exists to be matched by. Nebula reads neither.
 	ExitNode bool `yaml:"exit_node,omitempty"`
 
+	// ExitNodeUnreachable is true when this host SELECTED an exit node and the
+	// control plane could not render a route to it — the gateway is suspended,
+	// blocked, or has no usable address.
+	//
+	// Distinct from ExitNode being false, and the distinction is the whole
+	// point. Rendering nothing meant the host quietly fell back to its own
+	// physical default: a machine that chose an exit node for privacy sending
+	// its traffic in the clear, with no signal anywhere. Losing internet access
+	// is a support call; losing it silently to the clear is an incident nobody
+	// opens. See ADR-0016.
+	ExitNodeUnreachable bool `yaml:"exit_node_unreachable,omitempty"`
+
 	// Masquerade lists prefixes whose forwarded traffic is NATed leaving this
 	// host. Per prefix rather than per host: a gateway can legitimately want
 	// NAT for 0.0.0.0/0 and not for a LAN it also serves.
@@ -722,7 +738,7 @@ func Render(in Input) ([]byte, error) {
 			UnsafeRoutes: renderRoutes(in.Routes),
 		},
 		Firewall: fw,
-		Orbit:    renderOrbit(in.Serves, hasDefault(in.Routes), renderDNS(in.DNSDomain, in.DNSListen, in.Names, in.DNSNetworks)),
+		Orbit:    renderOrbit(in.Serves, hasDefault(in.Routes), in.ExitNodeUnreachable, renderDNS(in.DNSDomain, in.DNSListen, in.Names, in.DNSNetworks)),
 	}
 	if in.LogLevel != "" || in.LogFormat != "" {
 		doc.Logging = &loggingSection{Level: in.LogLevel, Format: in.LogFormat}
@@ -997,11 +1013,14 @@ func hasDefault(routes []Route) bool {
 // Nil when this host serves nothing, so an ordinary machine's configuration is
 // byte-identical to what it was before routes existed — which is what keeps a
 // feature nobody uses from re-applying every config in a fleet.
-func renderOrbit(serves []Served, exitNode bool, dns *dnsSection) *orbitSection {
-	if len(serves) == 0 && !exitNode && dns == nil {
+func renderOrbit(serves []Served, exitNode, exitUnreachable bool, dns *dnsSection) *orbitSection {
+	if len(serves) == 0 && !exitNode && !exitUnreachable && dns == nil {
 		return nil
 	}
-	out := &orbitSection{Forward: len(serves) > 0, ExitNode: exitNode, DNS: dns}
+	out := &orbitSection{
+		Forward: len(serves) > 0, ExitNode: exitNode,
+		ExitNodeUnreachable: exitUnreachable, DNS: dns,
+	}
 	for _, s := range serves {
 		if s.Masquerade {
 			out.Masquerade = append(out.Masquerade, s.Prefix.String())

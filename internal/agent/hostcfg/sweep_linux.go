@@ -18,6 +18,12 @@ func sweepHost(log *slog.Logger) {
 	if err := (&nftConfigurer{}).removeTable(); err != nil && log != nil {
 		log.Debug("sweep: nftables table", "error", err)
 	}
+	// The unreachable default, if a previous run installed one. Fail-closed
+	// state left behind is worse than fail-open state left behind: this one
+	// drops the host's own traffic.
+	if err := applyBlackhole(HostState{}); err != nil && log != nil {
+		log.Debug("sweep: blackhole routes", "error", err)
+	}
 	sweepDNS(log)
 }
 

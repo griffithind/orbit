@@ -23,6 +23,17 @@ everything.
 
 ### Security
 
+- **A vanished exit node silently reverted a host to its own internet.**
+  `NetworkRoutes` filters gateways to enrolled-or-active, so suspending or
+  blocking an exit gateway removed the route from every consumer's render — and
+  rendering nothing meant the consumer fell back to its physical default. A
+  machine that chose an exit node for privacy then sent its traffic in the clear,
+  with no signal anywhere. The control plane now renders
+  `orbit.exit_node_unreachable`, and the agent installs unreachable routes for
+  the two default halves so that traffic fails instead of leaking. Losing
+  internet access is a support call; losing it silently to the clear is an
+  incident nobody opens. See ADR-0016.
+
 - **Reverse lookups of overlay addresses went to the public internet.**
   `dig -x 10.42.0.9` was forwarded, telling an ISP or corporate resolver an
   address from the operator's own mesh — and there was nothing out there to

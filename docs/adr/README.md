@@ -38,8 +38,7 @@ Do **not** write one for a refactor, a naming choice, or a decision with an obvi
 The **Built** column is separate from Status on purpose. `Accepted` means the
 decision is in force; it says nothing about whether the code has caught up.
 `Partial` means some of the ADR's Decision section is in the tree and the commit
-that landed it says which part is not — 0016 has its fail-closed rule and its
-address-family check but not the blackhole or the escape-hatch bootstrap, 0027
+that landed it says which part is not — 0027
 has bring-up but no rehearsed restore, 0031 measures skew but does not report
 it, 0030 has concurrent upstreams, TCP escalation, re-assertion, EDNS0 and
 truncation but no cache, which it excludes deliberately,
@@ -70,7 +69,7 @@ eight engineer-weeks before signing.
 | [0013](0013-the-resolver-is-restored-not-just-set.md) | The machine's resolver configuration is ours to restore, not only to set | Accepted | Implemented |
 | [0014](0014-diagnostics-report-what-nebula-decided.md) | Diagnostics report what nebula decided, not what we inferred | Accepted | Implemented |
 | [0015](0015-host-state-is-removed-by-whoever-finds-it.md) | Host state is removed by whoever finds it | Accepted | Implemented |
-| [0016](0016-the-exit-route-fails-closed.md) | The exit route fails closed | Accepted | Partial |
+| [0016](0016-the-exit-route-fails-closed.md) | The exit route fails closed | Accepted | Implemented |
 | [0017](0017-every-platform-we-tag-for-is-a-platform-we-check.md) | Every platform we tag for is a platform the gates analyse | Accepted | Implemented |
 | [0018](0018-windows-is-a-client.md) | Windows is a client, and nothing else | Accepted | Not started |
 | [0019](0019-no-dynamic-app-connectors.md) | No dynamic app connectors; route sets instead | Accepted | Not started |

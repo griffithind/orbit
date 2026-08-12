@@ -74,6 +74,17 @@ type HostState struct {
 	// installed and the tunnel carries the packets that carry the tunnel.
 	ExitNode bool
 
+	// ExitNodeBlackhole is set when this host chose an exit node the control
+	// plane could not render a route to.
+	//
+	// Distinct from ExitNode, and mutually exclusive with it. Without the
+	// distinction the host simply had no default route and quietly used its own
+	// physical one — a machine that chose an exit node for privacy sending its
+	// traffic in the clear, with nothing to see. Losing internet access is a
+	// support call; losing it silently to the clear is an incident nobody
+	// opens. See ADR-0016.
+	ExitNodeBlackhole bool
+
 	// SoMark is the mark nebula was told to put on its own packets, read from
 	// the same signed config that set it.
 	//
@@ -90,7 +101,7 @@ type HostState struct {
 // REMOVE anything it left behind rather than skip — a machine that stops being
 // a gateway must stop forwarding.
 func (h HostState) Empty() bool {
-	return !h.Forward && !h.ExitNode && len(h.Masquerade) == 0
+	return !h.Forward && !h.ExitNode && !h.ExitNodeBlackhole && len(h.Masquerade) == 0
 }
 
 // String is a stable description, used to decide whether anything changed.
@@ -103,8 +114,8 @@ func (h HostState) String() string {
 		nets = append(nets, p.String())
 	}
 	sort.Strings(nets)
-	return fmt.Sprintf("forward=%v exit=%v mark=%#x tun=%s masquerade=[%s]",
-		h.Forward, h.ExitNode, h.SoMark, h.TunDev, strings.Join(nets, ","))
+	return fmt.Sprintf("forward=%v exit=%v blackhole=%v mark=%#x tun=%s masquerade=[%s]",
+		h.Forward, h.ExitNode, h.ExitNodeBlackhole, h.SoMark, h.TunDev, strings.Join(nets, ","))
 }
 
 // HostConfigurer applies host state. One per platform.
@@ -149,9 +160,10 @@ func HostStateFromConfig(yamlCfg string) (HostState, error) {
 			SoMark int `yaml:"so_mark"`
 		} `yaml:"listen"`
 		Orbit *struct {
-			Forward    bool     `yaml:"forward"`
-			ExitNode   bool     `yaml:"exit_node"`
-			Masquerade []string `yaml:"masquerade"`
+			Forward             bool     `yaml:"forward"`
+			ExitNode            bool     `yaml:"exit_node"`
+			ExitNodeUnreachable bool     `yaml:"exit_node_unreachable"`
+			Masquerade          []string `yaml:"masquerade"`
 		} `yaml:"orbit"`
 	}
 	if err := yaml.Unmarshal([]byte(yamlCfg), &doc); err != nil {
@@ -165,10 +177,11 @@ func HostStateFromConfig(yamlCfg string) (HostState, error) {
 	}
 
 	h := HostState{
-		Forward:  doc.Orbit.Forward,
-		ExitNode: doc.Orbit.ExitNode,
-		TunDev:   doc.Tun.Dev,
-		SoMark:   doc.Listen.SoMark,
+		Forward:           doc.Orbit.Forward,
+		ExitNode:          doc.Orbit.ExitNode,
+		ExitNodeBlackhole: doc.Orbit.ExitNodeUnreachable,
+		TunDev:            doc.Tun.Dev,
+		SoMark:            doc.Listen.SoMark,
 	}
 	for _, raw := range doc.Orbit.Masquerade {
 		p, err := netip.ParsePrefix(raw)

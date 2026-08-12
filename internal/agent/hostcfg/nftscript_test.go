@@ -81,3 +81,32 @@ func TestTheTableIsAlwaysReplacedWholesale(t *testing.T) {
 		t.Errorf("the script does not destroy-then-create in one transaction:\n%s", got)
 	}
 }
+
+// TestAnUnreachableExitNodeIsNotEmptyHostState.
+//
+// HostState.Empty() decides whether the agent applies anything at all. A host
+// that chose an exit node the control plane could not render is not a gateway
+// and has no masquerade, so without this it looked like a host with nothing to
+// do — and the whole point is that it has something to do: fail closed rather
+// than fall back to its own physical default. See ADR-0016.
+func TestAnUnreachableExitNodeIsNotEmptyHostState(t *testing.T) {
+	if (HostState{ExitNodeBlackhole: true}).Empty() {
+		t.Error("a host whose exit node vanished read as having no host state, so " +
+			"nothing would be applied and its traffic would leave in the clear")
+	}
+	if !(HostState{}).Empty() {
+		t.Error("the zero value stopped being empty; every ordinary host would now apply state")
+	}
+}
+
+// TestBlackholeAndExitNodeAreDistinctInTheStateString. The agent skips a
+// reconcile when the state string is unchanged, so two states that mean
+// opposite things must not render the same.
+func TestBlackholeAndExitNodeAreDistinctInTheStateString(t *testing.T) {
+	up := HostState{ExitNode: true, TunDev: "orbit0"}.String()
+	gone := HostState{ExitNodeBlackhole: true, TunDev: "orbit0"}.String()
+	if up == gone {
+		t.Errorf("a working exit node and a vanished one produce the same state "+
+			"string, so the transition between them is a no-op reconcile: %q", up)
+	}
+}

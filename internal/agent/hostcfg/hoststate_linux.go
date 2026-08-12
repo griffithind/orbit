@@ -100,6 +100,12 @@ func (n *nftConfigurer) Apply(h HostState) error {
 	if err := applyPolicyRoute(h); err != nil {
 		return err
 	}
+	// Before the early return below: a host that chose an unreachable exit node
+	// is NOT a gateway and has no masquerade, so it takes that branch — and it
+	// is exactly the host whose traffic must fail rather than leave in the clear.
+	if err := applyBlackhole(h); err != nil {
+		return err
+	}
 	if !h.Forward && len(h.Masquerade) == 0 {
 		// Exit-node client and nothing more. Netfilter has nothing to do, but
 		// removing is still right: this host may have been a gateway until the

@@ -917,10 +917,18 @@ func (s *Service) renderFor(ctx context.Context, tx *store.Tx, host *store.Membe
 		Firewall:     fw,
 		Policy:       compiled,
 		Routes:       routes,
-		Serves:       serves,
-		SoMark:       soMarkFor(exit),
-		ListenPort:   inst.listenPort,
-		TunDev:       tunDev,
+		// Chose an exit node, and there is no route to it.
+		//
+		// NetworkRoutes filters gateways to enrolled|active, so suspending the
+		// gateway removes the route from this list entirely — and rendering
+		// nothing meant the consumer quietly reverted to its own physical
+		// default. A machine that chose an exit node for privacy then sends its
+		// traffic in the clear, with no signal anywhere. See ADR-0016.
+		ExitNodeUnreachable: exit != nil && !hasDefaultRoute(routes),
+		Serves:              serves,
+		SoMark:              soMarkFor(exit),
+		ListenPort:          inst.listenPort,
+		TunDev:              tunDev,
 		// A lighthouse with no tun device needs no root. Only safe when it is
 		// not also a relay, since relaying is a data-plane role.
 		TunDisabled: tunDisabled,
@@ -1578,4 +1586,16 @@ func (s *Service) checkEnrollSignature(ctx context.Context, req wire.EnrollReque
 		}
 		return nil
 	})
+}
+
+// hasDefaultRoute reports whether any rendered route covers everything.
+//
+// By prefix length rather than by string, so ::/0 counts.
+func hasDefaultRoute(routes []nebulacfg.Route) bool {
+	for _, r := range routes {
+		if r.Prefix.Bits() == 0 {
+			return true
+		}
+	}
+	return false
 }
