@@ -66,6 +66,27 @@ var protectedOverrides = map[string]string{
 	"listen.port":              "the listen port is allocated per host and network so two nebula processes on one machine do not collide; set it on the host or the network",
 	"tun.dev":                  "the tun device is allocated per host and network for the same reason; set it on the host or the network",
 	"tun.disabled":             "derived from the host's roles: a lighthouse that is not a relay needs no tun device",
+
+	// Orbit's OWN section — the one part of this file that is definitionally
+	// not nebula's — was reachable by an override until ADR-0033. Overrides are
+	// merged last and the result is THEN signed, so the agent's signature check
+	// provides no protection here: the control plane vouches for whatever was
+	// injected. `orbit.dns.hosts` mints name-to-address mappings, and mesh names
+	// are free text (ADR-0029), so that included mappings for public names.
+	"orbit": "the orbit section is what Orbit renders about itself — DNS names, the resolver's address, the exit-node and forwarding flags; an override here rewrites the control plane's own output and is then signed as if the control plane meant it",
+
+	// A second, unmanaged DNS server on a managed host. lighthouse.dns.host
+	// defaults to the empty string, which is every interface
+	// (third_party/nebula/dns_server.go:452).
+	"lighthouse.serve_dns": "Orbit runs the mesh resolver itself; nebula's hostmap-backed one would be a second unmanaged DNS server, bound to every interface by default",
+	"lighthouse.dns":       "same reason as lighthouse.serve_dns",
+
+	// The other half of the socket listen.port is protected for. Note that
+	// listen.host has no first-class field yet, so protecting it removes the
+	// only lever an operator had — which ADR-0033 accepts, because an override
+	// that is the SUPPORTED path for a rendered key is a hole shaped exactly
+	// like the rule it is meant to protect.
+	"listen.host": "the listen address is Orbit's to choose, for the same reason as listen.port; it is currently always \"::\" and wants a field of its own rather than an override",
 }
 
 // ValidateOverrides refuses an override that would rewrite a key Orbit owns.

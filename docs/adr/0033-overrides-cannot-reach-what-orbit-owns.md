@@ -57,6 +57,20 @@ today — that becomes a first-class field rather than an exception to the rule.
 is the supported path for a rendered key means the rule has a hole shaped exactly like the thing
 it is protecting.
 
+**One deliberate exception, recorded rather than discovered: `punchy`.** Orbit renders `punch`
+and `respond` — the booleans that turn hole punching on — and ADR-0032 adds considered defaults
+for the timings. The timings are nonetheless exactly what a host behind a pathological NAT needs
+tuned, which is what the escape hatch exists for, and
+`TestOverridesCannotReachOrbitOwnedKeys` has asserted since before either ADR that
+`punchy: {delay: 2s}` must keep working. The rule is "everything Orbit renders is Orbit's"
+*except* where a rendered value is a default rather than a policy; `punchy` is the only such
+section today, and the test that enforces the rule names it in prose so the exception cannot
+become a habit.
+
+Implementing this immediately turned up two more sections the ADR had not enumerated — `punchy`
+above, and `logging`, which is open for the obvious reason. That is the mechanism working: the
+list had been outgrown three times, not twice.
+
 ## Alternatives considered
 
 **Add `orbit`, `lighthouse.serve_dns`, `lighthouse.dns` and `listen.host` to the deny-list.**

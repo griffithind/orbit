@@ -142,11 +142,45 @@ func TestPeersRoundTrip(t *testing.T) {
 	if p.Name != "db-01" || p.CurrentRemote != "203.0.113.7:4242" || p.Messages != 4242 {
 		t.Errorf("peer did not survive: %+v", p)
 	}
-	if !p.Relayed() {
-		t.Error("a peer with a relay reported as direct; that is the answer to 'why is this slow'")
+	// This peer has a relay available AND a direct remote, which is the normal
+	// state of a tunnel that punched through: nebula never drops the relay from
+	// relayState afterwards. The predicate must follow nebula's own — no usable
+	// direct remote — not the presence of a relay, or a healthy mesh reports
+	// itself as degraded. See Relayed, and docs/adr/0014-*.
+	if p.Relayed() {
+		t.Error("a peer with a working direct remote reported as relayed; " +
+			"RelaysToMe is what is AVAILABLE, not what is in use")
 	}
 	if got.Pending[0].Name != "" {
 		t.Error("a pending peer has no verified certificate and so has no name")
+	}
+}
+
+// TestRelayedIsAboutTheRemoteNotTheRelayList is the regression, stated on its
+// own so the reason survives a rewrite of the round-trip test above.
+//
+// nebula/inside.go:347 decides to relay on `!remote.IsValid() &&
+// !hostinfo.GetRemote().IsValid()`. A peer with no direct remote is relayed
+// whether or not we happen to have recorded which relay carries it.
+func TestRelayedIsAboutTheRemoteNotTheRelayList(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		peer   Peer
+		want   bool
+		reason string
+	}{
+		{"direct, relay still listed", Peer{CurrentRemote: "203.0.113.7:4242",
+			RelaysToMe: []string{"10.42.0.1"}}, false,
+			"nebula keeps the relay after a successful punch"},
+		{"no remote, relay listed", Peer{RelaysToMe: []string{"10.42.0.1"}}, true,
+			"no direct path, and something is carrying it"},
+		{"no remote, no relay listed", Peer{}, true,
+			"no direct path is what relayed means, whoever is carrying it"},
+		{"direct, no relay", Peer{CurrentRemote: "203.0.113.7:4242"}, false, "plainly direct"},
+	} {
+		if got := c.peer.Relayed(); got != c.want {
+			t.Errorf("%s: Relayed() = %v, want %v — %s", c.name, got, c.want, c.reason)
+		}
 	}
 }
 

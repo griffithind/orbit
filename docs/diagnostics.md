@@ -99,9 +99,16 @@ that expired an hour ago explains everything downstream of it, and is invisible
 in a connectivity test.
 
 **Path.** Is there a tunnel (`GetHostInfoByVpnAddr`)? What is the current
-remote? Is it relayed? If there is no tunnel, does the lighthouse know the peer
-(`QueryLighthouse`)? This separates "policy says no" from "we never found each
-other", which look identical from `ping`.
+remote? Is it relayed? What underlay addresses do we know for the peer, whether
+or not any answered — "we know four and none worked" and "we have never heard of
+it" have opposite causes and used to print identically.
+
+> Asking the lighthouse directly (`QueryLighthouse`) would separate "policy says
+> no" from "we never found each other", which look identical from `ping`. That
+> call is NOT wired: this paragraph described it as though it were for long
+> enough that ADR-0014 was written about the gap. It belongs with the UDP leg
+> ADR-0032 adds to `orbit netcheck`, and until one of them lands, the honest
+> answer to "does the lighthouse know this peer" is that Orbit cannot tell you.
 
 **Policy.** Which of our rules could admit traffic to this peer on this
 protocol and port — and if none, say so plainly.

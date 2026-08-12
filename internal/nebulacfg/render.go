@@ -577,7 +577,16 @@ const authoritativeHeader = `# Managed by Orbit. Do not edit.
 // to nebula's built-ins, which is correct and is what keeps this list short
 // enough to review.
 const (
-	defaultLighthouseInterval = 60     // seconds; nebula's own default
+	// Six times slower than nebula's own default of 10 (lighthouse.go:228,
+	// c.GetInt("lighthouse.interval", 10)), and deliberately so: a managed fleet
+	// reports to lighthouses it was told about, on a schedule the control plane
+	// sets, and 10s of keepalive per host per lighthouse is bandwidth spent to
+	// shorten a roam that Orbit already re-renders for.
+	//
+	// The comment here used to read "nebula's own default", which was false and
+	// made this line look like a no-op. A host that roams takes up to a minute
+	// to become findable at its new address; that is the trade.
+	defaultLighthouseInterval = 60     // seconds
 	defaultTunMTU             = 1300   // nebula's own default
 	defaultLogLevel           = "info" // the level an operator changes most often
 	defaultLogFormat          = "text"

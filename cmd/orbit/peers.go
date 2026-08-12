@@ -190,6 +190,13 @@ func pathOf(p status.Peer) string {
 	if !p.Relayed() {
 		return "direct"
 	}
+	// Relayed is "no direct remote", which does not guarantee we recorded WHICH
+	// relay is carrying it — the two come from different nebula fields. Naming
+	// the relay when we know it and saying "relay" when we do not beats printing
+	// a trailing space.
+	if len(p.RelaysToMe) == 0 {
+		return "relay"
+	}
 	return "relay " + strings.Join(p.RelaysToMe, ",")
 }
 

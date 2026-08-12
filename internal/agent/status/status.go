@@ -149,10 +149,21 @@ type Peer struct {
 	// CurrentRemote is the underlay address packets are going to right now.
 	CurrentRemote string `json:"current_remote,omitempty"`
 
-	// RelaysToMe are the peers relaying this one's traffic to us, and
-	// RelaysThroughMe the peers whose traffic we relay for it. A non-empty
-	// RelaysToMe answers "why is this link slow": there is no direct path and
-	// something in the middle is carrying it.
+	// KnownRemotes are the underlay addresses this host has learned for the
+	// peer, whether or not any of them answered.
+	//
+	// The distinction it exists to draw: "we know four addresses for this peer
+	// and none of them worked" and "we have never heard of this peer" used to
+	// print identically, and they have opposite causes and opposite fixes.
+	KnownRemotes []string `json:"known_remotes,omitempty"`
+
+	// RelaysToMe are the peers available to relay this one's traffic to us, and
+	// RelaysThroughMe the peers whose traffic we relay for it.
+	//
+	// AVAILABLE, not in use. Nebula never removes a relay from relayState once
+	// hole punching succeeds, so a non-empty RelaysToMe on a working direct
+	// tunnel is the normal state — which is why it is not the relay predicate.
+	// See Relayed.
 	RelaysToMe      []string `json:"relays_to_me,omitempty"`
 	RelaysThroughMe []string `json:"relays_through_me,omitempty"`
 
@@ -165,7 +176,20 @@ type Peer struct {
 
 // Relayed reports whether traffic from this peer reaches us through somebody
 // else.
-func (p Peer) Relayed() bool { return len(p.RelaysToMe) > 0 }
+//
+// Mirrors nebula's own decision, third_party/nebula/inside.go:347:
+//
+//	useRelay := !remote.IsValid() && !hostinfo.GetRemote().IsValid()
+//
+// — a peer is relayed when there is no usable direct remote, full stop. This
+// used to be len(RelaysToMe) > 0, which reports the HISTORY of a connection as
+// if it were its state: nebula never drops a relay after a successful punch, so
+// a tunnel that punched through perfectly still printed `relay`. It reported a
+// working mesh as broken.
+//
+// If nebula's predicate changes, this one has to be re-read. That cost is the
+// point — the old one drifted precisely because nothing tied it to anything.
+func (p Peer) Relayed() bool { return p.CurrentRemote == "" }
 
 // PeersFrom maps nebula's hostmap entries.
 //
@@ -178,6 +202,7 @@ func PeersFrom(hosts []nebula.ControlHostInfo) []Peer {
 		p := Peer{
 			VpnAddrs:        addrStrings(h.VpnAddrs),
 			Messages:        h.MessageCounter,
+			KnownRemotes:    addrPortStrings(h.RemoteAddrs),
 			RelaysToMe:      addrStrings(h.CurrentRelaysToMe),
 			RelaysThroughMe: addrStrings(h.CurrentRelaysThroughMe),
 		}
@@ -200,6 +225,19 @@ func PeersFrom(hosts []nebula.ControlHostInfo) []Peer {
 		}
 		return strings.Join(out[i].VpnAddrs, ",") < strings.Join(out[j].VpnAddrs, ",")
 	})
+	return out
+}
+
+// addrPortStrings is addrStrings for the candidate remote list, which carries
+// ports because an underlay address without one is not dialable.
+func addrPortStrings(addrs []netip.AddrPort) []string {
+	if len(addrs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, a.String())
+	}
 	return out
 }
 
