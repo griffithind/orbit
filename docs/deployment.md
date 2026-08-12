@@ -974,6 +974,16 @@ replica degrades rather than failing.
 The control plane being down does not disturb the mesh. Agents log a failed poll
 and keep their current configuration; existing tunnels are unaffected.
 
+**One exception, and it is the reason not to co-locate the lighthouse with the
+control plane on a network you cannot afford to lose.** Nebula holds learned
+peer addresses in memory only, and the sole persisted underlay knowledge is
+`static_host_map`, which lists lighthouses. So if the control plane and the
+lighthouse are the same machine and it is down, established tunnels carry on —
+but any host that RESTARTS in that window loses every learned remote and can
+reach exactly one thing: the lighthouse that is down. Discovery does not resume
+until it comes back. See `docs/adr/0032-discovery-survives-the-lighthouse.md`,
+including why the obvious fix conflicts with config signing.
+
 Nebula and the agent upgrade independently — that is the point of supervising
 the stock binary rather than embedding it.
 

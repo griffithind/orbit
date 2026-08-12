@@ -62,6 +62,32 @@ directory and reading it back at start is Tailscale's `netmapcache` at a fractio
 This is the difference between "discovery pauses" and "the mesh cannot rebuild", and it is the
 one change here that alters a failure mode rather than a diagnosis.
 
+> **AMENDED 2026-08-13, on attempting it: this cannot be built as written.**
+>
+> `static_host_map` lives in the SIGNED configuration, and
+> `generation/verifyconfig.go:83` compares the installed file to the signed one byte for byte.
+> An agent that appends cached endpoints to it has edited a config the control plane vouched
+> for, which is the property ADR-0002 and the whole config-integrity path rest on. The key is
+> also a protected override (ADR-0033), so it cannot be injected from the other side either.
+>
+> The in-process route is closed too, in this nebula. `Control.SetRemoteForTunnel` looks the
+> peer up in `f.hostMap`, which only holds hosts with an ESTABLISHED tunnel — precisely what a
+> cold start does not have — and `Control.CreateTunnel` starts a handshake that asks the
+> lighthouse for the remote, which is the thing that is down. There is no primitive for "try
+> this peer at this address" before a tunnel exists.
+>
+> The viable path stays inside the model and is a larger decision than this ADR made: **agents
+> report the endpoints they have learned, and the control plane renders them into
+> `static_host_map` alongside the lighthouses.** The reporting channel and the render both
+> already exist. What is new is what every host is then told — today `static_host_map` carries
+> lighthouse addresses, and this would widen it to every peer's underlay address, which is a
+> real change in what a compromised host learns about the fleet. That trade belongs in its own
+> ADR rather than smuggled in under this one.
+>
+> Until then the failure stands, and `docs/deployment.md`'s outage section owes the restart case
+> the ADR describes: control plane down, lighthouse co-located, and any host restarting loses
+> every learned remote.
+
 **`punchy.respond_delay`, `punchy.delay` and `punchy.target_all_remotes` are rendered
 explicitly**, with `respond_delay` chosen against `hsTimeout` rather than left to race it, and a
 comment naming `handshake_manager.go:645` as the line the value is chosen against — the same
