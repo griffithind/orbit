@@ -302,6 +302,10 @@ type Loop struct {
 	// across a restart costs one poll interval.
 	serverRenewAfter time.Time
 
+	// clockWarned is the last thing checkClock said, so it says it on a
+	// transition rather than on every poll.
+	clockWarned bool
+
 	// pollMu guards lastPoll and lastPollErr, which the status socket reads from
 	// its own goroutine while the loop writes them from the tick goroutine.
 	pollMu      sync.Mutex
@@ -652,6 +656,45 @@ func (l *Loop) failover(err error) {
 	_ = WriteState(l.Layout.Dir, l.State)
 }
 
+// checkClock names a wrong clock, once, instead of letting it arrive as a
+// certificate error.
+//
+// Nebula validates NotBefore and NotAfter against raw wall time with zero
+// leeway, and Orbit backdates issuance by exactly one minute. So a host more
+// than a minute slow considers its brand-new certificate not-yet-valid: nebula
+// refuses to load it, the apply fails, the loop rolls back and retries forever.
+// That failure looks identical to a wrong key, a wrong CA, or a corrupted
+// config, and `orbit netcheck`'s own advice text admits it — the check exists
+// and is a command an operator runs only AFTER suspecting the problem.
+//
+// Logged once per transition rather than every poll: a wrong clock does not
+// fix itself between polls, and a warning a minute forever is a warning nobody
+// reads. See docs/adr/0031-clock-skew-is-measured-not-inferred.md.
+func (l *Loop) checkClock() {
+	skew, ok := l.Client.Skew()
+	if !ok {
+		return
+	}
+	bad := skew > MaxSkew || skew < -MaxSkew
+	if bad == l.clockWarned {
+		return
+	}
+	l.clockWarned = bad
+	if !bad {
+		l.Log.Info("clock is back within tolerance of the control plane",
+			"skew", skew.Round(time.Second))
+		return
+	}
+	dir := "ahead of"
+	if skew < 0 {
+		dir = "behind"
+	}
+	l.Log.Warn("this machine's clock disagrees with the control plane; "+
+		"certificates will be refused and it will look like a certificate problem",
+		"skew", skew.Round(time.Second), "direction", dir, "tolerance", MaxSkew,
+		"fix", "NTP")
+}
+
 // adoptEndpoints records a refreshed replica list.
 func (l *Loop) adoptEndpoints(urls []string) {
 	if l.State.SetAgentURLs(urls) {
@@ -911,6 +954,7 @@ func (l *Loop) poll(ctx context.Context) error {
 	// is how this host reaches a control plane at all, and a host refusing a
 	// generation is exactly a host that may need to reach a different one.
 	l.adoptEndpoints(resp.AgentEndpoints)
+	l.checkClock()
 
 	if l.quarantined(resp.ConfigEpoch, resp.BlocklistEpoch) {
 		l.Log.Warn("refusing a quarantined generation",

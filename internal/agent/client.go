@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/slackhq/nebula/cert"
@@ -27,6 +28,53 @@ type Client struct {
 	// tunnel. Empty when this host has no exit node, which is almost all of
 	// them. See escapehatch.go.
 	escapeHost string
+
+	// skew is how far this machine's clock is from the control plane's, as of
+	// the last response that carried a Date header. Positive means this host is
+	// AHEAD.
+	//
+	// Measured on every request rather than by a command an operator runs after
+	// already suspecting the problem. Nebula validates NotBefore and NotAfter
+	// against raw wall time with zero leeway, so a machine more than a minute
+	// slow rejects its own brand-new certificate — the apply fails, the loop
+	// rolls back and retries forever, and the failure is indistinguishable from
+	// a wrong key, a wrong CA or a corrupted config.
+	//
+	// NOT corrected for. The enforcement point is nebula, using wall time, and a
+	// control plane that silently compensated would hide a fault the data plane
+	// will not. See docs/adr/0031-clock-skew-is-measured-not-inferred.md.
+	skewMu sync.RWMutex
+	skew   time.Duration
+	skewAt time.Time
+}
+
+// MaxSkew is the tolerance issuance already assumes: certificates are backdated
+// by one minute, so a host further behind than that rejects its own.
+const MaxSkew = time.Minute
+
+// Skew reports the last measured clock difference, and whether one was taken.
+func (c *Client) Skew() (time.Duration, bool) {
+	c.skewMu.RLock()
+	defer c.skewMu.RUnlock()
+	return c.skew, !c.skewAt.IsZero()
+}
+
+// observeDate records the skew implied by a response's Date header.
+//
+// Best effort by design: a proxy that strips Date, or a response that predates
+// one, leaves the previous measurement in place rather than resetting it to
+// zero — "no reading" and "no skew" must not look the same.
+func (c *Client) observeDate(resp *http.Response, sentAt time.Time) {
+	served, err := http.ParseTime(resp.Header.Get("Date"))
+	if err != nil {
+		return
+	}
+	// Midpoint of the request, so one round trip does not read as skew.
+	local := sentAt.Add(time.Since(sentAt) / 2)
+	c.skewMu.Lock()
+	c.skew = local.Sub(served)
+	c.skewAt = local
+	c.skewMu.Unlock()
 }
 
 func NewClient(baseURL string) *Client {
@@ -92,11 +140,13 @@ func (c *Client) State(ctx context.Context, configEpoch, blockEpoch int64) (*wir
 	if err != nil {
 		return nil, err
 	}
+	sentAt := time.Now()
 	httpResp, err := c.HTTP.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer httpResp.Body.Close()
+	c.observeDate(httpResp, sentAt)
 
 	var resp wire.StateResponse
 	if err := decodeResponse(httpResp, &resp); err != nil {
@@ -135,11 +185,13 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	sentAt := time.Now()
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	c.observeDate(resp, sentAt)
 	return decodeResponse(resp, out)
 }
 
@@ -198,11 +250,13 @@ func (c *Client) Watch(ctx context.Context, configEpoch, blockEpoch int64, hold 
 	if err != nil {
 		return nil, err
 	}
+	sentAt := time.Now()
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	c.observeDate(resp, sentAt)
 
 	var out wire.StateResponse
 	if err := decodeResponse(resp, &out); err != nil {
