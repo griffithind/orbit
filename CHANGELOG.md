@@ -148,6 +148,20 @@ everything.
 
 ### Fixed
 
+- **The exit-node escape hatch could not resolve its own way out.** It marks
+  connections to the enrolled public endpoint so the recovery path stays outside
+  the tunnel — but `Dialer.Control` runs *after* Go has resolved the address,
+  and the resolver's own packets carry no mark. On a host whose exit route was
+  the broken thing, the lookup went into the tunnel, failed, and the hatch never
+  fired: dead in exactly the situation it exists for. The agent now learns the
+  endpoint's addresses while the overlay is healthy and matches against those.
+
+  That also removes a `net.LookupHost` from every dial. The old comparison never
+  matched on its first term — `Control` sees a resolved IP while the enrolled
+  endpoint is a name — so every connection the transport made, including every
+  steady-state overlay poll, went through a blocking lookup inside the connect
+  path. See ADR-0016.
+
 - **The daemon ran a loop that skipped revocation, self-heal and host
   configuration.** Two loops existed. The daemon drove `Loop.Tick` on a ticker;
   `Loop.Run` was the one with the push channel, the config-integrity self-heal

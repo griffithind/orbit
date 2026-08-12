@@ -29,6 +29,10 @@ type Client struct {
 	// them. See escapehatch.go.
 	escapeHost string
 
+	// escapeAddrs are the addresses escapeHost was last seen at, learned while
+	// the overlay was healthy. See escapehatch.go.
+	escapeAddrs []string
+
 	// skew is how far this machine's clock is from the control plane's, as of
 	// the last response that carried a Date header. Positive means this host is
 	// AHEAD.

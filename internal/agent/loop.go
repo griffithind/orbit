@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -48,6 +51,15 @@ type State struct {
 	// re-enrolment against this endpoint with a fresh code — `orbit agent
 	// enroll` — which reaches the enroll routes that ARE mounted there.
 	BaseURL string `json:"base_url"`
+
+	// BaseAddrs are the addresses BaseURL was last seen at, refreshed while the
+	// overlay is healthy and used by the escape hatch when it is not.
+	//
+	// Persisted because the case it exists for is a host whose exit route has
+	// broken: the resolver's own packets carry no mark, so a lookup then goes
+	// into the tunnel and fails, and a hatch that resolves at dial time is dead
+	// exactly when it is needed. See ADR-0016.
+	BaseAddrs []string `json:"base_addrs,omitempty"`
 
 	// AgentURLs are the control plane's overlay addresses, one per live
 	// replica, learned at enrollment and refreshed on every response. Once
@@ -305,6 +317,10 @@ type Loop struct {
 	// clockWarned is the last thing checkClock said, so it says it on a
 	// transition rather than on every poll.
 	clockWarned bool
+
+	// baseAddrsAt is when the public endpoint was last resolved, so a poll every
+	// minute does not become a lookup every minute.
+	baseAddrsAt time.Time
 
 	// pollMu guards lastPoll and lastPollErr, which the status socket reads from
 	// its own goroutine while the loop writes them from the tick goroutine.
@@ -656,6 +672,52 @@ func (l *Loop) failover(err error) {
 	_ = WriteState(l.Layout.Dir, l.State)
 }
 
+// baseAddrsTTL is how often the public endpoint is re-resolved on a healthy
+// poll. Long, because the answer changes rarely and the cost of a stale one is
+// a failed dial that falls back to the ordinary path.
+const baseAddrsTTL = 30 * time.Minute
+
+// refreshBaseAddrs learns where the public endpoint lives, while it still can.
+//
+// Called from a SUCCESSFUL poll, which is the only moment this is safe to do:
+// the overlay is working, so the resolver is answering from somewhere real
+// rather than through a tunnel that may be the broken thing. The escape hatch
+// then has addresses to use when none of that is true any more.
+//
+// Non-blocking and best effort. A poll must not wait on a resolver, and a
+// lookup that fails leaves the previous answer in place — "could not tell" and
+// "there is nowhere to go" are different, and only one of them should erase a
+// working recovery path.
+func (l *Loop) refreshBaseAddrs() {
+	if l.State.BaseURL == "" || l.clock().Before(l.baseAddrsAt.Add(baseAddrsTTL)) {
+		return
+	}
+	l.baseAddrsAt = l.clock()
+
+	u, err := url.Parse(l.State.BaseURL)
+	if err != nil || u.Hostname() == "" {
+		return
+	}
+	host := u.Hostname()
+	// Already an address: nothing to learn, and nothing that can go stale.
+	if _, err := netip.ParseAddr(host); err == nil {
+		l.State.BaseAddrs = []string{host}
+		return
+	}
+
+	// Synchronous, and bounded. The Loop has no lock — its state belongs to one
+	// goroutine — so a background lookup writing State would be a data race for
+	// the sake of saving a few milliseconds once every half hour, on a poll that
+	// has already made a network round trip.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		return
+	}
+	l.State.BaseAddrs = addrs
+}
+
 // checkClock names a wrong clock, once, instead of letting it arrive as a
 // certificate error.
 //
@@ -955,6 +1017,7 @@ func (l *Loop) poll(ctx context.Context) error {
 	// generation is exactly a host that may need to reach a different one.
 	l.adoptEndpoints(resp.AgentEndpoints)
 	l.checkClock()
+	l.refreshBaseAddrs()
 
 	if l.quarantined(resp.ConfigEpoch, resp.BlocklistEpoch) {
 		l.Log.Warn("refusing a quarantined generation",

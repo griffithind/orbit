@@ -199,9 +199,9 @@ func (l *Loop) reconcileHost() {
 	// that needs reverting.
 	if l.Client != nil {
 		if want.ExitNode {
-			l.Client.SetEscapeHatch(l.State.BaseURL, want.SoMark)
+			l.Client.SetEscapeHatch(l.State.BaseURL, want.SoMark, l.State.BaseAddrs)
 		} else {
-			l.Client.SetEscapeHatch("", 0)
+			l.Client.SetEscapeHatch("", 0, nil)
 		}
 	}
 

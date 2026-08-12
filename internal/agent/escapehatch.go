@@ -48,7 +48,7 @@ import (
 // net, and a safety net that prevents the agent from starting is worse than the hazard.
 // Disabled is also the correct state for the overwhelming majority of hosts, which have
 // no exit node and therefore nothing to escape.
-func (c *Client) SetEscapeHatch(publicURL string, mark int) {
+func (c *Client) SetEscapeHatch(publicURL string, mark int, known []string) {
 	host := ""
 	if u, err := url.Parse(publicURL); err == nil {
 		host = u.Hostname()
@@ -58,6 +58,19 @@ func (c *Client) SetEscapeHatch(publicURL string, mark int) {
 		return
 	}
 
+	// The addresses this endpoint was last seen at, learned while the overlay
+	// was healthy and persisted in agent state.
+	//
+	// THE POINT IS TO NOT RESOLVE HERE. Dialer.Control runs after Go has already
+	// resolved the address, and the resolver's own packets carry no mark — so on
+	// a host whose exit route is the broken thing, the lookup goes into the
+	// tunnel and fails, sameHost returns false on the error, and the hatch never
+	// fires. It was dead in exactly the situation it exists for.
+	//
+	// A cached answer can be stale. A recovery path that depends on the thing it
+	// is recovering from cannot work at all. See ADR-0016.
+	c.escapeAddrs = append([]string(nil), known...)
+
 	d := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -66,10 +79,10 @@ func (c *Client) SetEscapeHatch(publicURL string, mark int) {
 			if err != nil {
 				return nil
 			}
-			// The address here is already resolved, so compare the name we
-			// enrolled against too — a control plane behind a name resolves to
-			// something that will not match it.
-			if h != host && !sameHost(address, host) {
+			// The address here is already resolved, so compare against the
+			// addresses this endpoint was last seen at — a control plane behind
+			// a name never matches the name itself.
+			if h != host && !c.knownAddr(h) {
 				return nil
 			}
 			var opErr error
@@ -88,23 +101,19 @@ func (c *Client) SetEscapeHatch(publicURL string, mark int) {
 	c.escapeHost = host
 }
 
-// sameHost reports whether a dialled address belongs to the enrolled endpoint.
+// knownAddr reports whether a dialled address is one the enrolled endpoint was
+// last seen at.
 //
-// Dialer.Control sees a resolved IP, while the enrolled endpoint is usually a name, so a
-// string compare alone would silently never match and the hatch would be dead code that
-// looks installed. Resolving here is cheap: it happens on connections to one host, and
-// the OS resolver has just answered the same question.
-func sameHost(address, enrolled string) bool {
-	h, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return false
-	}
-	ips, err := net.LookupHost(enrolled)
-	if err != nil {
-		return false
-	}
-	for _, ip := range ips {
-		if ip == h {
+// This replaced a net.LookupHost per dial. Because Dialer.Control receives an
+// address that is ALREADY resolved while the enrolled endpoint is usually a
+// name, the old comparison never matched on the first term and fell through to
+// a resolver call on every connection this transport made — including every
+// steady-state overlay poll, whose destination is not the escape host at all.
+// The comment defending it said "it happens on connections to one host"; it
+// happened on connections to all of them, blocking, inside the connect path.
+func (c *Client) knownAddr(h string) bool {
+	for _, a := range c.escapeAddrs {
+		if a == h {
 			return true
 		}
 	}
