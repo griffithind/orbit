@@ -1,6 +1,6 @@
 # ADR-0033: Overrides cannot reach what Orbit owns
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

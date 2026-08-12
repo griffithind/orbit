@@ -148,13 +148,20 @@ func (t *Tx) RedeemCredential(ctx context.Context, secretHash []byte, from netip
 // argument must come from the listener, never from the request.
 func (s *Store) ResolveAgentHost(ctx context.Context, networkID uuid.UUID, addr netip.Addr) (*AgentIdentity, error) {
 	var id AgentIdentity
+	// The device join is load-bearing, not decoration. Without it a blocked
+	// device kept renewing its certificate every twelve hours, indefinitely —
+	// while docs/credential-model.md promised that `orbit device block` "refuses
+	// a device everywhere on the control plane immediately", which is the entire
+	// argument for holding device keys in plaintext on disk.
+	// See docs/adr/0023-blocking-a-device-stops-issuance.md.
 	err := s.pool.QueryRow(ctx, `
-		SELECT h.id, h.state
+		SELECT h.id, h.state, d.blocked_at IS NOT NULL
 		  FROM orbit.membership_address a
 		  JOIN orbit.membership h ON h.id = a.membership_id
+		  JOIN orbit.device d ON d.id = h.device_id
 		 WHERE a.network_id = $1 AND a.addr = $2`,
 		networkID, addr,
-	).Scan(&id.MembershipID, &id.State)
+	).Scan(&id.MembershipID, &id.State, &id.DeviceBlocked)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound

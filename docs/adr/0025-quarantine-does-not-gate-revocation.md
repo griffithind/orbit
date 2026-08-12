@@ -1,6 +1,6 @@
 # ADR-0025: Quarantine does not gate revocation
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

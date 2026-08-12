@@ -109,8 +109,18 @@ type State struct {
 	// handed the same generation, applies it, breaks again. Refusing to
 	// re-apply the specific epoch that failed, for a while, is what makes
 	// automatic rollback safe rather than a way to flap forever.
-	QuarantinedConfigEpoch int64     `json:"quarantined_config_epoch,omitempty"`
-	QuarantinedUntil       time.Time `json:"quarantined_until,omitempty"`
+	// QuarantinedBlocklistEpoch is the OTHER half of the key, and it is what
+	// keeps the guard from swallowing revocations. Blocking a host advances the
+	// blocklist epoch and — before ADR-0022 — nothing else, so a revocation
+	// arrived carrying the same config epoch the guard was refusing and was
+	// refused with it, for the full quarantine window. The revert made it worse
+	// by rolling the installed blocklist back to its pre-revocation value.
+	//
+	// A generation is the one that broke this host only if BOTH epochs match.
+	// See docs/adr/0025-quarantine-does-not-gate-revocation.md.
+	QuarantinedConfigEpoch    int64     `json:"quarantined_config_epoch,omitempty"`
+	QuarantinedBlocklistEpoch int64     `json:"quarantined_blocklist_epoch,omitempty"`
+	QuarantinedUntil          time.Time `json:"quarantined_until,omitempty"`
 
 	// PendingRevertFromConfigEpoch and PendingRevertFromBlocklistEpoch are the
 	// epochs a revert moved away from, held until the control plane has been
@@ -435,6 +445,7 @@ func (l *Loop) checkGuard(ctx context.Context) {
 	l.State.UnconfirmedSince = time.Time{}
 	l.State.ConfirmAfter = time.Time{}
 	l.State.QuarantinedConfigEpoch = broken
+	l.State.QuarantinedBlocklistEpoch = brokenBlock
 	l.State.QuarantinedUntil = l.clock().Add(g.Quarantine)
 	l.State.PendingRevertFromConfigEpoch = broken
 	l.State.PendingRevertFromBlocklistEpoch = brokenBlock
@@ -473,10 +484,11 @@ func (l *Loop) checkGuard(ctx context.Context) {
 // quarantine the agent tries again every interval, forever, and in the
 // restart-failed case each attempt drops every tunnel on this network. That is
 // not a retry loop, it is a rolling outage.
-func (l *Loop) quarantineEpoch(epoch int64, cause error) {
+func (l *Loop) quarantineEpoch(epoch, blocklistEpoch int64, cause error) {
 	if epoch == 0 {
 		return
 	}
+	l.State.QuarantinedBlocklistEpoch = blocklistEpoch
 	g := l.guard()
 	l.State.QuarantinedConfigEpoch = epoch
 	l.State.QuarantinedUntil = l.clock().Add(g.Quarantine)
@@ -596,13 +608,23 @@ func (l *Loop) quarantinedEpoch() int64 {
 
 // quarantined reports whether a generation is the one that already broke this
 // host.
-func (l *Loop) quarantined(configEpoch int64) bool {
-	if l.State.QuarantinedConfigEpoch == 0 || configEpoch != l.State.QuarantinedConfigEpoch {
+//
+// Both epochs, because a blocklist cannot be the cause of the unreachability the
+// guard is reacting to: a blocklist entry can only withdraw trust in a PEER,
+// never in this host's own certificate. A generation carrying a newer blocklist
+// is therefore not the generation that broke us, whatever its config epoch says.
+func (l *Loop) quarantined(configEpoch, blocklistEpoch int64) bool {
+	if l.State.QuarantinedConfigEpoch == 0 {
+		return false
+	}
+	if configEpoch != l.State.QuarantinedConfigEpoch ||
+		blocklistEpoch != l.State.QuarantinedBlocklistEpoch {
 		return false
 	}
 	if l.clock().After(l.State.QuarantinedUntil) {
 		// Expired: let it through, having given an operator time to look.
 		l.State.QuarantinedConfigEpoch = 0
+		l.State.QuarantinedBlocklistEpoch = 0
 		l.State.QuarantinedUntil = time.Time{}
 		return false
 	}
@@ -885,7 +907,7 @@ func (l *Loop) poll(ctx context.Context) error {
 			"configEpoch", resp.ConfigEpoch, "blocklistEpoch", resp.BlocklistEpoch)
 		return nil
 	}
-	if l.quarantined(resp.ConfigEpoch) {
+	if l.quarantined(resp.ConfigEpoch, resp.BlocklistEpoch) {
 		l.Log.Warn("refusing a quarantined generation",
 			"configEpoch", resp.ConfigEpoch, "until", l.State.QuarantinedUntil)
 		return nil
@@ -907,7 +929,7 @@ func (l *Loop) poll(ctx context.Context) error {
 		ConfigSig:       resp.ConfigSig,
 	}); err != nil {
 		if undeliverable(err) {
-			l.quarantineEpoch(resp.ConfigEpoch, err)
+			l.quarantineEpoch(resp.ConfigEpoch, resp.BlocklistEpoch, err)
 		}
 		return fmt.Errorf("apply configuration: %w", err)
 	}
@@ -1158,7 +1180,7 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 	if resp.Config == "" {
 		return watchIdle, nil // hold expired with nothing new
 	}
-	if l.quarantined(resp.ConfigEpoch) {
+	if l.quarantined(resp.ConfigEpoch, resp.BlocklistEpoch) {
 		l.Log.Warn("refusing a quarantined generation",
 			"configEpoch", resp.ConfigEpoch, "until", l.State.QuarantinedUntil)
 		return watchRefused, nil
@@ -1183,7 +1205,7 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 			// Quarantined, so the next watch is refused rather than retried —
 			// and refused is what paces the loop. Returning watchIdle here would
 			// reconnect immediately against a server that answers immediately.
-			l.quarantineEpoch(resp.ConfigEpoch, err)
+			l.quarantineEpoch(resp.ConfigEpoch, resp.BlocklistEpoch, err)
 			return watchRefused, nil
 		}
 		return watchIdle, fmt.Errorf("apply pushed update: %w", err)

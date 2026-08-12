@@ -1,6 +1,6 @@
 # ADR-0018: Windows is a client, and nothing else
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

@@ -431,6 +431,12 @@ func (i Identity) Audit(action, targetType, targetID string) AuditEntry {
 type AgentIdentity struct {
 	MembershipID uuid.UUID
 	State        string
+
+	// DeviceBlocked is the device-level refusal, separate from State's
+	// membership-level one. Both gate issuance; they answer different questions
+	// ("this machine is not ours any more" vs "this machine is off this
+	// network") and an operator reaches for them in different situations.
+	DeviceBlocked bool
 }
 
 // RedeemedCredential is the result of atomically consuming an enrollment

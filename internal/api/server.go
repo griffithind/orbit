@@ -434,6 +434,14 @@ func (s *Server) agentIdentity(w http.ResponseWriter, r *http.Request) (*store.A
 		writeErr(w, http.StatusForbidden, "host is blocked")
 		return nil, false
 	}
+	// Checked here rather than in each handler, because the two handlers that
+	// remembered to check the DEVICE were claim and authorize, and the two that
+	// forgot were the two that issue certificates. A future issuance path
+	// inherits this instead of having to remember it.
+	if id.DeviceBlocked {
+		writeErr(w, http.StatusForbidden, "device is blocked")
+		return nil, false
+	}
 	return id, true
 }
 

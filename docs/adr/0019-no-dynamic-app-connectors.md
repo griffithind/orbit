@@ -1,6 +1,6 @@
 # ADR-0019: No dynamic app connectors; route sets instead
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

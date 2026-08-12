@@ -1,6 +1,6 @@
 # ADR-0013: The machine's resolver configuration is ours to restore, not only to set
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

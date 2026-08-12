@@ -1,6 +1,6 @@
 # ADR-0011: Every update carries a full generation, not a delta
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-11
 
 ## Context

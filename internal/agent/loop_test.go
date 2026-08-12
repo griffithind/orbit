@@ -150,8 +150,10 @@ func TestWatchRefusalIsDistinctFromIdle(t *testing.T) {
 		t.Errorf("empty response gave outcome %d, want watchIdle", got)
 	}
 
-	// A generation this host has already quarantined.
+	// A generation this host has already quarantined. Both epochs, because the
+	// quarantine is keyed on the pair — see quarantined().
 	l.State.QuarantinedConfigEpoch = 9
+	l.State.QuarantinedBlocklistEpoch = 1
 	l.State.QuarantinedUntil = time.Now().Add(time.Hour)
 	cp.state = wire.StateResponse{ConfigEpoch: 9, BlocklistEpoch: 1, Config: "pki: {}"}
 
@@ -161,6 +163,20 @@ func TestWatchRefusalIsDistinctFromIdle(t *testing.T) {
 	}
 	if got != watchRefused {
 		t.Errorf("quarantined generation gave outcome %d, want watchRefused", got)
+	}
+
+	// And the property the pair exists for: the same config epoch carrying a
+	// NEWER blocklist is a revocation, and a revocation is never the generation
+	// that broke this host. Refusing it left a quarantined machine trusting a
+	// revoked certificate for the whole thirty-minute window.
+	cp.state = wire.StateResponse{ConfigEpoch: 9, BlocklistEpoch: 2, Config: "pki: {}"}
+	got, err = l.watchOnce(context.Background(), time.Second)
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	if got == watchRefused {
+		t.Error("a revocation was refused by the quarantine; see " +
+			"docs/adr/0025-quarantine-does-not-gate-revocation.md")
 	}
 }
 
@@ -183,6 +199,7 @@ func TestWatchDoesNotSpinOnAQuarantinedGeneration(t *testing.T) {
 
 	l := testLoop(t, srv.URL)
 	l.State.QuarantinedConfigEpoch = 9
+	l.State.QuarantinedBlocklistEpoch = 1
 	l.State.QuarantinedUntil = time.Now().Add(time.Hour)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

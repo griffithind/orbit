@@ -968,6 +968,11 @@ func (t *Tx) NetworkTopology(ctx context.Context, networkID uuid.UUID) ([]Topolo
 		 WHERE h.network_id = $1
 		   AND (h.is_lighthouse OR h.is_relay)
 		   AND h.state IN ('enrolled', 'active')
+		   -- A blocked device is not a discovery point. Without this, blocking a
+		   -- stolen lighthouse leaves it in every peer's static_host_map: not
+		   -- merely still connected, but still the machine the control plane is
+		   -- telling the fleet to dial.
+		   AND d.blocked_at IS NULL
 		 ORDER BY h.name`, networkID)
 	if err != nil {
 		return nil, mapErr(err, "network topology")

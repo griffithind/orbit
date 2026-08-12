@@ -164,15 +164,27 @@ func (t *Tx) UnblockHost(ctx context.Context, membershipID uuid.UUID) (int64, er
 	// Evidence, in descending order of what it proves: a live certificate means
 	// enrolled; an allocated address means authorized but not yet enrolled;
 	// neither means it is still waiting to be authorized.
-	if _, err := t.tx.Exec(ctx, `
+	//
+	// RETURNING the new state, because whether this re-enters the topology
+	// decides whether the fleet has to re-render. This UPDATE does not go
+	// through SetHostState — it derives the state in SQL — so it carries
+	// SetHostState's epoch rule itself rather than inheriting it.
+	var now string
+	if err := t.tx.QueryRow(ctx, `
 		UPDATE orbit.membership SET state = CASE
 		  WHEN EXISTS (SELECT 1 FROM orbit.certificate
 		                WHERE membership_id = $1 AND state = 'active') THEN 'enrolled'
 		  WHEN EXISTS (SELECT 1 FROM orbit.membership_address
 		                WHERE membership_id = $1)                      THEN 'created'
 		  ELSE 'pending' END
-		 WHERE id = $1`, membershipID); err != nil {
+		 WHERE id = $1
+		RETURNING state`, membershipID).Scan(&now); err != nil {
 		return 0, mapErr(err, "restore membership state")
+	}
+	if inTopology(now) {
+		if _, err := t.BumpEpoch(ctx, host.NetworkID, EpochConfig); err != nil {
+			return 0, err
+		}
 	}
 	return t.nextBlocklistEpoch(ctx, host.NetworkID)
 }

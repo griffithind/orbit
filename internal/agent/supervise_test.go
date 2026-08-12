@@ -169,17 +169,26 @@ func TestQuarantineStopsRepeatedRestarts(t *testing.T) {
 	clock := time.Now()
 	l.SetClock(func() time.Time { return clock })
 
-	l.quarantineEpoch(42, generation.ErrRestartFailed)
-	if !l.quarantined(42) {
+	l.quarantineEpoch(42, 7, generation.ErrRestartFailed)
+	if !l.quarantined(42, 7) {
 		t.Fatal("the failed generation was not quarantined")
 	}
-	if l.quarantined(43) {
+	if l.quarantined(43, 7) {
 		t.Error("quarantine leaked to a different generation")
+	}
+
+	// The whole point of keying on both epochs: a revocation arrives carrying
+	// the SAME config epoch the guard is refusing, because blocking a host
+	// advances the blocklist epoch. Refusing it left a quarantined host trusting
+	// a revoked certificate for the full window.
+	if l.quarantined(42, 8) {
+		t.Error("a newer blocklist was refused by the config-epoch quarantine; " +
+			"a revocation cannot be the generation that broke this host")
 	}
 
 	// It expires, having given an operator time to look.
 	clock = clock.Add(l.guard().Quarantine + time.Second)
-	if l.quarantined(42) {
+	if l.quarantined(42, 7) {
 		t.Error("quarantine never expired")
 	}
 }

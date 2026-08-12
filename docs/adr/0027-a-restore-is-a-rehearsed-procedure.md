@@ -1,6 +1,6 @@
 # ADR-0027: A restore is a rehearsed procedure, not a list of files
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

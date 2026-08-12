@@ -1,6 +1,6 @@
 # ADR-0014: Diagnostics report what nebula decided, not what we inferred
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

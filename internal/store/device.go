@@ -350,10 +350,15 @@ func (t *Tx) ListDevices(ctx context.Context) ([]Device, error) {
 // this database — so the block takes effect on the next connection with no
 // propagation and no cache to invalidate.
 //
-// It does NOT touch the device's hosts. Blocking a device and suspending a
-// membership are different decisions: a stolen laptop should lose everything,
-// while a host being rebuilt should lose one network. Callers that want both
-// do both, visibly.
+// It also blocks every membership the device holds, which it did not always do.
+// The previous contract — "blocking a device and suspending a membership are
+// different decisions, callers that want both do both, visibly" — reads well and
+// was wrong in the one case the command exists for. `orbit device block` is what
+// an operator reaches for when a machine is stolen, and the only useful meaning
+// of that is ADR-0003's: fingerprints on the blocklist, live tunnels down. A
+// device block that left the machine renewing was a slower way of doing nothing.
+//
+// See docs/adr/0023-blocking-a-device-stops-issuance.md.
 func (t *Tx) BlockDevice(ctx context.Context, id uuid.UUID, reason string) error {
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE orbit.device
@@ -365,6 +370,22 @@ func (t *Tx) BlockDevice(ctx context.Context, id uuid.UUID, reason string) error
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+
+	// Every membership, in the same transaction. BlockHost revokes the
+	// certificates, writes the blocklist entries and advances both epochs, so a
+	// device block reaches the fleet by exactly the path a membership block does.
+	hosts, err := t.DeviceHosts(ctx, id)
+	if err != nil {
+		return err
+	}
+	for _, h := range hosts {
+		if h.State == MembershipSuspended {
+			continue // already blocked; BlockHost is idempotent but this is cheaper
+		}
+		if _, err := t.BlockHost(ctx, h.ID, reason); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -380,6 +401,24 @@ func (t *Tx) UnblockDevice(ctx context.Context, id uuid.UUID) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+
+	// Symmetric with BlockDevice, and no more than symmetric: UnblockHost drops
+	// the blocklist entries and derives the state back from what the membership
+	// actually has. It does NOT un-revoke certificates, so unblocking permits
+	// new ones to be issued rather than restoring the old ones. A device block
+	// is reversible as an authorization and irreversible as a revocation.
+	hosts, err := t.DeviceHosts(ctx, id)
+	if err != nil {
+		return err
+	}
+	for _, h := range hosts {
+		if h.State != MembershipSuspended {
+			continue
+		}
+		if _, err := t.UnblockHost(ctx, h.ID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -346,7 +346,29 @@ func (t *Tx) ListHosts(ctx context.Context, f MembershipFilter) (MembershipPage,
 }
 
 // SetHostState transitions a host. Returns ErrNotFound if it does not exist.
+//
+// Bumps the config epoch when the transition crosses the enrolled|active
+// boundary in either direction, because that is exactly the predicate
+// NetworkTopology, NetworkRoutes and NetworkNames select on — so crossing it
+// changes what every OTHER host in the network renders.
+//
+// Leaving the set was already handled, ad hoc, by DeleteHost. Entering it was
+// not, and nothing noticed: a newly enrolled lighthouse stayed absent from every
+// existing host's static_host_map until that host's next renewal, up to a full
+// cert_ttl. "Add a second lighthouse for redundancy" appeared to succeed and did
+// nothing for a day. See docs/adr/0022-what-a-host-renders-bumps-the-config-epoch.md.
 func (t *Tx) SetHostState(ctx context.Context, id uuid.UUID, state string) error {
+	var networkID uuid.UUID
+	var was string
+	if err := t.tx.QueryRow(ctx,
+		`SELECT network_id, state FROM orbit.membership WHERE id = $1`, id,
+	).Scan(&networkID, &was); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return mapErr(err, "set host state")
+	}
+
 	tag, err := t.tx.Exec(ctx, `UPDATE orbit.membership SET state = $2 WHERE id = $1`, id, state)
 	if err != nil {
 		return mapErr(err, "set host state")
@@ -354,7 +376,22 @@ func (t *Tx) SetHostState(ctx context.Context, id uuid.UUID, state string) error
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+
+	if inTopology(was) != inTopology(state) {
+		if _, err := t.BumpEpoch(ctx, networkID, EpochConfig); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// inTopology reports whether a membership in this state is visible to its peers.
+//
+// The one predicate, named once. NetworkTopology, NetworkRoutes and NetworkNames
+// each spell it as `state IN ('enrolled','active')` in SQL; this is the Go side
+// of the same rule, and SetHostState is the only place that needs to ask.
+func inTopology(state string) bool {
+	return state == MembershipEnrolled || state == MembershipActive
 }
 
 // AgentReport is what an agent tells us after applying a configuration.

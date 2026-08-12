@@ -1,6 +1,6 @@
 # ADR-0034: The gateway data path is tested, not just rendered
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

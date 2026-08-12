@@ -1,6 +1,6 @@
 # ADR-0012: Policy compiles to addresses, not into certificates
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-11
 
 ## Context

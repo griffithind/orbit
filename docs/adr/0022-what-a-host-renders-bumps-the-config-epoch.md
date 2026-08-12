@@ -1,6 +1,6 @@
 # ADR-0022: Anything that changes what a host renders bumps the config epoch
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

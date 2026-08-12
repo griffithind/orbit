@@ -1,6 +1,6 @@
 # ADR-0015: Host state is removed by whoever finds it, not by whoever installed it
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

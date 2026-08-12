@@ -1,6 +1,6 @@
 # ADR-0017: Every platform we tag for is a platform the gates analyse
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

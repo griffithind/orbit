@@ -1,6 +1,6 @@
 # ADR-0016: The exit route fails closed
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

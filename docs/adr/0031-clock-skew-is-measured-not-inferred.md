@@ -1,6 +1,6 @@
 # ADR-0031: Clock skew is measured, not inferred from certificate errors
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

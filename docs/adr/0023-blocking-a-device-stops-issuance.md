@@ -1,6 +1,6 @@
 # ADR-0023: Blocking a device stops issuance to it
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

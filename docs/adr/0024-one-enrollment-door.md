@@ -1,6 +1,6 @@
 # ADR-0024: One enrolment door, and it proves possession
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

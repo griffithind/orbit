@@ -1,6 +1,6 @@
 # ADR-0020: Host-global resources have exactly one owner
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

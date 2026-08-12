@@ -1,6 +1,6 @@
 # ADR-0021: A gateway's inbound reachability is derived from its routes
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

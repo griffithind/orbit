@@ -1,6 +1,6 @@
 # ADR-0028: A gateway is not a router to its own LAN
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-12
 
 ## Context

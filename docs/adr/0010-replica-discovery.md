@@ -1,6 +1,6 @@
 # ADR-0010: Every agent response carries the replica list
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-11
 
 ## Context
