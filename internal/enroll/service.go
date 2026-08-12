@@ -539,6 +539,13 @@ func (s *Service) State(ctx context.Context, membershipID uuid.UUID, knownConfig
 			}
 		}
 
+		// Before the early return, not after: a steady-state poll is exactly the
+		// case this exists for, and putting it below would send the list only to
+		// hosts that were already being sent a whole new generation.
+		if resp.AgentEndpoints, err = s.agentEndpoints(ctx, tx, host.NetworkID); err != nil {
+			return err
+		}
+
 		if knownConfig >= net.ConfigEpoch && knownBlock >= net.BlocklistEpoch {
 			return nil
 		}

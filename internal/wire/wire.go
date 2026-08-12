@@ -86,6 +86,21 @@ type StateResponse struct {
 	ConfigEpoch    int64 `json:"config_epoch"`
 	BlocklistEpoch int64 `json:"blocklist_epoch"`
 
+	// AgentEndpoints are the overlay addresses of the live control-plane
+	// replicas, on EVERY response — not only when something changed, and with no
+	// "unchanged" encoding.
+	//
+	// It rode on enrol and renew alone, which meant a replica added to a running
+	// deployment reached an existing agent only at that agent's next renewal:
+	// a median of half a certificate lifetime, twelve hours at the default. A
+	// replica nobody can reach is not redundancy.
+	//
+	// Unconditional because the alternative is a second thing that can be stale.
+	// This costs a handful of bytes on a poll that is already carrying two
+	// integers, and it means the list an agent holds is never older than its
+	// last successful poll. See docs/adr/0010-replica-discovery.md.
+	AgentEndpoints []string `json:"agent_endpoints,omitempty"`
+
 	// Config, CABundle, and Certificate are present only when the agent's
 	// reported epoch is behind, so a steady-state poll is small.
 	Config      string `json:"config,omitempty"`

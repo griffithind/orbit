@@ -907,6 +907,11 @@ func (l *Loop) poll(ctx context.Context) error {
 			"configEpoch", resp.ConfigEpoch, "blocklistEpoch", resp.BlocklistEpoch)
 		return nil
 	}
+	// Before the quarantine gate and before any early return: the replica list
+	// is how this host reaches a control plane at all, and a host refusing a
+	// generation is exactly a host that may need to reach a different one.
+	l.adoptEndpoints(resp.AgentEndpoints)
+
 	if l.quarantined(resp.ConfigEpoch, resp.BlocklistEpoch) {
 		l.Log.Warn("refusing a quarantined generation",
 			"configEpoch", resp.ConfigEpoch, "until", l.State.QuarantinedUntil)
@@ -1180,6 +1185,8 @@ func (l *Loop) watchOnce(ctx context.Context, hold time.Duration) (watchOutcome,
 	if resp.Config == "" {
 		return watchIdle, nil // hold expired with nothing new
 	}
+	l.adoptEndpoints(resp.AgentEndpoints)
+
 	if l.quarantined(resp.ConfigEpoch, resp.BlocklistEpoch) {
 		l.Log.Warn("refusing a quarantined generation",
 			"configEpoch", resp.ConfigEpoch, "until", l.State.QuarantinedUntil)
