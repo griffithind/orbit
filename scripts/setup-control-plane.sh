@@ -439,7 +439,11 @@ agent API, so it will not answer ICMP by design.
 
 Back up TWO things, and keep them apart. The CA key and the network identity
 key are rows in Postgres, encrypted under the KEK — so a backup is the database
-AND the passphrase, and either alone is worthless:
+AND the passphrase, and either alone is worthless.
+
+(The full backup set, including the device key and the Argon parameter, is one
+table in docs/deployment.md section 7. These are the two that cannot be
+reconstructed from anything.)
 
   docker compose exec -T postgres pg_dump -U postgres orbit | gzip > orbit-db.sql.gz
   cat kek.pass                              # store this somewhere else entirely

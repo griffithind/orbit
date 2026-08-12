@@ -287,6 +287,22 @@ func serve(args []string) error {
 			"One UDP port per network — nebula cannot share one. Omit it for "+
 			"-nebula-port; ports %d-%d are the documented range",
 		DefaultNebulaPort, DefaultNebulaPortMax))
+
+	// -name exists for RESTORE, and nothing else.
+	//
+	// The replica's membership is found by overlay address, and SelfIssue
+	// refuses to take it over when the name differs: "overlay address %s is
+	// already held by host %q". That refusal is right for the case it was
+	// written for — an operator pointing two things at one address — and it
+	// makes a restore onto a new host impossible, because the default name is
+	// derived from the hostname and the new host has a different one.
+	//
+	// So the fix is an override rather than a revert: defaultName staying the
+	// hostname is what closed the two-replica collision ADR-0009 records.
+	// See docs/adr/0027-a-restore-is-a-rehearsed-procedure.md.
+	name := fs.String("name", "", "this replica's membership name; defaults to "+
+		"orbit-control-<hostname>. Set it when RESTORING onto a host with a "+
+		"different hostname, to the name the backup was taken under")
 	_ = fs.Parse(args)
 
 	log := newLogger()
@@ -509,6 +525,7 @@ func serve(args []string) error {
 		// for ListenPort — and the difference is invisible at a struct literal
 		// that simply omits one. See cmd/orbitd/wiring_test.go.
 		mc.AgentPort = *agentPort
+		mc.Name = *name
 		// AgentPort is shared across networks on purpose and ListenPort cannot
 		// be: the agent API listens on each network's own gvisor netstack, so
 		// the same number on two overlays is two independent listeners, while

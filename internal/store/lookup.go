@@ -171,6 +171,31 @@ func (s *Store) ResolveAgentHost(ctx context.Context, networkID uuid.UUID, addr 
 	return &id, nil
 }
 
+// Ready is the readiness probe's query, and it reads an orbit table.
+//
+// count(*) over orbit.network rather than a bare SELECT 1: a fresh deployment
+// legitimately has zero networks, so the ROW COUNT is not the signal — the
+// signal is that the table exists and this role may read it.
+//
+// The probe used to run `func(context.Context, *store.Tx) error { return nil }`
+// inside a READ ONLY transaction, which touches no orbit table at all. It
+// returned 200 against a database with no orbit schema, against one whose
+// grants had been revoked, against a read-only replica, and — the one that
+// matters — against a Postgres that is out of disk, where reads succeed and
+// every write fails, so there is no enrolment, no renewal, no BumpEpoch and
+// therefore NO REVOCATION DELIVERY.
+//
+// The comment above it said "the only honest test of 'can I serve a request' is
+// to do what serving a request does". This is that test.
+// See docs/adr/0027-a-restore-is-a-rehearsed-procedure.md.
+func (t *Tx) Ready(ctx context.Context) error {
+	var n int
+	if err := t.tx.QueryRow(ctx, `SELECT count(*) FROM orbit.network`).Scan(&n); err != nil {
+		return mapErr(err, "readiness")
+	}
+	return nil
+}
+
 // ListNetworkIDs enumerates every network, for the maintenance sweep.
 func (s *Store) ListNetworkIDs(ctx context.Context) ([]uuid.UUID, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id FROM orbit.network ORDER BY id`)

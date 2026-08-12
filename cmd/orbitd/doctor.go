@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -14,7 +15,9 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/griffithind/orbit/internal/db"
+	"github.com/griffithind/orbit/internal/secrets"
 	"github.com/griffithind/orbit/internal/store"
+	"github.com/griffithind/orbit/internal/vault"
 	"github.com/griffithind/orbit/internal/web"
 )
 
@@ -104,7 +107,21 @@ func doctorCmd(args []string) error {
 			advice: "pass --dsn or set ORBIT_DSN"})
 	} else {
 		dbCtx, cancel := context.WithTimeout(ctx, *timeout)
-		checks = append(checks, databaseChecks(dbCtx, *dsn)...)
+		dbc := databaseChecks(dbCtx, *dsn)
+		checks = append(checks, dbc...)
+
+		// The vault, and only when the schema agrees — deriving a KEK against a
+		// database that has no orbit.kek yet reports a passphrase problem for a
+		// bootstrap problem.
+		//
+		// This is the check the header above has always claimed to run: "serve
+		// validates as it goes: the DSN when it opens the pool, THE KEK WHEN IT
+		// UNSEALS THE VAULT". It was the one failure that stops the process
+		// from starting and the one failure doctor could not see, which made it
+		// exactly the check worth having. ADR-0007 commitment 9.
+		if allOK(dbc) {
+			checks = append(checks, vaultCheck(dbCtx, *dsn))
+		}
 		cancel()
 	}
 
@@ -202,4 +219,43 @@ func databaseChecks(ctx context.Context, dsn string) []check {
 			advice: "serve refuses to start against a schema it disagrees with"})
 	}
 	return out
+}
+
+func allOK(cs []check) bool {
+	for _, c := range cs {
+		if !c.ok {
+			return false
+		}
+	}
+	return true
+}
+
+// vaultCheck derives the KEK and verifies it against the stored verifier.
+//
+// The same call serve makes, in the same order — ConfigureKDF first, because
+// the Argon parameters are raise-only and a deployment that raised
+// ORBIT_KEK_ARGON_MEMORY_MIB derives a DIFFERENT key at the default. Skipping
+// that step is how a correct passphrase reports itself as a wrong one, which
+// per ADR-0007 is the unrecoverable event.
+func vaultCheck(ctx context.Context, dsn string) check {
+	if err := secrets.ConfigureKDF(); err != nil {
+		return check{name: "vault", detail: err.Error(),
+			advice: "ORBIT_KEK_ARGON_MEMORY_MIB is not a number, or is below the floor"}
+	}
+	st, err := store.Open(ctx, dsn)
+	if err != nil {
+		return check{name: "vault", detail: err.Error()}
+	}
+	defer st.Close()
+
+	if _, err := vault.Open(ctx, st); err != nil {
+		if errors.Is(err, store.ErrNoKEK) {
+			return check{name: "vault", detail: "no key encryption key",
+				advice: "this database has never been bootstrapped; run `orbitd bootstrap`"}
+		}
+		return check{name: "vault", detail: err.Error(),
+			advice: "the passphrase is wrong, or ORBIT_KEK_ARGON_MEMORY_MIB differs " +
+				"from the value it was bootstrapped with — the two are indistinguishable here"}
+	}
+	return check{name: "vault", ok: true, detail: "passphrase verified"}
 }

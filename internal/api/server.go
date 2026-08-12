@@ -718,7 +718,13 @@ func (s *Server) probeHealth(ctx context.Context) healthSnapshot {
 		// connections to a Postgres that has been promoted away, is out of
 		// disk, or is refusing new transactions; the only honest test of "can I
 		// serve a request" is to do what serving a request does.
-		err := s.store.Read(probeCtx, func(context.Context, *store.Tx) error { return nil })
+		//
+		// So it READS A ROW. This callback used to be `return nil`, which made
+		// the transaction a bare BEGIN READ ONLY; COMMIT — true against a
+		// database with no orbit schema at all. See store.Tx.Ready.
+		err := s.store.Read(probeCtx, func(ctx context.Context, tx *store.Tx) error {
+			return tx.Ready(ctx)
+		})
 		snap.database = err == nil
 		if err != nil {
 			s.log.Warn("readiness probe could not reach the database", "error", err)

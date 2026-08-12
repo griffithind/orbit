@@ -164,4 +164,8 @@ volumes:
   # certificate. Losing the passphrase destroys the network as surely as losing
   # the database — nebula has no intermediate CAs, so every host re-enrolls by
   # hand. See docs/key-custody.md.
+  #
+  # These are the two that cannot be reconstructed. The FULL backup set — which
+  # also has the control plane's device key and ORBIT_KEK_ARGON_MEMORY_MIB if
+  # you raised it — is one table in docs/deployment.md section 7.
   pgdata:

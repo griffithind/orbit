@@ -685,6 +685,19 @@ Three things, with very different consequences.
 | **CA key** | Cannot issue or renew anything | Recoverable *if you notice in time* — see below |
 | **KEK passphrase** | Every CA key and identity key becomes unreadable | **Nothing.** The database holds only ciphertext. Escrow it — see §5 |
 | **Control plane device key** | The control plane's own membership no longer names a device it holds | Restore, or delete that membership and let it rejoin — see below |
+| **`ORBIT_KEK_ARGON_MEMORY_MIB`**, if raised | The KEK derives to a different value | **Nothing distinguishes this from a wrong passphrase.** The parameter is not stored beside the salt; record it with the passphrase |
+
+**This table is the backup set.** `scripts/setup-control-plane.sh` and
+`deploy/compose.yml` each say "two things" and mean the two that cannot be
+reconstructed; they point here for the whole list. Two more facts belong to the
+*restore*, not the backup, and are covered in §10:
+
+- The replica's membership is found by overlay address and refused if the name
+  differs, so a restore onto a host with a **different hostname** needs
+  `orbitd serve -name orbit-control-<old-hostname>`.
+- `-lighthouse` seeds public addresses only at creation, so a restore onto a
+  **different public IP** keeps advertising the old one to the whole fleet.
+  Fix it with `orbit device set-addrs` before agents need to find it.
 
 ```bash
 # Nightly is enough; certificates are re-issuable, the membership inventory is not.
