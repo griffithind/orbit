@@ -34,7 +34,6 @@ import (
 // configuration changes, which is rarely.
 // nftFamily is inet rather than ip so one table covers v4 and v6, which matters
 // the day a network is dual stack and nobody remembers there were two tables.
-const nftFamily = "inet"
 
 type nftConfigurer struct {
 	log logger
@@ -128,38 +127,8 @@ func (n *nftConfigurer) Apply(h HostState) error {
 		n.tunDev = h.TunDev
 	}
 
-	// One transaction. `destroy` rather than `delete` so a first run, where the
-	// table does not exist, is not an error — and so the whole thing is
-	// idempotent without a probe first.
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "destroy table %s %s\n", nftFamily, TableName)
-	fmt.Fprintf(&b, "table %s %s {\n", nftFamily, TableName)
-
-	if len(h.Masquerade) > 0 {
-		// priority srcnat (100) is where NAT belongs in the postrouting hook;
-		// anything else either runs before the routing decision is final or
-		// after something else has already rewritten the packet.
-		fmt.Fprintf(&b, "  chain postrouting {\n")
-		fmt.Fprintf(&b, "    type nat hook postrouting priority srcnat; policy accept;\n")
-		for _, p := range h.Masquerade {
-			fam := "ip"
-			if p.Addr().Is6() {
-				fam = "ip6"
-			}
-			// Scoped to traffic that ARRIVED on the overlay. Without iifname a
-			// gateway would masquerade its own LAN's traffic to the same
-			// destination, which is somebody else's network silently changing
-			// behaviour because Orbit was installed.
-			fmt.Fprintf(&b, "    iifname %q %s daddr %s counter masquerade comment \"orbit route %s\"\n",
-				h.TunDev, fam, p.String(), p.String())
-		}
-		fmt.Fprintf(&b, "  }\n")
-	}
-	fmt.Fprintf(&b, "}\n")
-
-	return n.run(b.String())
+	return n.run(nftScript(h))
 }
-
 func (n *nftConfigurer) Remove() error {
 	if err := removePolicyRoute(); err != nil {
 		return err

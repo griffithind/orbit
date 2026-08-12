@@ -41,8 +41,9 @@ decision is in force; it says nothing about whether the code has caught up.
 that landed it says which part is not — 0016 has its fail-closed rule and its
 address-family check but not the blackhole or the escape-hatch bootstrap, 0027
 has bring-up but no rehearsed restore, 0031 measures skew but does not report
-it, 0032 has the config half and not the endpoint cache, 0034 has the
-masquerade default and not the MSS clamp.
+it, 0032 has the config half and not the endpoint cache, 0034 has the masquerade default,
+the MSS clamp and ruleset assertions, but not the netns forwarding test that
+would catch a rule that is present and wrong.
 
 0011 and 0012 record decisions the architecture already embodied, so there was
 nothing to build. 0018 is Windows, which the analysis behind it puts at six to
