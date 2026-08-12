@@ -17,6 +17,7 @@ import (
 	"github.com/slackhq/nebula/cert"
 
 	"github.com/griffithind/orbit/internal/ca"
+	"github.com/griffithind/orbit/internal/device"
 	"github.com/griffithind/orbit/internal/nebulacfg"
 	"github.com/griffithind/orbit/internal/policy"
 	"github.com/griffithind/orbit/internal/store"
@@ -247,6 +248,16 @@ func (s *Service) Enroll(ctx context.Context, req wire.EnrollRequest, from netip
 		}
 		if host.State == store.MembershipSuspended {
 			return ErrHostBlocked
+		}
+
+		// Proof of possession, which this door used to skip entirely.
+		//
+		// A code was a bearer credential: whoever held it got a certificate
+		// issued over a public key THEY chose, for a membership the claim path
+		// protects with exactly this check. Two doors to the same result and
+		// only one of them locked. See ADR-0024.
+		if err := s.verifyEnrollSignature(ctx, tx, host, req); err != nil {
+			return err
 		}
 
 		out, err := s.issueAndRender(ctx, tx, host, req.PublicKey, req.Curve)
@@ -1487,4 +1498,53 @@ func certStale(issuedAt time.Time, changes ...*time.Time) bool {
 		}
 	}
 	return false
+}
+
+// verifyEnrollSignature checks that the caller holds the device key, and
+// records the device when the membership does not name one yet.
+//
+// WHERE THE KEY COMES FROM is the whole security question. When the membership
+// already names a device, it must be that device's STORED key — verifying
+// against a caller-supplied one would make the check vacuous, which is the
+// reasoning device.VerifyClaim's doc gives. When it names none, the request's
+// key is correct: the signature proves possession of the private half, the code
+// authorises the binding, and the device is recorded so that
+// `orbit device block` can reach this membership afterwards (ADR-0023).
+func (s *Service) verifyEnrollSignature(
+	ctx context.Context, tx *store.Tx, host *store.Membership, req wire.EnrollRequest,
+) error {
+	sig, err := base64.StdEncoding.DecodeString(req.Signature)
+	if err != nil || len(sig) == 0 {
+		return fmt.Errorf("%w: enrollment requires a device signature", ErrInvalidCredential)
+	}
+	at := time.Unix(req.SignedAt, 0)
+	hash := device.HashCredential(req.Credential)
+
+	if host.DeviceID != nil {
+		dev, err := tx.GetDevice(ctx, *host.DeviceID)
+		if err != nil {
+			return err
+		}
+		if dev.BlockedAt != nil {
+			return ErrHostBlocked
+		}
+		if err := device.VerifyEnroll(dev.PublicKey, hash, req.PublicKey, at, s.clock(), sig); err != nil {
+			return fmt.Errorf("%w: %s", ErrInvalidCredential, err)
+		}
+		return nil
+	}
+
+	spki, err := base64.StdEncoding.DecodeString(req.DevicePublicKey)
+	if err != nil || len(spki) == 0 {
+		return fmt.Errorf("%w: enrollment requires a device public key", ErrInvalidCredential)
+	}
+	if err := device.VerifyEnroll(spki, hash, req.PublicKey, at, s.clock(), sig); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidCredential, err)
+	}
+
+	dev := &store.Device{PublicKey: spki, KeyFingerprint: device.Fingerprint(spki)}
+	if err := tx.SeeDevice(ctx, dev); err != nil {
+		return err
+	}
+	return tx.AttachHostToDevice(ctx, host.ID, dev.ID)
 }

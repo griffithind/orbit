@@ -261,8 +261,21 @@ func TestUpFollowsTheRealListener(t *testing.T) {
 		cancel()
 		t.Fatalf("listener never established: %v", err)
 	}
-	if !n.Up() {
-		t.Error("LISTEN is established and Up says push is down")
+	// Polled, not asserted once, and the reason is the asymmetry between the two
+	// signals: `ready` is closed exactly once (readyOnce) while `up` FLAPS. If
+	// the listener establishes and then drops — a reset connection, a pool
+	// eviction, Postgres terminating the backend, connection exhaustion while
+	// the rest of the suite runs in parallel — listen returns, its defer reports
+	// down, and Run sleeps for the backoff. In that window Ready() returns
+	// immediately, because it already closed, and Up() is correctly false.
+	//
+	// So the instantaneous pairing this used to assert holds only on the first
+	// successful listen and cannot hold across a reconnect. The property worth
+	// pinning is that Up BECOMES true, which is what "follows the real listener"
+	// means. Reported as flaky under -race, where the wider scheduling window
+	// makes the drop-and-retry far easier to land in.
+	if !eventually(2*time.Second, n.Up) {
+		t.Error("LISTEN is established and Up never said push was up")
 	}
 
 	// The regression this pins: Run returns on a cancelled context before it
@@ -311,4 +324,18 @@ func TestReadyAndUpAnswerDifferentQuestions(t *testing.T) {
 	if n.Up() {
 		t.Error("Up agreed with Ready after shutdown; then Up reports nothing new")
 	}
+}
+
+// eventually polls a condition, for the properties of this package that are
+// reached rather than held: a notifier reconnects, so its reported state is
+// eventually consistent with the listener and never instantaneously so.
+func eventually(within time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return cond()
 }
