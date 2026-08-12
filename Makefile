@@ -66,10 +66,27 @@ test-v: ## Run all tests verbosely
 # The host-state tests need root, a real kernel and a network namespace they can
 # ruin, so they skip everywhere else. What they check was assumed correct once
 # and was not, which is why they exist rather than a comment claiming it works.
+#
+# THE PACKAGE MATTERS, and it was wrong. This ran ./internal/agent/ while the
+# tests live in ./internal/agent/hostcfg/ — the agent split moved them and this
+# line did not follow. `go test` with a -run that matches nothing prints "no
+# tests to run", exits 0, and reports ok: a gate that had been green while
+# testing nothing.
+#
+# NO -run FILTER, for the same reason. A regex listing test names is a second
+# place that has to be kept in sync with the tests, and it had already drifted
+# once — adding the forwarding tests, three of the four did not match it. The
+# whole package runs; everything in it that does not need root skips itself
+# everywhere else, and in here nothing should skip at all, which the greps below
+# now check. A gate that cannot report green on zero tests is the point.
 .PHONY: test-netns
 test-netns: ## Run the host-state tests on a real Linux kernel, in Docker
 	docker run --rm --privileged -v "$(PWD)":/src -w /src golang:1.26-alpine \
-		sh -c 'apk add -q iproute2 nftables && go test ./internal/agent/ -count=1 -v -run "TestPolicyRoute|TestHostState"'
+		sh -c 'apk add -q iproute2 nftables iputils && \
+		 go test ./internal/agent/hostcfg/ -count=1 -v 2>&1 | tee /tmp/netns.out; \
+		 grep -q "no tests to run" /tmp/netns.out && { echo "ran nothing"; exit 1; }; \
+		 grep -q "SKIP" /tmp/netns.out && { echo "skipped inside the container"; exit 1; }; \
+		 grep -qE "^(ok|--- PASS)" /tmp/netns.out'
 
 .PHONY: check
 check: ## gofmt + vet + test

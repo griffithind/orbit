@@ -159,6 +159,13 @@ everything.
 
 ### Fixed
 
+- **`make test-netns` ran zero tests.** It pointed at `./internal/agent/` while
+  the tests it names live in `./internal/agent/hostcfg/` — the agent split moved
+  them and the target did not follow. `go test` with a `-run` matching nothing
+  prints "no tests to run", exits 0 and reports `ok`, so the gate had been green
+  while testing nothing. It now runs the whole package with no `-run` filter,
+  and fails if anything skips or if nothing ran.
+
 - **The exit-node escape hatch could not resolve its own way out.** It marks
   connections to the enrolled public endpoint so the recovery path stays outside
   the tunnel — but `Dialer.Control` runs *after* Go has resolved the address,

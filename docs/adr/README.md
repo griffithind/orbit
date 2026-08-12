@@ -42,9 +42,7 @@ that landed it says which part is not — 0027
 has bring-up but no rehearsed restore, 0031 measures skew but does not report
 it, 0030 has concurrent upstreams, TCP escalation, re-assertion, EDNS0 and
 truncation but no cache, which it excludes deliberately,
-0032 has the config half and not the endpoint cache, 0034 has the masquerade default,
-the MSS clamp and ruleset assertions, but not the netns forwarding test that
-would catch a rule that is present and wrong.
+0032 has the config half; its endpoint cache is amended as unbuildable, 
 
 0011 and 0012 record decisions the architecture already embodied, so there was
 nothing to build. 0018 is Windows, which the analysis behind it puts at six to
@@ -87,4 +85,4 @@ eight engineer-weeks before signing.
 | [0031](0031-clock-skew-is-measured-not-inferred.md) | Clock skew is measured, not inferred | Accepted | Implemented |
 | [0032](0032-discovery-survives-the-lighthouse.md) | Discovery survives the lighthouse | Accepted | Partial |
 | [0033](0033-overrides-cannot-reach-what-orbit-owns.md) | Overrides cannot reach what Orbit owns | Accepted | Implemented |
-| [0034](0034-the-gateway-data-path-is-tested.md) | The gateway data path is tested, not just rendered | Accepted | Partial |
+| [0034](0034-the-gateway-data-path-is-tested.md) | The gateway data path is tested, not just rendered | Accepted | Implemented |
