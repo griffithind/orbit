@@ -36,6 +36,7 @@ type dbCollector struct {
 	certMinRemain    *prometheus.Desc
 	blocklistSize    *prometheus.Desc
 	dataPlaneDown    *prometheus.Desc
+	clockSkewed      *prometheus.Desc
 	caMinRemain      *prometheus.Desc
 }
 
@@ -75,6 +76,8 @@ func (m *Metrics) RegisterDB(st *store.Store, log *slog.Logger) error {
 			"Fingerprints currently distributed in host configuration.", labels, nil),
 		dataPlaneDown: prometheus.NewDesc("orbit_hosts_data_plane_down",
 			"hosts reporting that nebula is not running, which every other gauge counts as converged", []string{"network"}, nil),
+		clockSkewed: prometheus.NewDesc("orbit_hosts_clock_skewed",
+			"hosts whose clock is more than a minute from the control plane's; nebula validates certificate windows against wall time with no leeway, so these reject their own new certificates and the failure names something else", []string{"network"}, nil),
 		caMinRemain: prometheus.NewDesc("orbit_ca_min_remaining_seconds",
 			"seconds until the active signing CA expires; at zero the network stops enrolling and renewing", []string{"network"}, nil),
 	}
@@ -94,6 +97,7 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.certMinRemain
 	ch <- c.blocklistSize
 	ch <- c.dataPlaneDown
+	ch <- c.clockSkewed
 	ch <- c.caMinRemain
 }
 
@@ -132,6 +136,7 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		g(c.certMinRemain, s.MinCertRemainingSeconds)
 		g(c.blocklistSize, float64(s.BlocklistSize))
 		g(c.dataPlaneDown, float64(s.DataPlaneDown))
+		g(c.clockSkewed, float64(s.ClockSkewed))
 		g(c.caMinRemain, s.MinCARemainingSeconds)
 	}
 }

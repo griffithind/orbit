@@ -51,6 +51,10 @@ type NetworkStats struct {
 	// counts them as converged — which is exactly why this one exists.
 	DataPlaneDown int
 
+	// ClockSkewed counts machines whose clock is further from the control
+	// plane's than issuance assumes. See ADR-0031.
+	ClockSkewed int
+
 	// MinCARemainingSeconds is the active signer closest to expiry. When it
 	// reaches zero, enrolment and renewal stop for the whole network at once.
 	// Negative if one has already expired.
@@ -104,6 +108,18 @@ func (t *Tx) FleetStats(ctx context.Context) ([]NetworkStats, error) {
 		       (SELECT count(*) FROM orbit.membership h
 		         WHERE h.network_id = n.id AND h.data_plane_down
 		           AND h.state IN ('enrolled', 'active')),
+		       -- Machines whose clock disagrees with the control plane by more
+		       -- than issuance assumes. Nebula validates certificate windows
+		       -- against raw wall time with zero leeway, so such a host rejects
+		       -- its own brand-new certificate and the failure names something
+		       -- else entirely. Counted rather than reported per host: a gauge
+		       -- with a label per machine is how a metrics endpoint becomes the
+		       -- thing that falls over (ADR-0008).
+		       (SELECT count(DISTINCT d.id)
+		          FROM orbit.device d
+		          JOIN orbit.membership h ON h.device_id = d.id
+		         WHERE h.network_id = n.id AND h.state IN ('enrolled', 'active')
+		           AND abs(coalesce(d.clock_skew_seconds, 0)) > 60),
 		       -- The signer's own expiry. An expired active CA is a fleet-wide
 		       -- enrolment and renewal outage, and had only a log line.
 		       COALESCE((SELECT min(extract(epoch FROM ca.not_after - now()))
@@ -122,7 +138,7 @@ func (t *Tx) FleetStats(ctx context.Context) ([]NetworkStats, error) {
 		if err := rows.Scan(&s.NetworkID, &s.Name, &s.ConfigEpoch, &s.BlocklistEpoch,
 			&s.MembershipsTotal, &s.ConfigApplied, &s.BlockApplied,
 			&s.LagSeconds, &s.CertsExpiringSoon, &s.MinCertRemainingSeconds,
-			&s.BlocklistSize, &s.DataPlaneDown, &s.MinCARemainingSeconds); err != nil {
+			&s.BlocklistSize, &s.DataPlaneDown, &s.ClockSkewed, &s.MinCARemainingSeconds); err != nil {
 			return nil, mapErr(err, "scan fleet stats")
 		}
 		out = append(out, s)

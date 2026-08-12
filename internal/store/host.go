@@ -401,6 +401,10 @@ type AgentReport struct {
 	NebulaVersion  string
 	AgentVersion   string
 
+	// ClockSkewSeconds is the agent's own measurement, recorded on the DEVICE
+	// because a clock belongs to a machine. See ADR-0031.
+	ClockSkewSeconds *float64
+
 	// RevertedFromConfigEpoch and RevertedFromBlocklistEpoch name the generation
 	// the host was running before its guard reverted it. They are the only way a
 	// recorded epoch may move backwards; see RecordAgentReport.
@@ -1044,10 +1048,15 @@ func (t *Tx) recordReportOnDevice(ctx context.Context, membershipID uuid.UUID, r
 		UPDATE orbit.device d
 		   SET nebula_version = coalesce(nullif($2, ''), d.nebula_version),
 		       agent_version  = coalesce(nullif($3, ''), d.agent_version),
+		       -- Coalesced for the same reason as the versions above: an agent
+		       -- that has not measured yet sends nothing, and blanking a known
+		       -- skew because one report could not confirm it would make the
+		       -- record get worse over time.
+		       clock_skew_seconds = coalesce($4, d.clock_skew_seconds),
 		       last_seen_at   = now()
 		  FROM orbit.membership h
 		 WHERE h.id = $1 AND d.id = h.device_id`,
-		membershipID, r.NebulaVersion, r.AgentVersion)
+		membershipID, r.NebulaVersion, r.AgentVersion, r.ClockSkewSeconds)
 	return mapErr(err, "record agent report on device")
 }
 

@@ -188,6 +188,16 @@ type ReportRequest struct {
 	NebulaVersion  string `json:"nebula_version,omitempty"`
 	AgentVersion   string `json:"agent_version,omitempty"`
 
+	// ClockSkewSeconds is how far this machine's clock is from the control
+	// plane's, positive meaning ahead, measured from the Date header the agent
+	// already receives on every response.
+	//
+	// Reported so the question "which machines have bad clocks" has a fleet-wide
+	// answer. It is not corrected for anywhere: the enforcement point is nebula,
+	// using wall time, and a control plane that silently compensated would hide
+	// a fault the data plane will not. See ADR-0031.
+	ClockSkewSeconds float64 `json:"clock_skew_seconds,omitempty"`
+
 	// Facts and Posture describe the MACHINE, not this membership.
 	//
 	// Sent on the per-network report because that is the channel that exists,

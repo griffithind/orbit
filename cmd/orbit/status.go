@@ -126,6 +126,25 @@ func printNetwork(r renderer, n status.NetworkStatus) {
 	}
 	field("last poll", poll)
 
+	// Only when it is wrong. A clock within tolerance is the normal state and
+	// printing it every time would be a line nobody reads — but a clock that is
+	// out breaks certificate validation and reports itself as a config problem,
+	// so it belongs beside the poll rather than in a command somebody runs after
+	// already suspecting it. See ADR-0031.
+	if n.ClockSkewed {
+		dir := "ahead of"
+		if n.ClockSkew < 0 {
+			dir = "behind"
+		}
+		abs := n.ClockSkew
+		if abs < 0 {
+			abs = -abs
+		}
+		field("clock", r.ansi("31", fmt.Sprintf(
+			"%s %s the control plane — certificates will be refused and it will "+
+				"look like a certificate problem; fix NTP", abs, dir)))
+	}
+
 	// What the control plane told this machine to do to itself. Printed only
 	// when it was told something, so an ordinary member's status is unchanged.
 	//

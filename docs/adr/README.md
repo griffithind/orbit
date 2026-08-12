@@ -84,7 +84,7 @@ eight engineer-weeks before signing.
 | [0028](0028-a-gateway-is-not-a-router-to-its-own-lan.md) | A gateway is not a router to its own LAN | Accepted | Not started |
 | [0029](0029-the-resolver-is-authoritative-for-its-own-domain.md) | The resolver is authoritative for its own domain | Accepted | Implemented |
 | [0030](0030-the-forwarder-is-a-real-forwarder.md) | The forwarder is a real forwarder | Accepted | Partial |
-| [0031](0031-clock-skew-is-measured-not-inferred.md) | Clock skew is measured, not inferred | Accepted | Partial |
+| [0031](0031-clock-skew-is-measured-not-inferred.md) | Clock skew is measured, not inferred | Accepted | Implemented |
 | [0032](0032-discovery-survives-the-lighthouse.md) | Discovery survives the lighthouse | Accepted | Partial |
 | [0033](0033-overrides-cannot-reach-what-orbit-owns.md) | Overrides cannot reach what Orbit owns | Accepted | Implemented |
 | [0034](0034-the-gateway-data-path-is-tested.md) | The gateway data path is tested, not just rendered | Accepted | Partial |

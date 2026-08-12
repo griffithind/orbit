@@ -99,6 +99,18 @@ type NetworkStatus struct {
 	UnconfirmedSince   time.Time `json:"unconfirmed_since,omitempty"`
 	QuarantinedEpoch   int64     `json:"quarantined_config_epoch,omitempty"`
 
+	// ClockSkew is how far this machine's clock is from the control plane's,
+	// measured from the Date header on every response. Positive means ahead.
+	//
+	// Reported rather than only logged, because the failure it causes names
+	// something else entirely: nebula validates certificate windows against raw
+	// wall time with zero leeway, so a machine more than a minute slow rejects
+	// its own brand-new certificate and the apply fails as though the config
+	// were bad. `orbit netcheck` has always been able to measure this; it is a
+	// command somebody runs AFTER suspecting the thing it detects. See ADR-0031.
+	ClockSkew   time.Duration `json:"clock_skew,omitempty"`
+	ClockSkewed bool          `json:"clock_skewed,omitempty"`
+
 	// Host is what the control plane told this machine to do to itself:
 	// routes, forwarding, NAT and DNS. Nil when it was told nothing, so an
 	// ordinary member's status is what it always was.

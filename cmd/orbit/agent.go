@@ -659,6 +659,10 @@ func (n *networkLoop) status(ctx context.Context) status.NetworkStatus {
 	if lastErr != nil {
 		out.LastPollError = lastErr.Error()
 	}
+	if skew, ok := n.loop.ClockSkew(); ok {
+		out.ClockSkew = skew.Round(time.Second)
+		out.ClockSkewed = skew > agent.MaxSkew || skew < -agent.MaxSkew
+	}
 
 	if st, err := agent.ReadState(layout.Dir); err == nil {
 		out.MembershipID = st.MembershipID

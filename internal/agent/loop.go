@@ -718,6 +718,15 @@ func (l *Loop) refreshBaseAddrs() {
 	l.State.BaseAddrs = addrs
 }
 
+// ClockSkew is the last measured difference from the control plane's clock, for
+// the status socket. See checkClock.
+func (l *Loop) ClockSkew() (time.Duration, bool) {
+	if l.Client == nil {
+		return 0, false
+	}
+	return l.Client.Skew()
+}
+
 // checkClock names a wrong clock, once, instead of letting it arrive as a
 // certificate error.
 //
@@ -1157,7 +1166,22 @@ func (l *Loop) baseReportRequest() wire.ReportRequest {
 		// host that is merely slow are the same observation — an applied epoch
 		// that is behind — and an operator needs opposite responses to them.
 		QuarantinedConfigEpoch: l.quarantinedEpoch(),
+		ClockSkewSeconds:       l.skewSeconds(),
 	}
+}
+
+// skewSeconds is the measured clock difference for the report, or zero when
+// nothing has been measured yet.
+//
+// Zero doubles as "no measurement", which is honest here: a clock that agrees
+// with the control plane to within a second is indistinguishable from one that
+// has not been checked, and both mean there is nothing to act on.
+func (l *Loop) skewSeconds() float64 {
+	skew, ok := l.ClockSkew()
+	if !ok {
+		return 0
+	}
+	return skew.Seconds()
 }
 
 // retryPendingRevert re-sends a revert report the control plane never received.

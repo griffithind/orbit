@@ -530,6 +530,7 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 			RevertedFromConfigEpoch:    req.RevertedFromConfigEpoch,
 			RevertedFromBlocklistEpoch: req.RevertedFromBlocklistEpoch,
 			QuarantinedConfigEpoch:     req.QuarantinedConfigEpoch,
+			ClockSkewSeconds:           skewPtr(req.ClockSkewSeconds),
 		})
 	})
 	if err != nil {
@@ -877,4 +878,17 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func hashToken(token string) []byte {
 	sum := sha256.Sum256([]byte(token))
 	return sum[:]
+}
+
+// skewPtr turns a reported skew into a nullable column value.
+//
+// nil for zero, so an agent that has not measured yet does not overwrite a
+// known reading with "fine". The store coalesces on nil for the same reason it
+// does for the version fields: a record that gets worse over time is worse than
+// one that is occasionally stale.
+func skewPtr(seconds float64) *float64 {
+	if seconds == 0 {
+		return nil
+	}
+	return &seconds
 }

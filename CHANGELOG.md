@@ -327,6 +327,15 @@ everything.
 
 ### Added
 
+- **Clock skew is measured, reported and alertable.** The agent compares its
+  clock to the control plane's on every poll — the `Date` header was already
+  there — warns on a transition, shows it in `orbit status`, and reports it so
+  `orbit_hosts_clock_skewed` can answer "which machines have bad clocks"
+  fleet-wide. Nebula validates certificate windows against wall time with no
+  leeway, so a machine a minute slow rejects its own brand-new certificate and
+  the failure reads as a bad configuration. Counted rather than labelled per
+  host, per ADR-0008's rule on cardinality. See ADR-0031.
+
 - **Four metrics that close failures nothing measured**:
   `orbit_hosts_data_plane_down` (a host whose agent is healthy and whose nebula
   is not — it polls, reports an applied epoch, and every other gauge counted it
