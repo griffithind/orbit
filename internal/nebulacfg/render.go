@@ -622,6 +622,7 @@ func Render(in Input) ([]byte, error) {
 	if in.Policy != nil {
 		fw = FirewallFromPolicy(*in.Policy)
 	}
+	fw = widenForServedRoutes(fw, in.Serves)
 
 	shm := staticHostMap{}
 	lhHosts := []string{}
@@ -891,6 +892,53 @@ func splitDefault(p netip.Prefix) []string {
 		return []string{"0.0.0.0/1", "128.0.0.0/1"}
 	}
 	return []string{"::/1", "8000::/1"}
+}
+
+// widenForServedRoutes makes an omitted local_cidr mean what it reads as.
+//
+// Nebula's firewallLocalCIDR.addRule (firewall.go:893): an empty local_cidr is
+// "any address" ONLY while the host's certificate carries no unsafe networks.
+// Once a host becomes a gateway, Orbit puts its routes into that certificate
+// (enroll/service.go:660) and every inbound rule without an explicit local_cidr
+// silently narrows to the host's own overlay addresses — so forwarded traffic
+// is dropped by nebula before it reaches the tun.
+//
+// The cruel part is the timing: the narrowing arrives with the NEXT certificate,
+// minutes to hours after `orbit route add`, so the cause and the symptom are far
+// apart and the symptom looks like a certificate problem.
+//
+// So each such rule is DUPLICATED, once per served prefix, with local_cidr set.
+// The original is kept: nebula narrows it to the host's own addresses, which is
+// still wanted. The result is that an omitted local_cidr covers "wherever this
+// host answers", which is what a reader assumes it means.
+//
+// The policy compiler already did this for selectors naming a routed subnet
+// (policy/compile.go:225). Roles — the DEFAULT firewall source — did not, and a
+// role's rules are free-form JSON where LocalCIDR is optional and unchecked.
+// See docs/adr/0021-gateway-reachability-is-derived-from-routes.md.
+func widenForServedRoutes(fw *Firewall, serves []Served) *Firewall {
+	if fw == nil || len(serves) == 0 {
+		return fw
+	}
+	// Inbound only. Outbound local_cidr matches this host's own source address,
+	// which forwarding does not change.
+	var extra []Rule
+	for _, r := range fw.Inbound {
+		if r.LocalCIDR != "" {
+			continue // the author said where this applies; do not second-guess it
+		}
+		for _, sv := range serves {
+			widened := r
+			widened.LocalCIDR = sv.Prefix.String()
+			extra = append(extra, widened)
+		}
+	}
+	if len(extra) == 0 {
+		return fw
+	}
+	out := *fw
+	out.Inbound = append(append([]Rule{}, fw.Inbound...), extra...)
+	return &out
 }
 
 // hasDefault reports whether any of these routes is a default route.

@@ -140,8 +140,17 @@ type Query struct {
 	// rules match with host:, cidr: and groups:.
 	PeerAddr netip.Addr
 
-	// LocalAddr is this end's own overlay address, which local_cidr matches.
+	// LocalAddr is the address on THIS side that the traffic is for, which
+	// local_cidr matches. Usually this host's own overlay address; for traffic a
+	// gateway forwards, an address inside one of LocalUnsafeNetworks.
 	LocalAddr netip.Addr
+
+	// LocalNetworks and LocalUnsafeNetworks come from this host's own
+	// certificate, and together they decide what an OMITTED local_cidr means —
+	// "any address" while the host routes nothing, "my own addresses only" once
+	// it routes something. See localCIDRMatches.
+	LocalNetworks       []netip.Prefix
+	LocalUnsafeNetworks []netip.Prefix
 
 	// Proto is a Proto* constant, and Port the DESTINATION port in
 	// both directions (nebula firewall/packet.go). PortAny asks the
@@ -276,7 +285,7 @@ func judge(r Rule, q Query) (Outcome, string) {
 			return Misses, "issuing CA"
 		}
 	}
-	if !localCIDRMatches(r.LocalCIDR, q.LocalAddr) {
+	if !localCIDRMatches(r.LocalCIDR, q.LocalAddr, q.LocalNetworks, q.LocalUnsafeNetworks) {
 		return Misses, "local_cidr"
 	}
 	return selectorMatches(r, q)
@@ -318,12 +327,36 @@ func portMatches(r Rule, want int32) bool {
 	return want >= r.StartPort && want <= r.EndPort
 }
 
-// localCIDRMatches handles the empty case the way nebula does when the host
-// routes no unsafe networks, which is every host Orbit issues for today:
-// firewallLocalCIDR.addRule treats "" as "any" unless unsafe networks exist.
-func localCIDRMatches(localCIDR string, local netip.Addr) bool {
-	if localCIDR == "" || localCIDR == "any" {
+// localCIDRMatches mirrors nebula's firewallLocalCIDR.addRule (firewall.go:893).
+//
+// An omitted local_cidr means "any address" ONLY while the host routes no unsafe
+// networks; once it does, nebula narrows the rule to the host's own assigned
+// networks, and traffic the host is FORWARDING stops matching.
+//
+// This function used to return true unconditionally for the empty case, with the
+// justification "the way nebula does when the host routes no unsafe networks,
+// which is every host Orbit issues for today". That premise stopped being true
+// at enroll/service.go:660, which puts a gateway's routes into its certificate —
+// so on a gateway, `orbit why` reported ALLOW for rules nebula narrows and drops.
+// A diagnostic that fails open on the one host where the question is hardest is
+// worse than no diagnostic.
+// See docs/adr/0021-gateway-reachability-is-derived-from-routes.md.
+func localCIDRMatches(localCIDR string, local netip.Addr, own, unsafe []netip.Prefix) bool {
+	if localCIDR == "any" {
 		return true
+	}
+	if localCIDR == "" {
+		if len(unsafe) == 0 {
+			return true // nebula: flc.Any
+		}
+		// nebula: flc.LocalCIDR = assignedNetworks — this host's own addresses
+		// and nothing it routes.
+		for _, p := range own {
+			if p.Contains(local) {
+				return true
+			}
+		}
+		return false
 	}
 	p, err := netip.ParsePrefix(localCIDR)
 	if err != nil {

@@ -56,6 +56,7 @@ func Explain(eng *dataplane.Embedded, layout paths.Layout, req status.ExplainReq
 	// Identity: ours, from disk, because an expired certificate explains
 	// everything downstream of it and is invisible from a connectivity test.
 	var local netip.Addr
+	var ownNets, unsafeNets []netip.Prefix
 	if cs, err := status.ReadCertStatus(layout.Paths.Cert); err == nil {
 		ex.Certificate = cs
 		ex.CertExpired = cs.Expired(nowFunc())
@@ -64,6 +65,11 @@ func Explain(eng *dataplane.Embedded, layout paths.Layout, req status.ExplainReq
 				local = p.Addr()
 			}
 		}
+		ownNets = parsePrefixes(cs.Networks)
+		// The routed subnets, because their presence is what decides whether an
+		// omitted local_cidr means "any" or "my own addresses" — see
+		// fwmatch.localCIDRMatches.
+		unsafeNets = parsePrefixes(cs.UnsafeNetworks)
 	}
 
 	// Path.
@@ -113,13 +119,15 @@ func Explain(eng *dataplane.Embedded, layout paths.Layout, req status.ExplainReq
 	// whatever is to hand. Conflating "certificate known" with "issuer known" is
 	// exactly what made a ca_sha rule report a false allow.
 	q := fwmatch.Query{
-		PeerAddr:      peerAddr,
-		LocalAddr:     local,
-		Proto:         proto,
-		Port:          port,
-		PeerCertKnown: ex.PeerKnown,
-		PeerName:      ex.PeerName,
-		PeerGroups:    ex.PeerGroups,
+		PeerAddr:            peerAddr,
+		LocalAddr:           local,
+		LocalNetworks:       ownNets,
+		LocalUnsafeNetworks: unsafeNets,
+		Proto:               proto,
+		Port:                port,
+		PeerCertKnown:       ex.PeerKnown,
+		PeerName:            ex.PeerName,
+		PeerGroups:          ex.PeerGroups,
 	}
 	ex.Outbound = fwmatch.Decide(outbound, q)
 	ex.Inbound = fwmatch.Decide(inbound, q)
@@ -164,4 +172,20 @@ func containsPeer(peers []status.Peer, addr netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// parsePrefixes converts a certificate's string prefixes, dropping anything
+// unparseable rather than failing the whole explanation: a diagnostic that
+// refuses to run because one field is odd is a diagnostic nobody can use.
+func parsePrefixes(ss []string) []netip.Prefix {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := make([]netip.Prefix, 0, len(ss))
+	for _, s := range ss {
+		if p, err := netip.ParsePrefix(s); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }

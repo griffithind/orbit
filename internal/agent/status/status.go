@@ -254,9 +254,18 @@ func addrStrings(addrs []netip.Addr) []string {
 
 // CertStatus is the certificate as currently on disk.
 type CertStatus struct {
-	Name        string    `json:"name"`
-	Groups      []string  `json:"groups,omitempty"`
-	Networks    []string  `json:"networks,omitempty"`
+	Name     string   `json:"name"`
+	Groups   []string `json:"groups,omitempty"`
+	Networks []string `json:"networks,omitempty"`
+
+	// UnsafeNetworks are the subnets this host routes into the overlay.
+	//
+	// Load-bearing rather than informational: their PRESENCE changes what an
+	// omitted local_cidr means to nebula's firewall, from "any address" to "only
+	// this host's own". A diagnostic that cannot see them cannot model the
+	// gateway case, which is the case that is hardest to reason about by hand.
+	UnsafeNetworks []string `json:"unsafe_networks,omitempty"`
+
 	NotBefore   time.Time `json:"not_before"`
 	NotAfter    time.Time `json:"not_after"`
 	Fingerprint string    `json:"fingerprint,omitempty"`
@@ -284,6 +293,9 @@ func ReadCertStatus(path string) (*CertStatus, error) {
 	}
 	for _, n := range c.Networks() {
 		cs.Networks = append(cs.Networks, n.String())
+	}
+	for _, n := range c.UnsafeNetworks() {
+		cs.UnsafeNetworks = append(cs.UnsafeNetworks, n.String())
 	}
 	if fp, err := c.Fingerprint(); err == nil {
 		cs.Fingerprint = fp

@@ -44,9 +44,14 @@ type Membership struct {
 
 	// UnsafeNetworks are subnets this host routes into the overlay.
 	//
-	// Orbit does not issue certificates carrying these yet, so this is empty in
-	// practice, and it is modelled anyway because of a trap that only bites
-	// once it is not. When a rule's local_cidr is empty and the host HAS unsafe
+	// The trap this models BITES. It was written when Orbit issued no
+	// certificate carrying these — "so this is empty in practice, and it is
+	// modelled anyway because of a trap that only bites once it is not" — and
+	// enroll/service.go:660 made that premise false, at which point the trap
+	// caught the role path, which has no compiler to emit local_cidr for it.
+	// See widenForServedRoutes in internal/nebulacfg and ADR-0021.
+	//
+	// When a rule's local_cidr is empty and the host HAS unsafe
 	// networks and firewall.default_local_cidr_any is unset — Orbit never sets
 	// it — the rule applies ONLY to the host's own addresses and not to the
 	// subnets it routes (firewall.go, firewallLocalCIDR.addRule). A dst naming
