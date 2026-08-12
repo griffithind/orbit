@@ -145,11 +145,15 @@ func TestHostListBehindFilter(t *testing.T) {
 	}
 
 	// Both hosts must be enrolled or active to count toward convergence at all.
-	epochs := h.networkEpochs(t, ts.URL)
 	for _, membershipID := range []string{caughtUp.ID, behind.ID} {
 		id := uuid.MustParse(membershipID)
 		h.setState(t, id, store.MembershipActive)
 	}
+	// AFTER the transitions, not before. Entering the enrolled|active set is
+	// exactly what changes the topology every other host renders, so it bumps
+	// the config epoch (ADR-0022) — reading the epochs first left the "caught
+	// up" host reporting a number that was already stale.
+	epochs := h.networkEpochs(t, ts.URL)
 	h.reportAs(t, uuid.MustParse(caughtUp.ID), store.AgentReport{
 		ConfigEpoch: epochs.ConfigEpoch, BlocklistEpoch: epochs.BlocklistEpoch,
 	})

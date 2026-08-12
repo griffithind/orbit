@@ -269,7 +269,10 @@ func TestCLIPipedOutputStaysParseable(t *testing.T) {
 	h := setup(t)
 	ts := h.servePublicOnly(t, freeUDPPort(t))
 
-	long := "a-deliberately-long-host-name-that-would-be-truncated-on-any-terminal"
+	// Long enough to be truncated on any terminal, and still one DNS label:
+	// 63 characters is the label limit, and a membership name is a label
+	// (ADR-0029). This was 69 and only worked because nothing validated it.
+	long := "a-deliberately-long-host-name-that-would-be-truncated-on-a-term"
 	if code := h.createHost(t, ts.URL, membershipSpec{
 		NetworkID: h.netID.String(), Name: long, OverlayAddr: "10.42.76.1",
 		RoleID: h.roleID.String(),

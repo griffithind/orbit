@@ -274,12 +274,22 @@ func TestPushBeatsPolling(t *testing.T) {
 		t.Fatalf("boot watcher: %v", err)
 	}
 
-	st, _ := agent.ReadState(watcher.dir)
 	client := agent.NewClient(overlayURL)
 	client.HTTP = overlayHTTPClient(watcherNode)
 
 	// A host to block, so there is something to distribute.
 	victim := h.createAndEnroll(t, clientServer, "push-victim", "10.42.8.9", false, false, nil)
+
+	// The watch is parked at the network's CURRENT epochs, not at the ones the
+	// watcher held when it enrolled.
+	//
+	// Enrolling the victim moves it into the enrolled|active set, which is what
+	// every other host's topology is rendered from, so it advances the config
+	// epoch (ADR-0022). Parking at the watcher's own stale numbers meant the
+	// server answered immediately with a generation it already owed — and this
+	// test then measured that answer as the push, timing it at HALF A SECOND
+	// BEFORE the block it was supposed to be reacting to.
+	epochs := h.networkEpochs(t, clientServer.URL)
 
 	// Park a watch, then block and time the response.
 	type watchResult struct {
@@ -290,7 +300,7 @@ func TestPushBeatsPolling(t *testing.T) {
 	done := make(chan watchResult, 1)
 	go func() {
 		resp, err := client.Watch(context.Background(),
-			st.ConfigEpoch, st.BlocklistEpoch, 25*time.Second)
+			epochs.ConfigEpoch, epochs.BlocklistEpoch, 25*time.Second)
 		done <- watchResult{resp, err, time.Now()}
 	}()
 

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,7 +53,16 @@ func joinCmd(args []string) error {
 		if err != nil || h == "" {
 			return errors.New("-name is required: this machine's hostname could not be read")
 		}
-		*fl.name = h
+		// A membership name is one DNS label, and a hostname routinely is not:
+		// every Mac reports something.local, and plenty of Linux hosts report a
+		// full FQDN. Deriving the label here rather than refusing at the server
+		// keeps `orbit join` working with no flag on the machines people
+		// actually have. The server still validates — this is ergonomics, not
+		// the check. See ADR-0029.
+		*fl.name = labelFromHostname(h)
+		if *fl.name == "" {
+			return fmt.Errorf("-name is required: %q has no usable DNS label in it", h)
+		}
 	}
 
 	// P-256, always. See cmd/orbitd bootstrap: a network's curve is permanent,
@@ -269,4 +279,30 @@ func bindJoinCmd(fs *flag.FlagSet) joinCmdFlags {
 		code:    fs.String("code", "", "reservation code (or ORBIT_ENROLL_CODE). A valid one is pre-authorization: the membership is created with the name, address and role the operator reserved, instead of landing in the queue"),
 		dirFlag: fs.String("dir", "", "per-network directory (default "+paths.DefaultRoot+"/<network slug>)"),
 	}
+}
+
+// labelFromHostname reduces a hostname to the single DNS label a membership
+// name has to be.
+//
+// The first component, lowercased, with anything outside letters-digits-hyphen
+// dropped and the result trimmed of leading and trailing hyphens. "ik-m4.local"
+// becomes "ik-m4"; "web01.corp.example.com" becomes "web01".
+//
+// Truncated to 63 rather than refused: a machine whose hostname is longer than
+// a DNS label is a machine somebody still has to enrol, and 63 characters is
+// unambiguous enough to be worth keeping.
+func labelFromHostname(h string) string {
+	first, _, _ := strings.Cut(strings.TrimSpace(h), ".")
+	var b strings.Builder
+	for _, r := range strings.ToLower(first) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 63 {
+		out = strings.TrimRight(out[:63], "-")
+	}
+	return out
 }
