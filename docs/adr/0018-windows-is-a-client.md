@@ -24,10 +24,16 @@ build tags at all. The data plane is not the problem.
 What Windows lands on in *Orbit's* code is a set of fallbacks that satisfy interfaces and do
 nothing: `systemResolvers()` returns `nil`, `applyDNS` returns `ErrDNSUnsupported`, the host
 configurer returns `ErrHostStateUnsupported` for any non-empty state, `pinSocket` returns `nil`
-silently. Two files are not tagged at all and degrade quietly: `posture.go` reads
+silently. Two files are not tagged at all and degrade quietly. `posture.go` reads
 `/proc/sys/kernel/osrelease` and `/sys/block`, so every posture signal for a Windows device is
-permanently blank even though BitLocker, Secure Boot and TPM are all readable there; and
-`validate.go` looks for `nebula`, not `nebula.exe`.
+permanently blank even though BitLocker, Secure Boot and TPM are all readable there — and the
+blank OS *name* comes from `posture_other.go`, whose `!darwin` tag puts Windows on the Linux
+path reading `/etc/os-release`. And `validate.go` never runs `nebula -test` — not because it
+looks for `nebula` rather than `nebula.exe`, since Go's `LookPath` appends `PATHEXT` and would
+find the `.exe`, but because no `nebula.exe` is shipped in any Orbit artifact. `LookPath`
+returns `ErrNotFound`, `Validate` returns `ErrValidationUnavailable`, and by design that must
+not block an apply. On Linux an unvalidated apply is an operator omission; on Windows it would
+be the shipped default.
 
 Four findings decide the scope.
 
@@ -53,14 +59,19 @@ dance is intact. But `os.Chmod(path, 0o600)` on Windows only clears the read-onl
 the comment at `status.go:50-55` — "0600: root only… on a shared machine that is a map of the
 estate" — is false there. Separately, `status.go:477` tests `errors.Is(err,
 syscall.ECONNREFUSED)`; on Windows that constant is an invented `APPLICATION_ERROR + iota`
-value the OS never returns, so the branch is dead and every CLI command loses its "the agent is
-not running" path.
+value the OS never returns, so that half of the branch is dead. The `os.ErrNotExist` half on
+the same line does work — Go maps `ERROR_FILE_NOT_FOUND` — so what is lost is the *present but
+unserved* socket, which is precisely the state `listenUnix`'s stale-socket dance creates.
 
 **Paths are POSIX and signed that way.** `DefaultRoot` is `nebulacfg.AuthoritativeRoot` =
 `/var/lib/orbit`, which on Windows becomes `C:\var\lib\orbit`. The control plane renders
 config paths with `path.Join` (always `/`) and the agent rewrites them with `filepath.Join`
 (`\` on Windows) in `localize`, then `verifyconfig.go` re-runs `localize` and compares
-byte-for-byte. It round-trips today; nothing tests that it does.
+byte-for-byte. It round-trips today, and `internal/agent/paths/contract_test.go:22-47` is the test holding the
+two `DirFor` functions to one answer — but it does so by pinning POSIX string literals, so on
+Windows it fails rather than proving anything. The round-trip survives because Windows paths
+pass through YAML as unquoted plain scalars: it works by luck of quoting rather than by
+construction.
 
 ## Decision
 
@@ -89,7 +100,10 @@ uninstall are symmetric; a per-`GOOS` `DefaultRoot` with a round-trip test for
 `localize`/`verifyconfig`; adding `windows/amd64` to the release matrix and shipping
 `wintun.dll` in `dist\windows\wintun\bin\<arch>\` **next to `orbit.exe`** — because
 `checkWinTunExists` resolves it from `os.Executable()`, which under an embedded data plane is
-Orbit's binary, not nebula's; real DACLs in place of the meaningless `0o600`; a named pipe with
+Orbit's binary, not nebula's; real DACLs in place of the `0o600` calls — which are not merely inert: `0600` has `S_IWRITE`
+set, so on Windows the call takes the clear-read-only branch and makes the object *more*
+accessible, and the same call governs `host.key` (`generation/apply.go:769`) and `device.key`
+(`device/identity.go:237`), a strictly worse exposure than the socket; a named pipe with
 an Administrators-only SDDL for the status socket, plus the two-line `ECONNREFUSED` fix; an
 elevation check whose message says Administrator, not root; and Authenticode signing with an
 MSI or winget package.
@@ -142,8 +156,9 @@ SmartScreen reputation. Tailscale sidesteps most of the driver-signing burden by
 wintun.net's separately-licensed prebuilt DLL, and so do we, via the vendored copy — but our
 own binary still needs signing, and that has procurement lead time that nothing else here does.
 
-We are committed to a fifth platform in ADR-0017's gate loop being a platform we *ship*, which
-converts "type-checks" into a claim made to users. The gaps that ADR leaves open — no
+Windows is already the fourth `GOOS` in ADR-0017's gate loop; what changes is that it becomes a
+*release target*, the fifth in a matrix that ships four. That converts "type-checks" into a
+claim made to users. The gaps that ADR leaves open — no
 execution of platform tests in CI — become materially more expensive the day a Windows artifact
 is published. A Windows CI job is not on the blocking list above and should be.
 

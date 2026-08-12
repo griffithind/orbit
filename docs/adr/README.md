@@ -57,3 +57,19 @@ Do **not** write one for a refactor, a naming choice, or a decision with an obvi
 | [0016](0016-the-exit-route-fails-closed.md) | The exit route fails closed | Proposed |
 | [0017](0017-every-platform-we-tag-for-is-a-platform-we-check.md) | Every platform we tag for is a platform the gates analyse | Proposed |
 | [0018](0018-windows-is-a-client.md) | Windows is a client, and nothing else | Proposed |
+| [0019](0019-no-dynamic-app-connectors.md) | No dynamic app connectors; route sets instead | Proposed |
+| [0020](0020-one-network-owns-the-host.md) | Host-global resources have exactly one owner | Proposed |
+| [0021](0021-gateway-reachability-is-derived-from-routes.md) | A gateway's inbound reachability is derived from its routes | Proposed |
+| [0022](0022-what-a-host-renders-bumps-the-config-epoch.md) | Anything that changes what a host renders bumps the config epoch | Proposed |
+| [0023](0023-blocking-a-device-stops-issuance.md) | Blocking a device stops issuance to it | Proposed |
+| [0024](0024-one-enrollment-door.md) | One enrolment door, and it proves possession | Proposed |
+| [0025](0025-quarantine-does-not-gate-revocation.md) | Quarantine does not gate revocation | Proposed |
+| [0026](0026-a-process-that-disagrees-with-the-schema-refuses-to-serve.md) | A process that disagrees with the schema refuses to serve | Proposed |
+| [0027](0027-a-restore-is-a-rehearsed-procedure.md) | A restore is a rehearsed procedure, not a list of files | Proposed |
+| [0028](0028-a-gateway-is-not-a-router-to-its-own-lan.md) | A gateway is not a router to its own LAN | Proposed |
+| [0029](0029-the-resolver-is-authoritative-for-its-own-domain.md) | The resolver is authoritative for its own domain | Proposed |
+| [0030](0030-the-forwarder-is-a-real-forwarder.md) | The forwarder is a real forwarder | Proposed |
+| [0031](0031-clock-skew-is-measured-not-inferred.md) | Clock skew is measured, not inferred | Proposed |
+| [0032](0032-discovery-survives-the-lighthouse.md) | Discovery survives the lighthouse | Proposed |
+| [0033](0033-overrides-cannot-reach-what-orbit-owns.md) | Overrides cannot reach what Orbit owns | Proposed |
+| [0034](0034-the-gateway-data-path-is-tested.md) | The gateway data path is tested, not just rendered | Proposed |

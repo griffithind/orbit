@@ -32,7 +32,13 @@ is what keeps that from becoming a loop" is false.
 
 **Interception outlives the process on macOS.** `/etc/resolver/<domain>` and the scutil key
 `State:/Network/Service/orbit/DNS` (`dnsapply_darwin.go:32-36`) are written to the system and
-removed only by `orbit uninstall`. A SIGKILL — OOM killer, `systemctl kill -s KILL`, power
+removed by nothing an operator can invoke. `orbit uninstall` does not remove them: it disables
+the service, calls `hostcfg.NewHostConfigurer(...).Remove()` — which is the policy route, the
+forward permission and the nftables table, and touches no DNS
+(`hostcfg/hoststate_linux.go:132-141`) — and deletes the directory. The only call site of the
+resolver's `remove` in the whole tree is the `Empty()` branch of `Apply` (`dns.go:200`), which a
+host being uninstalled never reaches. So the interception survives a clean, deliberate,
+successful uninstall as well as a crash. A SIGKILL — OOM killer, `systemctl kill -s KILL`, power
 loss — leaves them. On an exit-node host that scutil key is the *global* resolver, pointing at
 an overlay address that no longer exists, so a hard-killed agent leaves a Mac unable to resolve
 anything at all. Linux self-heals here only by accident: `resolvectl` settings hang off the tun
@@ -62,12 +68,14 @@ or when the platform reports it as belonging to the link Orbit configured. The c
 address-identity check is kept as one of the three, not as the whole guard, because it is the
 one that can never fire on the platform that needs it most.
 
-**Teardown runs at startup, unconditionally, before anything is applied.** The agent removes
+**Teardown runs at startup, unconditionally, before anything is applied — and on uninstall.** The agent removes
 the resolver settings it knows how to write — `/etc/resolver` entries, the scutil key, the
 resolved link configuration — by name, whether or not it believes it installed them, and
 whether or not this run intends to reinstall them. A stop hook (`ExecStopPost`) is added too,
 but the startup sweep is the part that matters: a stop hook cannot run for a process that was
-killed, and that is the case producing the unresolvable Mac.
+killed, and that is the case producing the unresolvable Mac. `orbit uninstall` calls the same
+sweep, which it does not do today at all — an omission worth naming separately, because it is
+the one path where the operator explicitly asked for the machine to be put back.
 
 ## Alternatives considered
 
