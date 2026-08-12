@@ -17,7 +17,7 @@ package hostcfg
 type unsupportedConfigurer struct{}
 
 // NewHostConfigurer returns a configurer that refuses to act as a gateway.
-func NewHostConfigurer(log logger) HostConfigurer { return unsupportedConfigurer{} }
+func NewHostConfigurer(logger, string) HostConfigurer { return unsupportedConfigurer{} }
 
 func (unsupportedConfigurer) Describe() string { return "unsupported on this platform" }
 

@@ -58,12 +58,35 @@ func WarnInstanceCollisions(l paths.Layout, log *slog.Logger) {
 				"only one of the two nebula processes will create it",
 				"network", l.Network, "otherNetwork", e.Name(), "device", mine.dev)
 		}
+
+		// The resources that actually thrash.
+		//
+		// The two checks above are for port and device, which CANNOT collide
+		// silently: a second nebula fails loudly to bind or create them. Host
+		// state is the opposite — the nftables table, the route table and the ip
+		// rule are named once per machine, so two networks that both want them
+		// used to overwrite each other once per reconcile with both Apply calls
+		// reporting success. One of them now refuses instead (see
+		// hostcfg/owner.go); warning at startup is how an operator learns why
+		// before wondering where their forwarding went.
+		if mine.hostState && theirs.hostState {
+			log.Warn("another network on this host also configures host state; "+
+				"only one of them will, because the nftables table and the policy "+
+				"route are named once per machine",
+				"network", l.Network, "otherNetwork", e.Name())
+		}
 	}
 }
 
 type membershipSettings struct {
 	port int
 	dev  string
+
+	// hostState is whether this network asks for anything host-global —
+	// forwarding, masquerade, or an exit route. Read from the rendered config
+	// rather than from what was applied, because the warning is for startup,
+	// before anything has been applied.
+	hostState bool
 }
 
 func readHostSettings(path string) (membershipSettings, bool) {
@@ -78,10 +101,26 @@ func readHostSettings(path string) (membershipSettings, bool) {
 		Tun struct {
 			Dev string `yaml:"dev"`
 		} `yaml:"tun"`
+		Orbit struct {
+			Forward  bool `yaml:"forward"`
+			ExitNode bool `yaml:"exit_node"`
+			Serves   []struct {
+				Masquerade bool `yaml:"masquerade"`
+			} `yaml:"serves"`
+		} `yaml:"orbit"`
 	}
 	if err := yaml.Unmarshal(b, &doc); err != nil {
 		return membershipSettings{}, false
 	}
+	// The same predicate HostState.Empty uses, read from the rendered document:
+	// a network wants host state when it forwards, when it consumes an exit
+	// route, or when it masquerades for anything.
+	hostState := doc.Orbit.Forward || doc.Orbit.ExitNode
+	for _, sv := range doc.Orbit.Serves {
+		if sv.Masquerade {
+			hostState = true
+		}
+	}
 	// Port 0 means "any", which cannot collide.
-	return membershipSettings{port: doc.Listen.Port, dev: doc.Tun.Dev}, true
+	return membershipSettings{port: doc.Listen.Port, dev: doc.Tun.Dev, hostState: hostState}, true
 }

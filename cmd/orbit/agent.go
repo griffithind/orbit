@@ -733,7 +733,7 @@ func newNetworkLoop(ctx context.Context, dir string, c cert.Curve, verifyURL str
 	loop := &agent.Loop{
 		Client:  agent.NewClient(st.ControlURL()),
 		Applier: applier,
-		Host:    hostcfg.NewHostConfigurer(nlog),
+		Host:    hostcfg.NewHostConfigurer(nlog, layout.Network),
 		DNS:     hostcfg.NewResolver(nlog),
 		Policy:  agent.DefaultRenewalPolicy(),
 		Layout:  layout,

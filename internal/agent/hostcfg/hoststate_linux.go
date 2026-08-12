@@ -39,6 +39,14 @@ const nftFamily = "inet"
 type nftConfigurer struct {
 	log logger
 
+	// network is this configurer's slug, and it is what decides whether this
+	// one may write the host-global objects at all. See owner.go.
+	network string
+
+	// refused is the last thing we told the operator about not owning host
+	// state, so the message appears on a transition rather than every minute.
+	refused bool
+
 	// tunDev is remembered from the last Apply so Remove can undo the firewall
 	// frontend's interface assignment. Uninstall has no HostState to read, and
 	// the alternative — leaving the tun in firewalld's trusted zone forever — is
@@ -52,7 +60,9 @@ type logger interface {
 }
 
 // NewHostConfigurer returns the Linux implementation.
-func NewHostConfigurer(log logger) HostConfigurer { return &nftConfigurer{log: log} }
+func NewHostConfigurer(log logger, network string) HostConfigurer {
+	return &nftConfigurer{log: log, network: network}
+}
 
 func (n *nftConfigurer) Describe() string { return "nftables table " + nftFamily + " " + TableName }
 
@@ -62,8 +72,29 @@ func (n *nftConfigurer) Apply(h HostState) error {
 		// than doing nothing: a machine that stops advertising a route must
 		// stop forwarding for it, and leaving the rules would keep a path open
 		// that the control plane believes is closed.
+		//
+		// And give the claim up, so a network that stops needing host state
+		// stops standing in the way of one that does.
+		releaseHostState(n.network)
+		n.refused = false
 		return n.Remove()
 	}
+
+	// One owner for objects that have one name. Without this, two networks that
+	// both want host state destroy and rebuild each other's rules once per
+	// reconcile, forever, with both Apply calls reporting success.
+	ok, held := claimHostState(n.network)
+	if !ok {
+		if !n.refused && n.log != nil {
+			n.log.Warn("not applying host state: another network on this machine owns it",
+				"network", n.network, "owner", held,
+				"detail", "the nftables table, the route table and the ip rule are named "+
+					"once per machine, not once per network")
+		}
+		n.refused = true
+		return nil
+	}
+	n.refused = false
 	// Policy routing first, because it is what a CLIENT of an exit node needs
 	// and a client is not a gateway: it forwards nothing, it NATs nothing, and
 	// it may have no nft on the machine at all.
