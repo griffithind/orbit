@@ -261,6 +261,22 @@ func (t *Tx) SetExitRoute(ctx context.Context, membershipID uuid.UUID, routeID *
 			return fmt.Errorf("%w: route %s is %s, which is not a default route; "+
 				"an exit node offers 0.0.0.0/0 or ::/0", ErrInvalid, routeID, prefix)
 		}
+
+		// BOTH FAMILIES, or neither.
+		//
+		// exit_route_id is a single uuid and a gateway offering both 0.0.0.0/0
+		// and ::/0 produces two route rows, so a consumer could select exactly
+		// one. On a dual-stack host that meant "use this exit node" silently
+		// delivered v4 through the tunnel and v6 in the clear — a privacy
+		// feature failing open, in the direction nobody checks.
+		//
+		// Refused here rather than papered over, because there is no way to
+		// express the pair in one row: the operator either adds the missing
+		// default route to that gateway or accepts a single-family mesh.
+		// See docs/adr/0016-the-exit-route-fails-closed.md.
+		if err := t.exitRouteCoversBothFamilies(ctx, membershipID, routeID, prefix); err != nil {
+			return err
+		}
 	}
 
 	tag, err := t.tx.Exec(ctx,
@@ -336,4 +352,63 @@ func (t *Tx) DefaultRoutes(ctx context.Context, networkID uuid.UUID) ([]Route, e
 		}
 	}
 	return out, nil
+}
+
+// exitRouteCoversBothFamilies refuses a selection that would tunnel one address
+// family and leak the other.
+//
+// Scoped to the families this membership actually HAS. A v4-only host choosing
+// a v4-only exit node has nothing to leak, and refusing it would be a rule
+// getting in the way of the common case.
+func (t *Tx) exitRouteCoversBothFamilies(
+	ctx context.Context, membershipID uuid.UUID, routeID *uuid.UUID, chosen netip.Prefix,
+) error {
+	var hasV4, hasV6 bool
+	rows, err := t.tx.Query(ctx,
+		`SELECT addr FROM orbit.membership_address WHERE membership_id = $1`, membershipID)
+	if err != nil {
+		return mapErr(err, "read membership addresses")
+	}
+	for rows.Next() {
+		var a netip.Addr
+		if err := rows.Scan(&a); err != nil {
+			rows.Close()
+			return mapErr(err, "read membership addresses")
+		}
+		if a.Is4() {
+			hasV4 = true
+		} else {
+			hasV6 = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return mapErr(err, "read membership addresses")
+	}
+	if !hasV4 || !hasV6 {
+		return nil // single-family host: nothing to leak
+	}
+
+	// The gateway offering the chosen route must offer the other family too.
+	var siblings int
+	if err := t.tx.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM orbit.route r
+		  JOIN orbit.route chosen ON chosen.membership_id = r.membership_id
+		 WHERE chosen.id = $1
+		   AND masklen(r.prefix) = 0
+		   AND family(r.prefix) <> family(chosen.prefix)`, routeID).Scan(&siblings); err != nil {
+		return mapErr(err, "read exit route siblings")
+	}
+	if siblings == 0 {
+		missing := "::/0"
+		if chosen.Addr().Is6() {
+			missing = "0.0.0.0/0"
+		}
+		return fmt.Errorf("%w: this host has both an IPv4 and an IPv6 overlay address, "+
+			"and that gateway offers only %s. Selecting it would send IPv4 through the "+
+			"tunnel and IPv6 in the clear. Add %s to the same gateway first",
+			ErrInvalid, chosen, missing)
+	}
+	return nil
 }
