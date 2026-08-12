@@ -41,7 +41,8 @@ decision is in force; it says nothing about whether the code has caught up.
 that landed it says which part is not — 0016 has its fail-closed rule and its
 address-family check but not the blackhole or the escape-hatch bootstrap, 0027
 has bring-up but no rehearsed restore, 0031 measures skew but does not report
-it, 0032 has the config half and not the endpoint cache, 0034 has the masquerade default,
+it, 0030 has concurrent upstreams, TCP escalation and re-assertion but no cache,
+0032 has the config half and not the endpoint cache, 0034 has the masquerade default,
 the MSS clamp and ruleset assertions, but not the netns forwarding test that
 would catch a rule that is present and wrong.
 
@@ -82,7 +83,7 @@ eight engineer-weeks before signing.
 | [0027](0027-a-restore-is-a-rehearsed-procedure.md) | A restore is a rehearsed procedure, not a list of files | Accepted | Partial |
 | [0028](0028-a-gateway-is-not-a-router-to-its-own-lan.md) | A gateway is not a router to its own LAN | Accepted | Not started |
 | [0029](0029-the-resolver-is-authoritative-for-its-own-domain.md) | The resolver is authoritative for its own domain | Accepted | Not started |
-| [0030](0030-the-forwarder-is-a-real-forwarder.md) | The forwarder is a real forwarder | Accepted | Not started |
+| [0030](0030-the-forwarder-is-a-real-forwarder.md) | The forwarder is a real forwarder | Accepted | Partial |
 | [0031](0031-clock-skew-is-measured-not-inferred.md) | Clock skew is measured, not inferred | Accepted | Partial |
 | [0032](0032-discovery-survives-the-lighthouse.md) | Discovery survives the lighthouse | Accepted | Partial |
 | [0033](0033-overrides-cannot-reach-what-orbit-owns.md) | Overrides cannot reach what Orbit owns | Accepted | Implemented |

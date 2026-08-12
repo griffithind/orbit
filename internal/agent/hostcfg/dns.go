@@ -1,6 +1,7 @@
 package hostcfg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -171,6 +172,17 @@ type Resolver struct {
 	state    DNSState
 	upstream []string
 
+	// upstreamAt is when the list was last read, and it is what makes roaming
+	// work. The list used to be captured once per process and kept forever —
+	// deliberately, as the defence against forwarding to ourselves — so a laptop
+	// that captured 192.168.1.1 at home forwarded there in the café until the
+	// agent restarted, which under Restart=always it does not.
+	//
+	// Re-reading is safe now because the guard tests what an upstream IS rather
+	// than whose address it is: resolved's own per-link list, loopback refused,
+	// our own addresses refused. See ADR-0013 and ADR-0030.
+	upstreamAt time.Time
+
 	servers []*dns.Server
 	current string // the applied state's String(), to skip no-op reconciles
 
@@ -181,9 +193,51 @@ type Resolver struct {
 	remove func(dev, domain string) error
 }
 
+// upstreamTTL is how long a captured resolver list is trusted.
+//
+// Long enough that this is not a per-query cost and short enough that moving
+// networks is a coffee-length inconvenience rather than a reboot. The read is
+// one exec of resolvectl or scutil.
+const upstreamTTL = 5 * time.Minute
+
+// forwardTimeout bounds one upstream exchange, and forwardStagger is how long
+// the second upstream waits before joining in.
+//
+// The stagger keeps the common case — the first resolver answers — from
+// multiplying every query on the machine by the number of resolvers it has,
+// while a dead first upstream costs 150ms rather than the whole timeout.
+const (
+	forwardTimeout = 4 * time.Second
+	forwardStagger = 150 * time.Millisecond
+)
+
 // NewResolver returns a resolver that is not yet listening.
 func NewResolver(log logger) *Resolver {
 	return &Resolver{log: log, apply: applyDNS, remove: removeDNS}
+}
+
+// refreshUpstreams re-reads the machine's resolvers when the list has aged out.
+//
+// Called from the reconcile path, not from the query path: a lookup must never
+// block on an exec, and a list that is five minutes stale answers correctly for
+// every host that has not moved — which is all of them, nearly all the time.
+func (r *Resolver) refreshUpstreams() {
+	r.mu.RLock()
+	fresh := time.Since(r.upstreamAt) < upstreamTTL && len(r.upstream) > 0
+	r.mu.RUnlock()
+	if fresh {
+		return
+	}
+	found := systemResolvers()
+	if len(found) == 0 {
+		// Keep what we had. An empty read is "could not tell" — a resolvectl
+		// that failed, a scutil that returned nothing — and adopting it would
+		// turn a transient hiccup into a host that forwards nowhere.
+		return
+	}
+	r.mu.Lock()
+	r.upstream, r.upstreamAt = found, time.Now()
+	r.mu.Unlock()
 }
 
 // Apply makes the state true, restarting the listener if the address changed.
@@ -198,6 +252,25 @@ func (r *Resolver) Apply(d DNSState) error {
 		r.mu.Lock()
 		r.state = d
 		r.mu.Unlock()
+
+		// AND THE OS IS RE-ASSERTED, which this branch used to skip.
+		//
+		// resolved keeps DNS settings per LINK, so everything Orbit sets hangs
+		// off the tun device — and when nebula restarts, the device is destroyed
+		// and recreated and every setting goes with it. The config string is
+		// unchanged, so this branch returned, and the machine silently stopped
+		// being pointed at its resolver until the config epoch happened to move.
+		//
+		// It contradicted the principle stated two files over: configcheck.go,
+		// "repair and confirm are the same operation", and loop.go, host rules
+		// "have to be re-asserted rather than assumed". Host state re-applies
+		// wholesale every cycle; DNS had opted out.
+		// See docs/adr/0030-the-forwarder-is-a-real-forwarder.md.
+		if err := r.apply(d.TunDev, d.Domain, d.Listen.String(), d.Global); err != nil &&
+			!errors.Is(err, ErrDNSUnsupported) {
+			r.log.Warn("could not re-assert this machine's resolver settings", "error", err)
+		}
+		r.refreshUpstreams()
 		return nil
 	}
 	if d.Empty() {
@@ -225,6 +298,7 @@ func (r *Resolver) Apply(d DNSState) error {
 	r.mu.Lock()
 	if len(r.upstream) == 0 {
 		r.upstream = systemResolvers()
+		r.upstreamAt = time.Now()
 	}
 	r.state = d
 	up := len(r.upstream)
@@ -351,24 +425,125 @@ func (r *Resolver) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 }
 
 // forward passes a query to the resolvers this machine had before we changed them.
+// forward asks the machine's real resolvers, concurrently, and escalates.
+//
+// The previous version was a sequential loop that accepted on `err == nil &&
+// resp != nil` — regardless of rcode. Three properties fell out of that, and
+// each is a way for a name to fail to resolve on a machine whose DNS Orbit has
+// taken over:
+//
+//   - A SERVFAIL or REFUSED from the first upstream was relayed to the client
+//     and the second was never consulted.
+//   - Three dead upstreams cost twelve seconds of client wall time.
+//   - It was UDP only, with no escape: dns.Client with Net unset defaults to
+//     udp and miekg documents that Exchange "does not retry a failed query, nor
+//     will it fall back to TCP in case of truncation". Orbit's own TCP listener
+//     forwarded over UDP too, so a client that saw TC and escalated got the same
+//     truncated answer with nowhere left to go.
+//
+// See docs/adr/0030-the-forwarder-is-a-real-forwarder.md.
 func (r *Resolver) forward(w dns.ResponseWriter, req *dns.Msg) {
 	r.mu.RLock()
 	up := r.upstream
 	r.mu.RUnlock()
 
-	c := &dns.Client{Timeout: 4 * time.Second}
-	for _, server := range up {
-		resp, _, err := c.Exchange(req, server)
-		if err == nil && resp != nil {
-			_ = w.WriteMsg(resp)
-			return
-		}
+	if len(up) == 0 {
+		r.refuse(w, req)
+		return
 	}
 
-	// Every upstream failed, or there were none. SERVFAIL rather than silence:
-	// a client that gets no answer waits out its own timeout on every lookup,
-	// which reads as "the network is slow" rather than "DNS is broken".
+	type answer struct {
+		msg *dns.Msg
+		err error
+	}
+	// Buffered for every upstream, so a late responder never blocks on a send
+	// nobody is reading — this function returns as soon as it has an answer.
+	results := make(chan answer, len(up))
+
+	ctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
+	defer cancel()
+
+	for i, server := range up {
+		go func(i int, server string) {
+			// Staggered rather than simultaneous. The first upstream is almost
+			// always the right one, and firing all of them at once would
+			// multiply every query on the machine's real resolvers by the number
+			// of them it has.
+			if d := time.Duration(i) * forwardStagger; d > 0 {
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					return
+				}
+			}
+			msg, err := exchange(ctx, req, server)
+			select {
+			case results <- answer{msg, err}:
+			case <-ctx.Done():
+			}
+		}(i, server)
+	}
+
+	var soft *dns.Msg // best refusal seen, in case nothing better arrives
+	for range up {
+		select {
+		case a := <-results:
+			if a.err != nil || a.msg == nil {
+				continue
+			}
+			// SERVFAIL and REFUSED are SOFT: an upstream that will not answer is
+			// not the same as an answer, and a slower resolver may still know.
+			// Kept as a fallback so a client still gets a real rcode if every
+			// upstream refuses.
+			if rc := a.msg.Rcode; rc == dns.RcodeServerFailure || rc == dns.RcodeRefused {
+				if soft == nil {
+					soft = a.msg
+				}
+				continue
+			}
+			_ = w.WriteMsg(a.msg)
+			return
+		case <-ctx.Done():
+			goto done
+		}
+	}
+done:
+	if soft != nil {
+		_ = w.WriteMsg(soft)
+		return
+	}
+	r.refuse(w, req)
+}
+
+// refuse answers SERVFAIL rather than nothing.
+//
+// A client that gets no answer waits out its own timeout on every lookup, which
+// reads as "the network is slow" rather than "DNS is broken".
+func (r *Resolver) refuse(w dns.ResponseWriter, req *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(req, dns.RcodeServerFailure)
 	_ = w.WriteMsg(m)
+}
+
+// exchange asks one upstream, over UDP, and retries over TCP if the answer came
+// back truncated.
+//
+// The escalation is the point. Without it Orbit's TCP listener was decoration:
+// a client that received TC and reconnected over TCP got the same truncated
+// answer, because this side forwarded over UDP either way.
+func exchange(ctx context.Context, req *dns.Msg, server string) (*dns.Msg, error) {
+	udp := &dns.Client{Net: "udp", Timeout: forwardTimeout}
+	msg, _, err := udp.ExchangeContext(ctx, req, server)
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil || !msg.Truncated {
+		return msg, nil
+	}
+	tcp := &dns.Client{Net: "tcp", Timeout: forwardTimeout}
+	full, _, terr := tcp.ExchangeContext(ctx, req, server)
+	if terr != nil || full == nil {
+		return msg, nil // the truncated answer beats no answer
+	}
+	return full, nil
 }
