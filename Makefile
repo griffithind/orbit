@@ -94,6 +94,15 @@ check: ## gofmt + vet + test
 	go vet ./...
 	go test ./... -count=1
 
+# The other half of ADR-0007's quarterly rehearsal. check-break-glass proves the
+# credential still works; this proves the backup still restores — and the
+# failures it exists for are not "it stopped working" but things that were never
+# going to work, every one of them found by reading rather than by trying.
+.PHONY: check-restore
+check-restore: ## Restore the backup into a scratch database and prove it opens
+	@ORBIT_DSN="$$ORBIT_DSN" ORBITD="$${ORBITD:-go run ./cmd/orbitd}" \
+		sh scripts/check-restore.sh
+
 .PHONY: check-break-glass
 check-break-glass: ## Verify the break-glass token still works (see docs/deployment.md 5)
 	@ORBIT_BREAK_GLASS="$$ORBIT_BREAK_GLASS" ORBIT_URL="$${ORBIT_URL:-http://localhost:8080}" \

@@ -963,6 +963,20 @@ see `docs/adr/0026-a-process-that-disagrees-with-the-schema-refuses-to-serve.md`
 `orbitd doctor` compares the applied migration set to the bundled one by name,
 and says which side is ahead.
 
+**Rehearse the restore quarterly**, alongside `make check-break-glass`:
+
+```bash
+ORBIT_DSN=postgres://postgres@localhost/orbit \
+ORBIT_KEK_PASSPHRASE_FILE=./kek.pass make check-restore
+```
+
+It dumps read-only, restores into a scratch database it creates and drops, and
+proves two things a written procedure cannot: that the schema this binary
+expects is what comes back, and that the vault opens with the passphrase **and
+Argon parameters you actually have**. A correct passphrase with a mismatched
+`ORBIT_KEK_ARGON_MEMORY_MIB` fails exactly like a wrong one — that is why the
+parameter is in the backup set above, and finding it out here is the point.
+
 Migrations are forward-only by design: a down migration against a database
 holding certificate state loses an audit trail rather than recovering anything.
 
